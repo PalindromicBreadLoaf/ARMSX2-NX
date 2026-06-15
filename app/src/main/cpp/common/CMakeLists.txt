@@ -161,6 +161,12 @@ elseif(APPLE)
 		"-framework Foundation"
 		"-framework IOKit"
 	)
+elseif(HORIZON)
+	target_sources(common PRIVATE
+		Horizon/HorizonHostSys.cpp
+		Horizon/HorizonThreads.cpp
+		Horizon/HorizonMisc.cpp
+	)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp
