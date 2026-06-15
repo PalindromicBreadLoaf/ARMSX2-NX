@@ -40,6 +40,10 @@ namespace
 	std::mutex s_code_mutex;
 	std::map<u8*, HorizonCodeMapping> s_code_mappings;
 
+	std::mutex s_shm_mutex;
+	std::map<void*, size_t> s_shm_handles;            // backing pointer -> size
+	std::map<void*, HorizonMapping> s_shm_mappings;   // mapped base -> {borrowed src, size}
+
 	const HorizonCodeMapping* FindCodeMapping(const void* ptr)
 	{
 		if (s_code_mappings.empty())
@@ -184,25 +188,69 @@ std::string HostSys::GetFileMappingName(const char* prefix)
 	return prefix;
 }
 
-// Fastmem doesn't really work on Horizon, so these are pretty well
-// just no-ops to make the compiler happy
-
 void* HostSys::CreateSharedMemory(const char* name, size_t size)
 {
-	return nullptr;
+	void* const backing = memalign(__pagesize, size);
+	if (!backing)
+		return nullptr;
+	std::memset(backing, 0, size);
+
+	std::lock_guard lock(s_shm_mutex);
+	s_shm_handles.emplace(backing, size);
+	return backing;
 }
 
 void HostSys::DestroySharedMemory(void* ptr)
 {
+	std::lock_guard lock(s_shm_mutex);
+	if (s_shm_handles.erase(ptr) > 0)
+		free(ptr);
 }
 
 void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size_t size, const PageProtectionMode& mode)
 {
-	return nullptr;
+	if (mode.CanExecute())
+	{
+		Console.Error("HostSys::MapSharedMemory: executable shared mappings are unsupported on Horizon");
+		return nullptr;
+	}
+
+	u8* const src = static_cast<u8*>(handle) + offset;
+
+	virtmemLock();
+	void* dst = baseaddr ? baseaddr : virtmemFindAslr(size, 0);
+	const Result rc = dst ? svcMapMemory(dst, src, size) : MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
+	virtmemUnlock();
+
+	if (!dst || R_FAILED(rc))
+		return nullptr;
+
+	const u32 prot = HorizonProt(mode);
+	if (prot != Perm_Rw)
+		svcSetMemoryPermission(dst, size, prot);
+
+	std::lock_guard lock(s_shm_mutex);
+	s_shm_mappings.emplace(dst, HorizonMapping{src, size});
+	return dst;
 }
 
 void HostSys::UnmapSharedMemory(void* baseaddr, size_t size)
 {
+	std::unique_lock lock(s_shm_mutex);
+	const auto it = s_shm_mappings.find(baseaddr);
+	if (it == s_shm_mappings.end())
+		return;
+
+	void* const src = it->second.src; // borrowed. owned by the handle. do not free
+	const size_t mapped_size = it->second.size;
+	s_shm_mappings.erase(it);
+	lock.unlock();
+
+	svcSetMemoryPermission(baseaddr, mapped_size, Perm_Rw);
+
+	virtmemLock();
+	svcUnmapMemory(baseaddr, src, mapped_size);
+	virtmemUnlock();
 }
 
 size_t HostSys::GetRuntimePageSize()

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// Copyright (c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
 /*
@@ -1394,14 +1395,21 @@ bool vtlb_Core_Alloc()
 	s_fastmem_area = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);
 	if (!s_fastmem_area)
 	{
+#if defined(__SWITCH__)
+		Console.Warning("Fastmem area unavailable.");
+#else
 		Host::ReportErrorAsync("Error", "Failed to allocate fastmem area");
 		return false;
+#endif
 	}
 
-	s_fastmem_virtual_mapping.resize(FASTMEM_PAGE_COUNT, NO_FASTMEM_MAPPING);
-	vtlbdata.fastmem_base = (uptr)s_fastmem_area->BasePointer();
-	DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
-		vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
+	if (s_fastmem_area)
+	{
+		s_fastmem_virtual_mapping.resize(FASTMEM_PAGE_COUNT, NO_FASTMEM_MAPPING);
+		vtlbdata.fastmem_base = (uptr)s_fastmem_area->BasePointer();
+		DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
+			vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
+	}
 
 	Error error;
 	if (!PageFaultHandler::Install(&error))
