@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
-// Copyright (c): PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
+// Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/Pcsx2Types.h"
