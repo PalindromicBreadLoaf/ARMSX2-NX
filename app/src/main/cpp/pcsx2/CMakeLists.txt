@@ -8,6 +8,12 @@ if(ANDROID)
 		"PCSX2_CORE=1"
 		"DISABLE_RECORDING"
 	)
+elseif(HORIZON)
+	add_library(PCSX2)
+	target_compile_definitions(PCSX2_FLAGS INTERFACE
+		"PCSX2_CORE=1"
+		"DISABLE_RECORDING"
+	)
 else()
 	if(DISABLE_ADVANCE_SIMD OR LTO_PCSX2_CORE)
 		# Fixes issues with some compiler + linker combinations
@@ -870,6 +876,12 @@ set(pcsx2InputHeaders
 	Input/SDLInputSource.h
 )
 
+if(HORIZON)
+	list(REMOVE_ITEM pcsx2HostSources Host/SDLAudioStream.cpp)
+	list(REMOVE_ITEM pcsx2InputSources Input/SDLInputSource.cpp)
+	list(REMOVE_ITEM pcsx2InputHeaders Input/SDLInputSource.h)
+endif()
+
 if(APPLE)
 	list(APPEND pcsx2GSSources
 		GS/Renderers/Metal/GSDeviceMTL.mm
@@ -1137,6 +1149,11 @@ elseif(LINUX)
 	target_link_libraries(PCSX2_FLAGS INTERFACE
 		PkgConfig::LIBUDEV
 	)
+elseif(HORIZON)
+	target_sources(PCSX2 PRIVATE
+		${pcsx2LinuxSources}
+		${pcsx2LinuxHeaders}
+	)
 endif()
 
 if(WIN32)
@@ -1171,7 +1188,6 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	rcheevos
 	simpleini
 	freesurround
-	SDL3::SDL3
 	ZLIB::ZLIB
 	LZ4::LZ4
 	SoundTouch::SoundTouch
@@ -1184,6 +1200,10 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 #	plutosvg::plutosvg
 	${LIBC_LIBRARIES}
 )
+
+if(NOT HORIZON)
+	target_link_libraries(PCSX2_FLAGS INTERFACE SDL3::SDL3)
+endif()
 
 if(ANDROID AND USE_VULKAN AND TARGET adrenotools)
 	target_link_libraries(PCSX2_FLAGS INTERFACE adrenotools)
@@ -1232,6 +1252,8 @@ elseif(ANDROID)
 		android
 		${log-lib}
 	)
+elseif(HORIZON)
+
 else()
 	target_link_libraries(PCSX2_FLAGS INTERFACE
 		PCAP::PCAP
