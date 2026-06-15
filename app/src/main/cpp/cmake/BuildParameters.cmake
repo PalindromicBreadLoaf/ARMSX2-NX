@@ -15,10 +15,15 @@ option(PACKAGE_MODE "Use this option to ease packaging of PCSX2 (developer/distr
 #-------------------------------------------------------------------------------
 # Graphical option
 #-------------------------------------------------------------------------------
-if(NOT APPLE)
+# For now force software renderer on Switch
+if(NOT APPLE AND NOT HORIZON)
 	option(USE_OPENGL "Enable OpenGL GS renderer" ON)
 endif()
-option(USE_VULKAN "Enable Vulkan GS renderer" ON)
+if(HORIZON)
+	option(USE_VULKAN "Enable Vulkan GS renderer" OFF)
+else()
+	option(USE_VULKAN "Enable Vulkan GS renderer" ON)
+endif()
 
 #-------------------------------------------------------------------------------
 # Path and lib option
@@ -113,7 +118,11 @@ if("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR "${CMAKE_HOST_SYSTEM_PR
 	endif()
 elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "aarch64" OR
        "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "arm64")
-	message(STATUS "Building for Apple Silicon (ARM64).")
+	if(HORIZON)
+		message(STATUS "Building for Nintendo Switch (ARM64).")
+	else()
+		message(STATUS "Building for Apple Silicon (ARM64).")
+	endif()
 	list(APPEND PCSX2_DEFS _M_ARM64=1)
 	set(_M_ARM64 TRUE)
 #	add_compile_options("-march=armv8.4-a" "-mcpu=apple-m1")
@@ -130,10 +139,15 @@ elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=${HOST_CACHE_LINE_SIZE})
 	endif()
 	
-	# Windows page/cache line size seems to match x68-64 
+	# Windows page/cache line size seems to match x68-64
 	if(WIN32)
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x1000)
 		# Value of std::hardware_destructive_interference_size for ARM64 on MSVC toolset 14.40.33807
+		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
+	endif()
+	
+	if(HORIZON)
+		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x1000)
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
 	endif()
 else()
