@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: 2002-2024 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VixlHelpers.h"
@@ -101,7 +102,9 @@ u8* armStartBlock()
     HostSys::BeginCodeWrite();
 
     pxAssert(!armAsm);
-    armAsm = new a64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr), armAsmCapacity);
+    // armAsmPtr is the executable pointer, which is identical the writeable
+    // pointer on everything but Horizon because AAAAAAA
+    armAsm = new a64::MacroAssembler(static_cast<vixl::byte*>(HostSys::JitGetWritablePointer(armAsmPtr)), armAsmCapacity);
     armAsm->GetScratchVRegisterList()->Remove(31);
     armAsm->GetScratchRegisterList()->Remove(RSCRATCHADDR.GetCode());
     return armAsmPtr;
@@ -456,7 +459,7 @@ u8* ArmConstantPool::GetJumpTrampoline(const void* target)
         return nullptr;
     }
 
-    a64::MacroAssembler masm(static_cast<vixl::byte*>(m_base_ptr + offset), m_capacity - offset);
+    a64::MacroAssembler masm(static_cast<vixl::byte*>(HostSys::JitGetWritablePointer(m_base_ptr + offset)), m_capacity - offset);
     masm.Mov(RXVIXLSCRATCH, reinterpret_cast<intptr_t>(target));
     masm.Br(RXVIXLSCRATCH);
     masm.FinalizeCode();
@@ -485,7 +488,7 @@ u8* ArmConstantPool::GetLiteral(const u128& value)
         return nullptr;
 
     const u32 offset = Common::AlignUpPow2(m_used, 16);
-    std::memcpy(&m_base_ptr[offset], &value, sizeof(value));
+    std::memcpy(HostSys::JitGetWritablePointer(&m_base_ptr[offset]), &value, sizeof(value));
     m_used = offset + sizeof(value);
     return m_base_ptr + offset;
 }
@@ -515,10 +518,13 @@ void armBind(a64::Label* p_label)
 
 void armEmitJmpPtr(void* code, const void* dst, bool flush_icache)
 {
+    // code/dst are execute-space pointers; the relative branch displacement is the
+    // same in both aliases, but the patch itself must be stored through the writable
+    // alias (identity off-Horizon).
     const s64 displacement = GetPCDisplacement(code, dst);
 
     u32 new_code = a64::B | a64::Assembler::ImmUncondBranch(displacement);
-    std::memcpy(code, &new_code, sizeof(new_code));
+    std::memcpy(HostSys::JitGetWritablePointer(code), &new_code, sizeof(new_code));
 
     if (flush_icache) {
         HostSys::FlushInstructionCache(code, a64::kInstructionSize);

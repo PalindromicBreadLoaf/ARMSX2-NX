@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
@@ -123,6 +124,14 @@ namespace HostSys
 	[[maybe_unused]] __fi static void FlushInstructionCache(void* address, u32 size) {}
 #else
 	void FlushInstructionCache(void* address, u32 size);
+#endif
+
+	/// Translates a pointer inside an executable code region to its writable alias.
+	/// Horizon forbids RWX pages otherwise this wouldn't need to exist
+#if defined(__SWITCH__)
+	void* JitGetWritablePointer(void* exec_ptr);
+#else
+	[[maybe_unused]] __fi static void* JitGetWritablePointer(void* exec_ptr) { return exec_ptr; }
 #endif
 
 	/// Returns the size of pages for the current host.

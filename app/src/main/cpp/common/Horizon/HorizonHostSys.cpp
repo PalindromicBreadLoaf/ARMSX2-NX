@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
-// Copyright (c): PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
+// Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/Assertions.h"
@@ -27,6 +27,33 @@ namespace
 
 	std::mutex s_mapping_mutex;
 	std::map<void*, HorizonMapping> s_mappings;
+
+	// Nintendo hates JIT so this is a hack but it maybe works?
+	struct HorizonCodeMapping
+	{
+		Jit jit;
+		u8* rx; // writeable page
+		u8* rw; // writable alias of the same physical page
+		size_t size;
+	};
+
+	std::mutex s_code_mutex;
+	std::map<u8*, HorizonCodeMapping> s_code_mappings;
+
+	const HorizonCodeMapping* FindCodeMapping(const void* ptr)
+	{
+		if (s_code_mappings.empty())
+			return nullptr;
+
+		auto it = s_code_mappings.upper_bound(const_cast<u8*>(static_cast<const u8*>(ptr)));
+		if (it == s_code_mappings.begin())
+			return nullptr;
+
+		--it;
+		const HorizonCodeMapping& m = it->second;
+		const u8* const p = static_cast<const u8*>(ptr);
+		return (p >= m.rx && p < (m.rx + m.size)) ? &m : nullptr;
+	}
 } // namespace
 
 static u32 HorizonProt(const PageProtectionMode& mode)
@@ -48,8 +75,29 @@ void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
 	// Horizon cannot make anonymous pages executable
 	if (mode.CanExecute())
 	{
-		Console.Error("HostSys::Mmap: executable mappings are unsupported on Horizon");
-		return nullptr;
+		Jit jit;
+		const Result rc = jitCreate(&jit, size);
+		if (R_FAILED(rc))
+		{
+			Console.Error("HostSys::Mmap: jitCreate(%zu) failed: 0x%08x. This usually means the "
+						  "process lacks the JIT capability. Make sure you aren't using Applet Mode.", size, rc);
+			return nullptr;
+		}
+
+		const Result trc = jitTransitionToExecutable(&jit);
+		if (R_FAILED(trc))
+		{
+			Console.Error("HostSys::Mmap: jitTransitionToExecutable() failed: 0x%08x", trc);
+			jitClose(&jit);
+			return nullptr;
+		}
+
+		u8* const rx = static_cast<u8*>(jitGetRxAddr(&jit));
+		u8* const rw = static_cast<u8*>(jitGetRwAddr(&jit));
+
+		std::lock_guard lock(s_code_mutex);
+		s_code_mappings.emplace(rx, HorizonCodeMapping{jit, rx, rw, size});
+		return rx;
 	}
 
 	void* src = memalign(__pagesize, size);
@@ -81,6 +129,20 @@ void HostSys::Munmap(void* base, size_t size)
 {
 	if (!base)
 		return;
+
+	// Executable (Jit-backed) region?
+	{
+		std::unique_lock clock(s_code_mutex);
+		const auto cit = s_code_mappings.find(static_cast<u8*>(base));
+		if (cit != s_code_mappings.end())
+		{
+			Jit jit = cit->second.jit;
+			s_code_mappings.erase(cit);
+			clock.unlock();
+			jitClose(&jit);
+			return;
+		}
+	}
 
 	std::unique_lock lock(s_mapping_mutex);
 	const auto it = s_mappings.find(base);
@@ -153,10 +215,29 @@ size_t HostSys::GetRuntimeCacheLineSize()
 	return 64;
 }
 
+void* HostSys::JitGetWritablePointer(void* exec_ptr)
+{
+	std::lock_guard lock(s_code_mutex);
+	if (const HorizonCodeMapping* m = FindCodeMapping(exec_ptr))
+		return m->rw + (static_cast<u8*>(exec_ptr) - m->rx);
+
+	// ^ Not inside a managed JIT region
+	return exec_ptr;
+}
+
 void HostSys::FlushInstructionCache(void* address, u32 size)
 {
-	char* const start = static_cast<char*>(address);
-	__builtin___clear_cache(start, start + size);
+	char* const rx = static_cast<char*>(address);
+	char* rw = rx;
+	{
+		std::lock_guard lock(s_code_mutex);
+		if (const HorizonCodeMapping* m = FindCodeMapping(address))
+			rw = reinterpret_cast<char*>(m->rw + (reinterpret_cast<u8*>(rx) - m->rx));
+	}
+
+	__builtin___clear_cache(rw, rw + size);
+	if (rw != rx)
+		__builtin___clear_cache(rx, rx + size);
 }
 
 SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size_t num_pages)
