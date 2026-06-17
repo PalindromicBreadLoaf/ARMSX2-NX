@@ -2846,11 +2846,20 @@ void VMManager::LogCPUCapabilities()
 		GetPhysicalMemory() / _1mb,
 		static_cast<double>(GetPhysicalMemory()) / static_cast<double>(_1gb));
 
-	const cpuinfo_package* const package = cpuinfo_get_package(0);
-	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Processor        = {}", package ? package->name : "Unknown");
-	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Core Count       = {} cores", cpuinfo_get_cores_count());
-	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Thread Count     = {} threads", cpuinfo_get_processors_count());
-	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Cluster Count    = {} clusters", cpuinfo_get_clusters_count());
+	// This crashes on platforms that cannot get some of this information, so
+	// verify it can do so before running it.
+	if (cpuinfo_initialize())
+	{
+		const cpuinfo_package* const package = cpuinfo_get_package(0);
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Processor        = {}", package ? package->name : "Unknown");
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Core Count       = {} cores", cpuinfo_get_cores_count());
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Thread Count     = {} threads", cpuinfo_get_processors_count());
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Cluster Count    = {} clusters", cpuinfo_get_clusters_count());
+	}
+	else
+	{
+		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("  Processor        = Unknown (cpuinfo unavailable)");
+	}
 #ifdef _WIN32
 	LogUserPowerPlan();
 #endif
