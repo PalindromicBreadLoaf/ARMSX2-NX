@@ -112,13 +112,9 @@ namespace
 			VMManager::SetDefaultSettings(*s_settings_interface, true, true, true, true, true);
 		}
 
-		// Software GS renderer presenting to the framebuffer via GSDeviceNull
-		// DEFAULT_BACKEND is Oboe, which isn't built, so null that.
-		// IOP/VU recompilers are left enabled
 		s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::SW));
 		s_settings_interface->SetIntValue("EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Off));
-		s_settings_interface->SetStringValue("SPU2/Output", "OutputModule", "nullout");
-		s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Null");
+		s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Horizon");
 		s_settings_interface->SetBoolValue("EmuCore/GS", "FrameLimitEnable", false);
 		s_settings_interface->SetIntValue("EmuCore/GS", "VsyncEnable", 0);
 		s_settings_interface->SetBoolValue("UI", "EnableFullscreenUI", false);

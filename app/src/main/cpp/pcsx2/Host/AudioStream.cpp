@@ -116,7 +116,10 @@ std::unique_ptr<AudioStream> AudioStream::CreateStream(AudioBackend backend, u32
 		case AudioBackend::Cubeb:
 			return CreateCubebAudioStream(sample_rate, parameters, driver_name, device_name, stretch_enabled, error);
 
-#if !defined(__SWITCH__)
+#if defined(__SWITCH__)
+		case AudioBackend::Horizon:
+			return CreateHorizonAudioStream(sample_rate, parameters, stretch_enabled, error);
+#else
 		case AudioBackend::SDL:
 			return CreateSDLAudioStream(sample_rate, parameters, stretch_enabled, error);
 
@@ -155,12 +158,14 @@ static constexpr const std::array s_backend_names = {
 	"Cubeb",
 	"SDL",
 	"Oboe",
+	"Horizon",
 };
 static constexpr const std::array s_backend_display_names = {
 	TRANSLATE_NOOP("AudioStream", "Null (No Output)"),
 	TRANSLATE_NOOP("AudioStream", "Cubeb"),
 	TRANSLATE_NOOP("AudioStream", "SDL"),
 	TRANSLATE_NOOP("AudioStream", "Oboe"),
+	TRANSLATE_NOOP("AudioStream", "Horizon (audout)"),
 };
 
 std::optional<AudioBackend> AudioStream::ParseBackendName(const char* str)
