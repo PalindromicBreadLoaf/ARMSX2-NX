@@ -1,0 +1,24 @@
+# Builds an nro that boots the PS2 BIOS headless and logs to the SD card.
+#Purely for validation.
+
+add_executable(armsx2
+	main.cpp
+	HorizonHost.cpp
+)
+
+target_include_directories(armsx2 PRIVATE ${CMAKE_SOURCE_DIR})
+
+target_link_libraries(armsx2 PRIVATE
+	-Wl,--start-group
+	PCSX2
+	PCSX2_FLAGS
+	-Wl,--end-group
+)
+
+# Package an .nro
+nx_generate_nacp(OUTPUT armsx2.nacp
+	NAME "ARMSX2"
+	AUTHOR "ARMSX2 Team \& Palindromic Bread Loaf"
+	VERSION "0.1"
+)
+nx_create_nro(armsx2 NACP "${CMAKE_CURRENT_BINARY_DIR}/armsx2.nacp")

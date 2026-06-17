@@ -62,6 +62,11 @@ add_subdirectory(common)
 add_subdirectory(pcsx2)
 #add_subdirectory(pcsx2-qt)
 
+# Temporary headless harness to start testing things
+if(HORIZON)
+	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../switch/harness ${CMAKE_BINARY_DIR}/harness)
+endif()
+
 # Updater is Windows only for now.
 if (WIN32)
 	add_subdirectory(updater)
