@@ -12,6 +12,8 @@ target_link_libraries(armsx2 PRIVATE
 	PCSX2
 	PCSX2_FLAGS
 	-Wl,--end-group
+	# Must precede the toolchain's -lnx
+	deko3d
 )
 
 # Package an .nro

@@ -36,6 +36,7 @@
 
 #ifdef __SWITCH__
 #include "GS/Renderers/Null/GSDeviceNull.h"
+#include "GS/Renderers/DK3D/GSDeviceDK.h"
 #endif
 
 #ifdef _WIN32
@@ -102,6 +103,11 @@ static RenderAPI GetAPIForRenderer(GSRendererType renderer)
 			return RenderAPI::Metal;
 #endif
 
+#ifdef __SWITCH__
+		case GSRendererType::DK3D:
+			return RenderAPI::DK3D;
+#endif
+
 			// We could end up here if we ever removed a renderer.
 		default:
 		{
@@ -151,6 +157,9 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 #ifdef __SWITCH__
 		case RenderAPI::None:
 			g_gs_device = std::make_unique<GSDeviceNull>();
+			break;
+		case RenderAPI::DK3D:
+			g_gs_device = std::make_unique<GSDeviceDK>();
 			break;
 #endif
 

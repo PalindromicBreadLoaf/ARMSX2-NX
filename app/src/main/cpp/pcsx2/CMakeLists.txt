@@ -886,9 +886,11 @@ if(HORIZON)
 	list(REMOVE_ITEM pcsx2USBSources USB/usb-pad/usb-pad-sdl-ff.cpp)
 	list(REMOVE_ITEM pcsx2USBHeaders USB/usb-pad/usb-pad-sdl-ff.h)
 	list(REMOVE_ITEM pcsx2DEV9Sources DEV9/pcap_io.cpp)
-	# TODO: Implement an actual hardware renderer on Switch
 	list(APPEND pcsx2GSSources GS/Renderers/Null/GSDeviceNull.cpp)
 	list(APPEND pcsx2GSHeaders GS/Renderers/Null/GSDeviceNull.h)
+	# deko3d renderer
+	list(APPEND pcsx2GSSources GS/Renderers/DK3D/GSDeviceDK.cpp)
+	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/GSDeviceDK.h)
 endif()
 
 if(APPLE)
