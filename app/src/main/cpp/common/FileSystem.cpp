@@ -2508,6 +2508,12 @@ bool FileSystem::RenamePath(const char* old_path, const char* new_path, Error* e
 		return false;
 	}
 
+#if defined(__SWITCH__)
+	// Horizon's newlib rename() refuses to overwrite an existing file
+	if (FileExists(new_path))
+		unlink(new_path);
+#endif
+
 	if (rename(old_path, new_path) != 0)
 	{
 		const int err = errno;
