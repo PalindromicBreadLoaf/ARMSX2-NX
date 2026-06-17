@@ -70,6 +70,10 @@ static float s_global_scale = 1.0f;
 static std::string s_font_path;
 static std::vector<ImWchar> s_font_range;
 
+#ifdef __SWITCH__
+static bool s_use_default_font = false;
+#endif
+
 static ImFont* s_standard_font;
 static ImFont* s_fixed_font;
 static ImFont* s_medium_font;
@@ -133,8 +137,13 @@ bool ImGuiManager::Initialize()
 {
 	if (!LoadFontData())
 	{
+#ifdef __SWITCH__
+		Console.Warning("ImGuiManager font data unavailable. Using ImGui's built-in default font.");
+		s_use_default_font = true;
+#else
 		pxFailRel("Failed to load font data");
 		return false;
+#endif
 	}
 
 	s_global_scale = std::max(0.5f, g_gs_device->GetWindowScale() * (GSConfig.OsdScale / 100.0f));
@@ -407,6 +416,11 @@ bool ImGuiManager::LoadFontData()
 
 	if (s_standard_font_data.empty())
 	{
+#ifdef __SWITCH__
+		// Treat empty font folder as using default font
+		if (s_font_path.empty())
+			return false;
+#endif
 		pxAssertRel(!s_font_path.empty(), "Font path has not been set.");
 		std::optional<std::vector<u8>> font_data = FileSystem::ReadBinaryFile(s_font_path.c_str());
 		if (!font_data.has_value())
@@ -539,6 +553,18 @@ bool ImGuiManager::AddImGuiFonts(bool fullscreen_fonts)
 
 	ImGuiIO& io = ImGui::GetIO();
 	io.Fonts->Clear();
+
+#ifdef __SWITCH__
+	if (s_use_default_font)
+	{
+		s_standard_font = io.Fonts->AddFontDefault();
+		s_fixed_font = s_standard_font;
+		s_medium_font = nullptr;
+		s_large_font = nullptr;
+		ImGuiFullscreen::SetFonts(s_standard_font, s_medium_font, s_large_font);
+		return s_standard_font != nullptr && io.Fonts->Build();
+	}
+#endif
 
 	s_standard_font = AddTextFont(standard_font_size);
 	if (!s_standard_font || !AddIconFonts(standard_font_size))

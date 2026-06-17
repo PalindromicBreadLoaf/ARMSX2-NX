@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Assertions.h"
+#include "Console.h"
 #include "CrashHandler.h"
 #include "HostSys.h"
 #include "Threading.h"
 
+#include <cstdio>
 #include <mutex>
 
 #ifdef _WIN32
@@ -113,6 +115,14 @@ void pxOnAssertFail(const char* file, int line, const char* func, const char* ms
 	fputs(full_msg, stderr);
 	fputs("\nAborting application.\n", stderr);
 	fflush(stderr);
+#ifdef __SWITCH__
+	if (std::FILE* log_fp = Log::GetFileLogHandle())
+	{
+		std::fputs(full_msg, log_fp);
+		std::fputs("\nAborting application.\n", log_fp);
+		std::fflush(log_fp);
+	}
+#endif
 	AbortWithMessage(full_msg);
 #endif
 

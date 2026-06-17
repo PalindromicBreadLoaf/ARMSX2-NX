@@ -21,6 +21,11 @@ target_include_directories(imgui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(imgui PUBLIC Freetype::Freetype)
 target_link_libraries(imgui PUBLIC plutosvg::plutosvg)
 
+if(HORIZON)
+	# There's no shell on Switch to handle this
+	target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+endif()
+
 # Needed for macOS compile.
 set_property(TARGET imgui PROPERTY CXX_STANDARD 17)
 set_property(TARGET imgui PROPERTY CXX_STANDARD_REQUIRED ON)
