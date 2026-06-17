@@ -62,9 +62,9 @@ add_subdirectory(common)
 add_subdirectory(pcsx2)
 #add_subdirectory(pcsx2-qt)
 
-# Temporary headless harness to start testing things
+# ARMSX2-NX entry point
 if(HORIZON)
-	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../switch/harness ${CMAKE_BINARY_DIR}/harness)
+	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../switch/app ${CMAKE_BINARY_DIR}/switch-app)
 endif()
 
 # Updater is Windows only for now.

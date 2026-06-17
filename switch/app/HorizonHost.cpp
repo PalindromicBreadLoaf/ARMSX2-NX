@@ -2,15 +2,7 @@
 // Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
-// Headless Host seam for the Nintendo Switch bring-up harness.
-//
-// On Horizon the PCSX2 core is built as a static lib with no entry point (the
-// Android JNI shell in main.cpp is not compiled). The core still links against the
-// `Host::` / `InputManager::` callback surface that the app layer normally provides
-// (on Android that lives in main.cpp). This file supplies a *headless* version of
-// that surface: no window, no input, no UI, no achievements — just enough to boot
-// the VM and log. The render window is reported as Surfaceless, which pairs with the
-// Null GS renderer the harness selects, so nothing ever needs a real framebuffer.
+// Host seam for the ARMSX2 Nintendo Switch (Horizon) application.
 
 #include "common/Console.h"
 #include "common/Error.h"
@@ -33,7 +25,7 @@
 // Stubbed render window
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
 {
-	// Headless: no surface. The Null GS renderer never presents.
+	// GSDeviceNull owns the libnx framebuffer and presents itself.
 	WindowInfo wi;
 	wi.type = WindowInfo::Type::Surfaceless;
 	return wi;

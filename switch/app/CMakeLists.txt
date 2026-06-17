@@ -1,5 +1,4 @@
-# Builds an nro that boots the PS2 BIOS headless and logs to the SD card.
-#Purely for validation.
+# ARMSX2 Switch application
 
 add_executable(armsx2
 	main.cpp
