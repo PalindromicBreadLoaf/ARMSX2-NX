@@ -109,13 +109,15 @@ void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
 		return nullptr;
 	std::memset(src, 0, size);
 
+	// svcMapMemory requires the destination to live in the process' stack region
 	virtmemLock();
-	void* dst = base ? base : virtmemFindAslr(size, 0);
+	void* dst = base ? base : virtmemFindStack(size, 0);
 	const Result rc = dst ? svcMapMemory(dst, src, size) : MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
 	virtmemUnlock();
 
 	if (!dst || R_FAILED(rc))
 	{
+		Console.Error("HostSys::Mmap: svcMapMemory(%p, %p, 0x%zx) failed: 0x%08x", dst, src, size, rc);
 		free(src);
 		return nullptr;
 	}
@@ -218,12 +220,15 @@ void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size
 	u8* const src = static_cast<u8*>(handle) + offset;
 
 	virtmemLock();
-	void* dst = baseaddr ? baseaddr : virtmemFindAslr(size, 0);
+	void* dst = baseaddr ? baseaddr : virtmemFindStack(size, 0);
 	const Result rc = dst ? svcMapMemory(dst, src, size) : MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
 	virtmemUnlock();
 
 	if (!dst || R_FAILED(rc))
+	{
+		Console.Error("HostSys::MapSharedMemory: svcMapMemory(%p, %p, 0x%zx) failed: 0x%08x", dst, src, size, rc);
 		return nullptr;
+	}
 
 	const u32 prot = HorizonProt(mode);
 	if (prot != Perm_Rw)
