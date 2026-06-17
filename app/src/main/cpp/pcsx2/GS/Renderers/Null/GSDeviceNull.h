@@ -9,6 +9,11 @@
 
 #include <memory>
 
+#ifdef __SWITCH__
+struct NWindow;
+struct Framebuffer;
+#endif
+
 // Headless texture backing for the null device
 class GSTextureNull final : public GSTexture
 {
@@ -33,6 +38,7 @@ private:
 
 // A GSDevice that owns no graphics API.
 // This is needed on devices that don't have any hardware backends compiled in to not crash.
+// *cough cough Switch cough cough*
 class GSDeviceNull final : public GSDevice
 {
 public:
@@ -78,6 +84,18 @@ public:
 
 	void RenderHW(GSHWDrawConfig& config) override;
 	void ClearSamplerCache() override;
+
+#ifdef __SWITCH__
+private:
+	// NULL is now actually the software renderer because it was easier to put here
+	// than in the actual software renderer.
+	NWindow* m_nwindow = nullptr;
+	Framebuffer* m_framebuffer = nullptr;
+	u8* m_present_bits = nullptr;
+	u32 m_present_stride = 0;
+	int m_present_width = 0;
+	int m_present_height = 0;
+#endif
 
 protected:
 	GSTexture* CreateSurface(GSTexture::Type type, int width, int height, int levels, GSTexture::Format format) override;

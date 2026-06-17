@@ -27,7 +27,6 @@ namespace
 	constexpr const char* HARNESS_ROOT = "sdmc:/switch/armsx2";
 	constexpr const char* HARNESS_LOG = "sdmc:/switch/armsx2/armsx2.log";
 
-	// Run for how long?
 	constexpr int RUN_SECONDS = 60;
 
 	std::unique_ptr<INISettingsInterface> s_settings_interface;
@@ -60,13 +59,11 @@ namespace
 			VMManager::SetDefaultSettings(*s_settings_interface, true, true, true, true, true);
 		}
 
-		// Null GS renderer
-		// Null audio backend + sink
+		// Software GS renderer presenting to the framebuffer via GSDeviceNull
 		// DEFAULT_BACKEND is Oboe, which isn't built, so null that.
-		// no frame limiter: let the BIOS run as fast as the CPU allows (not very I assume)
-		// no fullscreen UI
 		// IOP/VU recompilers are left enabled
-		s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Null));
+		s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::SW));
+		s_settings_interface->SetIntValue("EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Off));
 		s_settings_interface->SetStringValue("SPU2/Output", "OutputModule", "nullout");
 		s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Null");
 		s_settings_interface->SetBoolValue("EmuCore/GS", "FrameLimitEnable", false);
@@ -97,7 +94,6 @@ int main(int argc, char** argv)
 	if (have_socket)
 		nxlinkStdio();
 
-	// The SD log directory must exist before we open the log file.
 	mkdir("sdmc:/switch", 0777);
 	mkdir(HARNESS_ROOT, 0777);
 
