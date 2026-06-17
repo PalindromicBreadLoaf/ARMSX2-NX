@@ -264,7 +264,7 @@ namespace vtlb_private
 static bool hasBeenCalled = false;
 static constexpr u32 INDIRECT_DISPATCHER_SIZE = 64;
 static constexpr u32 INDIRECT_DISPATCHERS_SIZE = 2 * 5 * 2 * INDIRECT_DISPATCHER_SIZE;
-alignas(__pagesize) static u8 m_IndirectDispatchers[__pagesize];
+static u8* m_IndirectDispatchers = nullptr;
 
 // ------------------------------------------------------------------------
 // mode        - 0 for read, 1 for write!
@@ -398,10 +398,12 @@ void vtlb_DynGenDispatchers()
     if (!hasBeenCalled)
     {
         hasBeenCalled = true;
-        HostSys::MemProtect(m_IndirectDispatchers, __pagesize, PageAccess_ReadWrite());
+
+        m_IndirectDispatchers = static_cast<u8*>(HostSys::Mmap(nullptr, __pagesize, PageAccess_Any()));
+        pxAssertRel(m_IndirectDispatchers, "Failed to allocate VTLB indirect dispatcher memory.");
 
         // clear the buffer to 0xcc (easier debugging).
-        std::memset(m_IndirectDispatchers, 0xcc, __pagesize);
+        std::memset(HostSys::JitGetWritablePointer(m_IndirectDispatchers), 0xcc, __pagesize);
 
         int mode, bits, sign;
         for (mode = 0; mode < 2; ++mode) {
@@ -416,12 +418,12 @@ void vtlb_DynGenDispatchers()
                 }
             }
         }
-        HostSys::MemProtect(m_IndirectDispatchers, __pagesize, PageAccess_ExecOnly());
     }
 
     Perf::any.Register(m_IndirectDispatchers, __pagesize, "TLB Dispatcher");
     //// copy code
-    memcpy(code_start, m_IndirectDispatchers, INDIRECT_DISPATCHERS_SIZE);
+    memcpy(HostSys::JitGetWritablePointer(code_start), m_IndirectDispatchers, INDIRECT_DISPATCHERS_SIZE);
+    HostSys::FlushInstructionCache(code_start, INDIRECT_DISPATCHERS_SIZE);
     ////
     armSetAsmPtr(code_start + INDIRECT_DISPATCHERS_SIZE, INDIRECT_DISPATCHERS_SIZE, nullptr);
     armStartBlock();
