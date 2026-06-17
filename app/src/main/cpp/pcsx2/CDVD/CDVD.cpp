@@ -31,6 +31,9 @@
 #ifndef _WIN32
 #include <time.h>
 #endif
+#if defined(__SWITCH__)
+#include "common/Horizon/HorizonTime.h"
+#endif
 #include <memory>
 
 cdvdStruct cdvd;
@@ -937,6 +940,9 @@ void cdvdReset()
 		#if defined(_WIN32)
 			t = _mkgmtime(&tm) + 32400; //60 * 60 * 9 for GMT+9
 			gmtime_s(&tm, &t);
+		#elif defined(__SWITCH__)
+			t = Horizon::timegm_utc(tm) + 32400;
+			gmtime_r(&t, &tm);
 		#else
 			t = timegm(&tm) + 32400;
 			gmtime_r(&t, &tm);

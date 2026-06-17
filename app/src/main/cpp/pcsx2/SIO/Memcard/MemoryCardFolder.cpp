@@ -17,6 +17,10 @@
 #include "common/StringUtil.h"
 #include "common/Timer.h"
 
+#if defined(__SWITCH__)
+#include "common/Horizon/HorizonTime.h"
+#endif
+
 #include "fmt/format.h"
 #include "ryml_std.hpp"
 #include "ryml.hpp"
@@ -102,6 +106,8 @@ time_t MemoryCardFileEntryDateTime::ToTime() const
 
 #ifdef _MSC_VER
 	return _mkgmtime(&converted);
+#elif defined(__SWITCH__)
+	return Horizon::timegm_utc(converted);
 #else
 	return timegm(&converted);
 #endif
