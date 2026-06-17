@@ -71,10 +71,12 @@ NetAdapter* GetNetAdapter()
 			na = static_cast<NetAdapter*>(new TAPAdapter());
 			break;
 #endif
+#if !defined(__SWITCH__)
 		case Pcsx2Config::DEV9Options::NetApi::PCAP_Bridged:
 		case Pcsx2Config::DEV9Options::NetApi::PCAP_Switched:
 			na = static_cast<NetAdapter*>(new PCAPAdapter());
 			break;
+#endif
 		case Pcsx2Config::DEV9Options::NetApi::Sockets:
 			na = static_cast<NetAdapter*>(new SocketAdapter());
 			break;
@@ -108,7 +110,7 @@ void InitNet()
 
 #ifdef _WIN32
 	SetThreadPriority(rx_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
-#elif defined(__POSIX__)
+#elif defined(__POSIX__) && !defined(__SWITCH__)
 	int policy = 0;
 	sched_param param;
 
