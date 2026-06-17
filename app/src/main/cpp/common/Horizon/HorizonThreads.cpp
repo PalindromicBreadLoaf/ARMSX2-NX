@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE // for pthread_setname_np
+#define _GNU_SOURCE
 #endif
 
 #include "common/Threading.h"
@@ -194,5 +194,5 @@ Threading::ThreadHandle& Threading::Thread::operator=(Thread&& thread)
 
 void Threading::SetNameOfCurrentThread(const char* name)
 {
-	pthread_setname_np(pthread_self(), name);
+	(void)name;
 }

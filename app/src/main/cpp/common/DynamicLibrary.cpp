@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// Copyright (c): PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/DynamicLibrary.h"
@@ -15,6 +16,8 @@
 
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
+#elif defined(__SWITCH__)
+// Horizon (newlib) has no dlfcn
 #else
 #include <dlfcn.h>
 #ifdef __APPLE__
@@ -92,6 +95,9 @@ bool DynamicLibrary::Open(const char* filename, Error* error)
 	}
 
 	return true;
+#elif defined(__SWITCH__)
+	Error::SetStringFmt(error, "Loading {} failed: dynamic libraries are unsupported", filename);
+	return false;
 #else
 	m_handle = dlopen(filename, RTLD_NOW);
 	if (!m_handle)
@@ -142,6 +148,8 @@ void DynamicLibrary::Close()
 
 #ifdef _WIN32
 	FreeLibrary(reinterpret_cast<HMODULE>(m_handle));
+#elif defined(__SWITCH__)
+	// never opened
 #else
 	dlclose(m_handle);
 #endif
@@ -152,6 +160,8 @@ void* DynamicLibrary::GetSymbolAddress(const char* name) const
 {
 #ifdef _WIN32
 	return reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(m_handle), name));
+#elif defined(__SWITCH__)
+	return nullptr;
 #else
 	return reinterpret_cast<void*>(dlsym(m_handle, name));
 #endif
