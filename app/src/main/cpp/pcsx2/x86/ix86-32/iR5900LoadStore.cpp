@@ -6,7 +6,7 @@
 #include "x86/iR5900.h"
 #include "x86/iR5900LoadStore.h"
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
 using namespace x86Emitter;
 #endif
 

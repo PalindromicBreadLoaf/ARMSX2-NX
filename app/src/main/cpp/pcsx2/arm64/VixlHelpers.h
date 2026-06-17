@@ -61,14 +61,21 @@ namespace a64 = vixl::aarch64;
 // iopMem->Main
 #define RSTATE_x26 a64::x26
 
+// GCC requires constants here whereas Clang doesn't
+#if defined(__SWITCH__)
+#define ARM_FIELD_OFFSET(type, field) (static_cast<size_t>(reinterpret_cast<uintptr_t>(&reinterpret_cast<type*>(0)->field)))
+#else
+#define ARM_FIELD_OFFSET(type, field) offsetof(type, field)
+#endif
+
 // CPU(iR5900), PSX(iR3000A), FPU(iFPU, iFPUd)
 #define RSTATE_CPU a64::x27
 #define RSTATE_PSX a64::x28
-#define PTR_CPU(field) a64::MemOperand(RSTATE_CPU, offsetof(cpuRegistersPack, field))
+#define PTR_CPU(field) a64::MemOperand(RSTATE_CPU, ARM_FIELD_OFFSET(cpuRegistersPack, field))
 
 // microVU
 #define RSTATE_MVU a64::x28
-#define PTR_MVU(field) a64::MemOperand(RSTATE_MVU, offsetof(vuRegistersPack, field))
+#define PTR_MVU(field) a64::MemOperand(RSTATE_MVU, ARM_FIELD_OFFSET(vuRegistersPack, field))
 
 // recLUT, psxRecLUT
 #define RSTATE_x29 a64::x29

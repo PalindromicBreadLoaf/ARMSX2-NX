@@ -13,7 +13,7 @@
 #include "iCOP0.h"
 
 namespace Interp = R5900::Interpreter::OpcodeImpl::COP0;
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
 using namespace x86Emitter;
 #endif
 

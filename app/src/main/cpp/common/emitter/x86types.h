@@ -12,7 +12,7 @@
 namespace a64 = vixl::aarch64;
 
 static const uint iREGCNT_XMM = 16;
-#if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
+#if defined(__ANDROID__) || defined(__SWITCH__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
 static const uint iREGCNT_GPR = 25;
 #else
 static const uint iREGCNT_GPR = 16;
@@ -27,7 +27,7 @@ enum XMMSSEType
 
 extern thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM];
 
-#if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
+#if defined(__ANDROID__) || defined(__SWITCH__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
 
 static const int wordsize = sizeof(sptr);
 static constexpr int SHADOW_STACK_SIZE = 0;

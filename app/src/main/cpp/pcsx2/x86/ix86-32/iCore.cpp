@@ -10,7 +10,7 @@
 #include "common/Console.h"
 #include "common/emitter/x86emitter.h"
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
 using namespace x86Emitter;
 #endif
 

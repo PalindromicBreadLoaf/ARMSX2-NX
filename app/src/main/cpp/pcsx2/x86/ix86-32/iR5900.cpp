@@ -23,7 +23,7 @@
 #include "x86/microVU_Misc.h"
 
 // Only for MOVQ workaround.
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
 #include "common/emitter/internal.h"
 #endif
 
@@ -40,7 +40,7 @@
 #include <zlib.h>
 #endif
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
 using namespace x86Emitter;
 #endif
 using namespace R5900;

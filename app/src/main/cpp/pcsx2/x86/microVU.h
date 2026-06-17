@@ -277,7 +277,8 @@ public:
 
 struct vuRegistersPack
 {
-    alignas(16) microVU microVU[2];
+    // Elaborate type specifier so member name doesn't change the meaning of the type name
+    alignas(16) struct microVU microVU[2];
     alignas(64) VU_Thread vu1Thread;
 };
 alignas(64) extern vuRegistersPack g_vuRegistersPack;

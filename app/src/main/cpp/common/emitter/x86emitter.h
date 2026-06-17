@@ -30,7 +30,7 @@
 #pragma once
 
 #include "common/emitter/x86types.h"
-#if !(defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC)))
+#if !(defined(__ANDROID__) || defined(__SWITCH__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC)))
 #include "common/emitter/instructions.h"
 
 // Including legacy items for now, but these should be removed eventually,

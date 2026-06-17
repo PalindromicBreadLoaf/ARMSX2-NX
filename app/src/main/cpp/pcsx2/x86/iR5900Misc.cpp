@@ -5,7 +5,7 @@
 #include "iR5900.h"
 #include "R5900OpcodeTables.h"
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
 using namespace x86Emitter;
 #endif
 
