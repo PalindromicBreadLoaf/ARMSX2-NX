@@ -105,24 +105,24 @@ namespace
 		s_settings_interface = std::make_unique<INISettingsInterface>(ini_path);
 		Host::Internal::SetBaseSettingsLayer(s_settings_interface.get());
 		s_settings_interface->Load();
-
+		
 		if (s_settings_interface->IsEmpty())
 		{
 			INFO_LOG("No settings found; writing default settings to {}", ini_path);
 			VMManager::SetDefaultSettings(*s_settings_interface, true, true, true, true, true);
-		}
 
-		s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::SW));
-		s_settings_interface->SetIntValue("EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Off));
-		s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Horizon");
-		s_settings_interface->SetBoolValue("EmuCore/GS", "FrameLimitEnable", false);
-		s_settings_interface->SetIntValue("EmuCore/GS", "VsyncEnable", 0);
-		s_settings_interface->SetBoolValue("UI", "EnableFullscreenUI", false);
-		s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
-		s_settings_interface->SetBoolValue("InputSources", "SDL", false);
-		s_settings_interface->SetBoolValue("Logging", "EnableSystemConsole", true);
-		s_settings_interface->SetBoolValue("Logging", "EnableVerbose", false);
-		s_settings_interface->Save();
+			s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::DK3D));
+			s_settings_interface->SetIntValue("EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Off));
+			s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Horizon");
+			s_settings_interface->SetBoolValue("EmuCore/GS", "FrameLimitEnable", false);
+			s_settings_interface->SetIntValue("EmuCore/GS", "VsyncEnable", 0);
+			s_settings_interface->SetBoolValue("UI", "EnableFullscreenUI", false);
+			s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
+			s_settings_interface->SetBoolValue("InputSources", "SDL", false);
+			s_settings_interface->SetBoolValue("Logging", "EnableSystemConsole", true);
+			s_settings_interface->SetBoolValue("Logging", "EnableVerbose", false);
+			s_settings_interface->Save();
+		}
 
 		VMManager::Internal::LoadStartupSettings();
 		EmuFolders::EnsureFoldersExist();
