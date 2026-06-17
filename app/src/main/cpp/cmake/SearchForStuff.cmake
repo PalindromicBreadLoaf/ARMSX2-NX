@@ -58,6 +58,8 @@ elseif (HORIZON)
 	add_subdirectory(3rdparty/harfbuzz EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/freetype EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/plutosvg1 EXCLUDE_FROM_ALL)
+	# Figure out FFMpeg later. This is just to keep GCC happy
+	set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
 	set(CUBEB_API ON)
 else()
 	find_package(CURL REQUIRED)

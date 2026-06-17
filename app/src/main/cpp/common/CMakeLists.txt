@@ -166,7 +166,10 @@ elseif(HORIZON)
 		Horizon/HorizonHostSys.cpp
 		Horizon/HorizonThreads.cpp
 		Horizon/HorizonMisc.cpp
+		Horizon/HorizonNet.cpp
+		Horizon/HorizonCompat.cpp
 	)
+	target_include_directories(common PUBLIC Horizon/compat)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp

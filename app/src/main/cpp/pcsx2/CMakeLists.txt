@@ -878,8 +878,13 @@ set(pcsx2InputHeaders
 
 if(HORIZON)
 	list(REMOVE_ITEM pcsx2HostSources Host/SDLAudioStream.cpp)
+	list(REMOVE_ITEM pcsx2HostSources Host/OboeAudioStream.cpp)
+	list(REMOVE_ITEM pcsx2HostHeaders Host/OboeAudioStream.h)
 	list(REMOVE_ITEM pcsx2InputSources Input/SDLInputSource.cpp)
 	list(REMOVE_ITEM pcsx2InputHeaders Input/SDLInputSource.h)
+	list(REMOVE_ITEM pcsx2USBSources USB/usb-pad/usb-pad-sdl-ff.cpp)
+	list(REMOVE_ITEM pcsx2USBHeaders USB/usb-pad/usb-pad-sdl-ff.h)
+	list(REMOVE_ITEM pcsx2DEV9Sources DEV9/pcap_io.cpp)
 endif()
 
 if(APPLE)
@@ -928,6 +933,13 @@ set(pcsx2OSXSources
 set(pcsx2FreeBSDSources
 	CDVD/Darwin/DriveUtility.cpp
 	CDVD/Darwin/IOCtlSrc.cpp
+	)
+
+# Switch has no optical drive
+# TODO: Support external optical drives?
+set(pcsx2HorizonSources
+	CDVD/Horizon/DriveUtility.cpp
+	CDVD/Horizon/IOCtlSrc.cpp
 	)
 
 # Linux headers
@@ -1151,7 +1163,7 @@ elseif(LINUX)
 	)
 elseif(HORIZON)
 	target_sources(PCSX2 PRIVATE
-		${pcsx2LinuxSources}
+		${pcsx2HorizonSources}
 		${pcsx2LinuxHeaders}
 	)
 endif()

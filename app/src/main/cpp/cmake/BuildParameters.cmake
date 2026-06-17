@@ -150,6 +150,9 @@ elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x1000)
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
 		list(APPEND PCSX2_DEFS __SWITCH__=1)
+		list(APPEND PCSX2_DEFS __LINUX_ERRNO_EXTENSIONS__=1)
+		# GCC is much more strict than Clang is by default
+		add_compile_options(-flax-vector-conversions)
 	endif()
 else()
 	message(FATAL_ERROR "Unsupported architecture: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
