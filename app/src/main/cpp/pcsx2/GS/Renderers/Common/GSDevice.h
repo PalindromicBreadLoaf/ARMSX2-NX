@@ -9,7 +9,9 @@
 #include "GS/Renderers/Common/GSFastList.h"
 #include "GS/Renderers/Common/GSGPUProfile.h"
 #include "GS/Renderers/Common/GSTexture.h"
+#ifdef ENABLE_VULKAN
 #include "GS/Renderers/Vulkan/GSTextureVK.h"
+#endif
 #include "GS/Renderers/Common/GSVertex.h"
 #include "GS/GSAlignedClass.h"
 #include "GS/GSExtra.h"

@@ -937,6 +937,25 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 	s_fh = NULL;
 }
 
+#elif defined(__SWITCH__)
+
+#include <cstring>
+#include <malloc.h>
+
+// Horizon has no shm_open/mmap
+void* GSAllocateWrappedMemory(size_t size, size_t repeat)
+{
+	void* base = memalign(0x1000, size * repeat);
+	if (base)
+		std::memset(base, 0, size * repeat);
+	return base;
+}
+
+void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
+{
+	free(ptr);
+}
+
 #else
 
 #include <sys/mman.h>

@@ -5,6 +5,8 @@
 
 #include "common/AlignedMalloc.h"
 
+#include <climits>
+
 template <class T>
 struct Element
 {

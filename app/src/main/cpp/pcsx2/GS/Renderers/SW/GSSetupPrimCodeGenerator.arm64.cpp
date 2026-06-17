@@ -20,7 +20,13 @@ static const auto& _locals = x3;
 static const auto& _scratchaddr = x7;
 static const auto& _vscratch = v31;
 
-#define _local(field) MemOperand(_locals, offsetof(GSScanlineLocalData, field))
+#if defined(__GNUC__) && !defined(__clang__)
+#define _offsetof_rt(type, field) ((size_t)((char*)&((type*)16)->field - (char*)16))
+#else
+#define _offsetof_rt(type, field) offsetof(type, field)
+#endif
+
+#define _local(field) MemOperand(_locals, _offsetof_rt(GSScanlineLocalData, field))
 #define armAsm (&m_emitter)
 
 GSSetupPrimCodeGenerator::GSSetupPrimCodeGenerator(u64 key, void* code, size_t maxsize)

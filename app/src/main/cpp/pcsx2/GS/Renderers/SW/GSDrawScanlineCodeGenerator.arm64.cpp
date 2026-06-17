@@ -77,8 +77,15 @@ static const auto& _d4_f = v9;
 static const auto& _test = v8;
 static const auto& _fd = v2;
 
-#define _local(field) MemOperand(_locals, offsetof(GSScanlineLocalData, field))
-#define _global(field) MemOperand(_globals, offsetof(GSScanlineGlobalData, field))
+// Compute the offset with plain pointer arithmetic on GCC because reasons
+#if defined(__GNUC__) && !defined(__clang__)
+#define _offsetof_rt(type, field) ((size_t)((char*)&((type*)16)->field - (char*)16))
+#else
+#define _offsetof_rt(type, field) offsetof(type, field)
+#endif
+
+#define _local(field) MemOperand(_locals, _offsetof_rt(GSScanlineLocalData, field))
+#define _global(field) MemOperand(_globals, _offsetof_rt(GSScanlineGlobalData, field))
 #define armAsm (&m_emitter)
 
 GSDrawScanlineCodeGenerator::GSDrawScanlineCodeGenerator(u64 key, void* code, size_t maxsize)
