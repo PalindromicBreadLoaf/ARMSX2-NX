@@ -34,6 +34,10 @@
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #endif
 
+#ifdef __SWITCH__
+#include "GS/Renderers/Null/GSDeviceNull.h"
+#endif
+
 #ifdef _WIN32
 
 #include "GS/Renderers/DX11/GSDevice11.h"
@@ -100,7 +104,16 @@ static RenderAPI GetAPIForRenderer(GSRendererType renderer)
 
 			// We could end up here if we ever removed a renderer.
 		default:
-			return GetAPIForRenderer(GSUtil::GetPreferredRenderer());
+		{
+			// The Null and SW renderers have no graphics API of their own. On builds without a
+			// hardware backend GetPreferredRenderer() returns SW.
+			// Report no API in that case; OpenGSDevice() resolves it to the headless null device.
+			// This is a hack and will be removed in the future if I can remember to.
+			const GSRendererType preferred = GSUtil::GetPreferredRenderer();
+			if (preferred == renderer || preferred == GSRendererType::SW || preferred == GSRendererType::Null)
+				return RenderAPI::None;
+			return GetAPIForRenderer(preferred);
+		}
 	}
 }
 
@@ -132,6 +145,12 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 #ifdef ENABLE_VULKAN
 		case RenderAPI::Vulkan:
 			g_gs_device = std::make_unique<GSDeviceVK>();
+			break;
+#endif
+
+#ifdef __SWITCH__
+		case RenderAPI::None:
+			g_gs_device = std::make_unique<GSDeviceNull>();
 			break;
 #endif
 
