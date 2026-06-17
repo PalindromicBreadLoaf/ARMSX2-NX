@@ -6,6 +6,7 @@
 #include "GS/Renderers/SW/GSVertexSW.h"
 #include "GS/GSState.h"
 
+#include "common/HostSys.h"
 #include "common/StringUtil.h"
 #include "common/Perf.h"
 
@@ -88,8 +89,15 @@ static const auto& _fd = v2;
 #define _global(field) MemOperand(_globals, _offsetof_rt(GSScanlineGlobalData, field))
 #define armAsm (&m_emitter)
 
+#ifdef __SWITCH__
+static constexpr auto kCodePic = vixl::aarch64::PositionIndependentCode;
+#else
+static constexpr auto kCodePic = vixl::aarch64::PositionDependentCode;
+#endif
+
 GSDrawScanlineCodeGenerator::GSDrawScanlineCodeGenerator(u64 key, void* code, size_t maxsize)
-	: m_emitter(static_cast<vixl::byte*>(code), maxsize, vixl::aarch64::PositionDependentCode)
+	: m_emitter(static_cast<vixl::byte*>(HostSys::JitGetWritablePointer(code)), maxsize, kCodePic)
+	, m_code(code)
 	, m_sel(key)
 {
 	// hopefully no constants which need to be moved to register first..

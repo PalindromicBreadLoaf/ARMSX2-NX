@@ -4,6 +4,7 @@
 #include "GS/Renderers/SW/GSSetupPrimCodeGenerator.arm64.h"
 #include "GS/Renderers/SW/GSVertexSW.h"
 
+#include "common/HostSys.h"
 #include "common/StringUtil.h"
 #include "common/Perf.h"
 
@@ -29,8 +30,15 @@ static const auto& _vscratch = v31;
 #define _local(field) MemOperand(_locals, _offsetof_rt(GSScanlineLocalData, field))
 #define armAsm (&m_emitter)
 
+#ifdef __SWITCH__
+static constexpr auto kCodePic = vixl::aarch64::PositionIndependentCode;
+#else
+static constexpr auto kCodePic = vixl::aarch64::PositionDependentCode;
+#endif
+
 GSSetupPrimCodeGenerator::GSSetupPrimCodeGenerator(u64 key, void* code, size_t maxsize)
-	: m_emitter(static_cast<vixl::byte*>(code), maxsize, vixl::aarch64::PositionDependentCode)
+	: m_emitter(static_cast<vixl::byte*>(HostSys::JitGetWritablePointer(code)), maxsize, kCodePic)
+	, m_code(code)
 	, m_sel(key)
 {
 	m_en.z = m_sel.zb ? 1 : 0;

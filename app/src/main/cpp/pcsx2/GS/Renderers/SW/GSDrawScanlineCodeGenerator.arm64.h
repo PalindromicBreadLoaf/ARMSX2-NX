@@ -15,7 +15,7 @@ public:
 	void Generate();
 
 	size_t GetSize() const { return m_emitter.GetSizeOfCodeGenerated(); }
-	const u8* GetCode() const { return m_emitter.GetBuffer().GetStartAddress<const u8*>(); }
+	const u8* GetCode() const { return static_cast<const u8*>(m_code); }
 
 private:
 	void Init();
@@ -75,6 +75,10 @@ private:
 	void split16_2x8(const vixl::aarch64::VRegister& l, const vixl::aarch64::VRegister& h, const vixl::aarch64::VRegister& src);
 
 	vixl::aarch64::MacroAssembler m_emitter;
+
+	// Executable address of the code.
+	// This is identical everywhere but Switch
+	void* m_code;
 
 	GSScanlineSelector m_sel;
 
