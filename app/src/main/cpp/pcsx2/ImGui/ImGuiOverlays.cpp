@@ -226,11 +226,18 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 		{
 			// CPU
 			text.clear();
-			const cpuinfo_package* const package = cpuinfo_get_package(0);
-			text.append_format("CPU: {} ({}C/{}T)",
-				package ? package->name : "Unknown",
-				cpuinfo_get_cores_count(),
-				cpuinfo_get_processors_count());
+			if (cpuinfo_initialize())
+			{
+				const cpuinfo_package* const package = cpuinfo_get_package(0);
+				text.append_format("CPU: {} ({}C/{}T)",
+					package ? package->name : "Unknown",
+					cpuinfo_get_cores_count(),
+					cpuinfo_get_processors_count());
+			}
+			else
+			{
+				text.append("CPU: Unknown");
+			}
 			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
 
 			// GPU
