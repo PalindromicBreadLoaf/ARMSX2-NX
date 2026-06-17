@@ -3,7 +3,9 @@
 
 #include "usb-pad.h"
 #include "USB/qemu-usb/USBinternal.h"
+#if !defined(__SWITCH__)
 #include "USB/usb-pad/usb-pad-sdl-ff.h"
+#endif
 #include "USB/USB.h"
 #include "Host.h"
 #include "StateWrapper.h"
@@ -603,7 +605,9 @@ namespace usb_pad
 			return;
 
 		mFFdev.reset();
+#if !defined(__SWITCH__)
 		mFFdev = SDLFFDevice::Create(mFFdevName);
+#endif
 	}
 
 	static void pad_handle_data(USBDevice* dev, USBPacket* p)

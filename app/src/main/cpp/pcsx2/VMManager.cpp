@@ -2846,7 +2846,8 @@ void VMManager::LogCPUCapabilities()
 		GetPhysicalMemory() / _1mb,
 		static_cast<double>(GetPhysicalMemory()) / static_cast<double>(_1gb));
 
-	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Processor        = {}", cpuinfo_get_package(0)->name);
+	const cpuinfo_package* const package = cpuinfo_get_package(0);
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Processor        = {}", package ? package->name : "Unknown");
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Core Count       = {} cores", cpuinfo_get_cores_count());
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Thread Count     = {} threads", cpuinfo_get_processors_count());
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLnFmt("  Cluster Count    = {} clusters", cpuinfo_get_clusters_count());
@@ -4147,6 +4148,7 @@ void VMManager::InitializeDiscordPresence()
 	(void)0;
 #endif
 #else
+#if defined(USE_DISCORD_SDK)
 	if (s_discord_presence_active)
 		return;
 
@@ -4155,6 +4157,9 @@ void VMManager::InitializeDiscordPresence()
 	s_discord_presence_active = true;
 
 	UpdateDiscordPresence(true);
+#else
+	(void)0;
+#endif
 #endif
 }
 
@@ -4191,6 +4196,7 @@ void VMManager::ShutdownDiscordPresence()
 	s_discord_presence_active = false;
 #endif
 #else
+#if defined(USE_DISCORD_SDK)
 	if (!s_discord_presence_active)
 		return;
 
@@ -4198,6 +4204,11 @@ void VMManager::ShutdownDiscordPresence()
 	Discord_RunCallbacks();
 	Discord_Shutdown();
 	s_discord_presence_active = false;
+#else
+	if (!s_discord_presence_active)
+		return;
+	s_discord_presence_active = false;
+#endif
 #endif
 }
 
@@ -4234,6 +4245,7 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 		s_discord_presence_time_epoch = std::time(nullptr);
 #endif
 #else
+#if defined(USE_DISCORD_SDK)
 	if (!s_discord_presence_active)
 		return;
 
@@ -4264,6 +4276,12 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 
 	Discord_UpdatePresence(&rp);
 	Discord_RunCallbacks();
+#else
+	if (!s_discord_presence_active)
+		return;
+	if (update_session_time)
+		s_discord_presence_time_epoch = std::time(nullptr);
+#endif
 #endif
 }
 
@@ -4282,10 +4300,14 @@ void VMManager::PollDiscordPresence()
 	(void)0;
 	#endif
 #else
+#if defined(USE_DISCORD_SDK)
 	if (!s_discord_presence_active)
 		return;
 
 	Discord_RunCallbacks();
+#else
+	(void)0;
+#endif
 #endif
 }
 
