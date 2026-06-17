@@ -182,7 +182,15 @@ void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& 
 
 	const Result rc = svcSetMemoryPermission(baseaddr, size, HorizonProt(mode));
 	if (R_FAILED(rc))
-		pxFailRel("svcSetMemoryPermission() failed");
+	{
+		static bool s_warned = false;
+		if (!s_warned)
+		{
+			Console.Warning("HostSys::MemProtect: svcSetMemoryPermission(%p, 0x%zx) failed: 0x%08x "
+							"(continuing with further failures suppressed)", baseaddr, size, static_cast<u32>(rc));
+			s_warned = true;
+		}
+	}
 }
 
 std::string HostSys::GetFileMappingName(const char* prefix)
