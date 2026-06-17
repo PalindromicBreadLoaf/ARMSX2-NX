@@ -384,6 +384,9 @@ bool FileMemoryCard::Create(const char* mcdFile, uint sizeInMB)
 	if (!fp)
 		return false;
 
+	// Write to the SD Card in much bigger chunks to prevent crazy OS overhead
+	std::setvbuf(fp.get(), nullptr, _IOFBF, 1 * 1024 * 1024);
+
 	u8 buf[MC2_ERASE_SIZE];
 	std::memset(buf, 0xff, sizeof(buf));
 
@@ -971,6 +974,8 @@ bool FileMcd_CreateNewCard(const std::string_view name, MemoryCardType type, Mem
 				fmt::format(TRANSLATE_FS("MemoryCard", "Failed to create memory card. The error was:\n{}"), error.GetDescription()));
 			return false;
 		}
+
+		std::setvbuf(fp.get(), nullptr, _IOFBF, 1 * 1024 * 1024);
 
 		if (!isPSX)
 		{
