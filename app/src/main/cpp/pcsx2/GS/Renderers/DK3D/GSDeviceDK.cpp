@@ -13,11 +13,16 @@
 #include "common/Horizon/Horizon.h" // nwindowGetDefault()
 
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 namespace
 {
 	constexpr u32 CMDBUF_SIZE = 64 * 1024;
 	constexpr u32 CODE_MEMSIZE = 128 * 1024;
+
+	// Test texture pattern dimensions
+	constexpr int TEST_TEX_SIZE = 256;
 
 	// Cornflower blue because it's funny.
 	constexpr float CLEAR_R = 0.125f;
@@ -131,14 +136,117 @@ bool GSDeviceDK::CreateDeviceObjects()
 	if (!m_queue)
 		return false;
 
-	// Temporarily draw a test triangle to verify that shaders are working
-	m_have_test_triangle = LoadShaders();
-	if (!m_have_test_triangle)
-		Console.Warning("DK3D: test-triangle shaders unavailable");
+	// Test image and sampler
+	dkMemBlockMakerDefaults(&memblock_maker, m_device, DK_MEMBLOCK_ALIGNMENT);
+	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+	m_descriptor_memblock = dkMemBlockCreate(&memblock_maker);
+	if (!m_descriptor_memblock)
+		return false;
+	const DkGpuAddr descriptor_base = dkMemBlockGetGpuAddr(m_descriptor_memblock);
+	m_image_descriptor_set = descriptor_base;
+	m_sampler_descriptor_set = descriptor_base + NUM_IMAGE_DESCRIPTORS * DK_IMAGE_DESCRIPTOR_ALIGNMENT;
 
-	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers, triangle=%d).", m_present_width,
-		m_present_height, NUM_FRAMEBUFFERS, m_have_test_triangle ? 1 : 0);
+	LoadShaders();
+	if (!m_have_test_triangle && !m_present_shaders_ok)
+		Console.Warning("DK3D: no shaders available. Things will be broken.");
+
+	m_have_test_texture = m_present_shaders_ok && SetupTestTexture();
+
+	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers, triangle=%d, textured=%d).", m_present_width,
+		m_present_height, NUM_FRAMEBUFFERS, m_have_test_triangle ? 1 : 0, m_have_test_texture ? 1 : 0);
 	return true;
+}
+
+bool GSDeviceDK::SetupTestTexture()
+{
+	m_test_texture = GSTextureDK::Create(m_device, m_queue, GSTexture::Type::Texture, GSTexture::Format::Color,
+		TEST_TEX_SIZE, TEST_TEX_SIZE, 1);
+	if (!m_test_texture)
+	{
+		Console.Error("DK3D: failed to create test texture.");
+		return false;
+	}
+
+	// Checkerboard with a fancy gradient. Please hold your oohs and aahs.
+	std::vector<u32> pixels(static_cast<size_t>(TEST_TEX_SIZE) * TEST_TEX_SIZE);
+	for (int y = 0; y < TEST_TEX_SIZE; ++y)
+	{
+		for (int x = 0; x < TEST_TEX_SIZE; ++x)
+		{
+			const bool checker = (((x >> 5) ^ (y >> 5)) & 1) != 0;
+			const u32 r = static_cast<u32>(x);
+			const u32 g = static_cast<u32>(y);
+			const u32 b = checker ? 0xFFu : 0x40u;
+			pixels[static_cast<size_t>(y) * TEST_TEX_SIZE + x] = r | (g << 8) | (b << 16) | (0xFFu << 24);
+		}
+	}
+
+	if (!m_test_texture->Update(GSVector4i(0, 0, TEST_TEX_SIZE, TEST_TEX_SIZE), pixels.data(), TEST_TEX_SIZE * 4, 0))
+	{
+		Console.Error("DK3D: failed to upload the test texture.");
+		m_test_texture.reset();
+		return false;
+	}
+
+	m_offscreen_rt = GSTextureDK::Create(m_device, m_queue, GSTexture::Type::RenderTarget, GSTexture::Format::Color,
+		TEST_TEX_SIZE, TEST_TEX_SIZE, 1);
+	if (!m_offscreen_rt)
+	{
+		Console.Error("DK3D: failed to create the offscreen render target.");
+		m_test_texture.reset();
+		return false;
+	}
+
+	DkSampler sampler;
+	dkSamplerDefaults(&sampler);
+	sampler.minFilter = DkFilter_Linear;
+	sampler.magFilter = DkFilter_Linear;
+	sampler.wrapMode[0] = DkWrapMode_ClampToEdge;
+	sampler.wrapMode[1] = DkWrapMode_ClampToEdge;
+	sampler.wrapMode[2] = DkWrapMode_ClampToEdge;
+
+	DkSamplerDescriptor sampler_descriptor;
+	dkSamplerDescriptorInitialize(&sampler_descriptor, &sampler);
+
+	const DkImageDescriptor image_descriptors[NUM_IMAGE_DESCRIPTORS] = {
+		m_test_texture->GetDescriptor(), m_offscreen_rt->GetDescriptor()};
+	dkCmdBufClear(m_cmdbuf);
+	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set, image_descriptors, sizeof(image_descriptors));
+	dkCmdBufPushData(m_cmdbuf, m_sampler_descriptor_set, &sampler_descriptor, sizeof(sampler_descriptor));
+	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
+	dkQueueWaitIdle(m_queue);
+	dkCmdBufClear(m_cmdbuf);
+	return true;
+}
+
+void GSDeviceDK::DrawTexturedQuad(const DkImageView* target, int width, int height, u32 image_id)
+{
+	dkCmdBufBindRenderTarget(m_cmdbuf, target, nullptr);
+
+	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+	const DkScissor scissor = {0, 0, static_cast<u32>(width), static_cast<u32>(height)};
+	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+	dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
+
+	DkRasterizerState rasterizer_state;
+	DkColorState color_state;
+	DkColorWriteState color_write_state;
+	dkRasterizerStateDefaults(&rasterizer_state);
+	dkColorStateDefaults(&color_state);
+	dkColorWriteStateDefaults(&color_write_state);
+	dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+	dkCmdBufBindColorState(m_cmdbuf, &color_state);
+	dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
+
+	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, 1);
+
+	const DkShader* shaders[] = {&m_present_vsh, &m_present_fsh};
+	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+
+	const DkResHandle texture_handle = dkMakeTextureHandle(image_id, 0);
+	dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 0, &texture_handle, 1);
+	dkCmdBufDraw(m_cmdbuf, DkPrimitive_Triangles, 3, 1, 0, 0);
 }
 
 bool GSDeviceDK::LoadShaders()
@@ -188,21 +296,37 @@ bool GSDeviceDK::LoadShaders()
 		return true;
 	};
 
-	if (!load_one(m_vertex_shader, "romfs:/shaders/triangle_vsh.dksh") ||
-		!load_one(m_fragment_shader, "romfs:/shaders/color_fsh.dksh"))
-	{
-		return false;
-	}
+	m_have_test_triangle = load_one(m_vertex_shader, "romfs:/shaders/triangle_vsh.dksh") &&
+						   load_one(m_fragment_shader, "romfs:/shaders/color_fsh.dksh");
 
-	Console.WriteLn("DK3D: test-triangle shaders loaded.");
-	return true;
+	m_present_shaders_ok = load_one(m_present_vsh, "romfs:/shaders/fullscreen_vsh.dksh") &&
+						   load_one(m_present_fsh, "romfs:/shaders/texture_fsh.dksh");
+
+	if (m_have_test_triangle)
+		Console.WriteLn("DK3D: test-triangle shaders loaded.");
+	if (m_present_shaders_ok)
+		Console.WriteLn("DK3D: textured-present shaders loaded.");
+
+	return m_have_test_triangle || m_present_shaders_ok;
 }
 
 void GSDeviceDK::DestroyDeviceObjects()
 {
 	if (m_queue)
-	{
 		dkQueueWaitIdle(m_queue);
+
+	// Destroy the textures before the device goes away.
+	m_test_texture.reset();
+	m_offscreen_rt.reset();
+	m_have_test_texture = false;
+
+	if (m_descriptor_memblock)
+	{
+		dkMemBlockDestroy(m_descriptor_memblock);
+		m_descriptor_memblock = nullptr;
+	}
+	if (m_queue)
+	{
 		dkQueueDestroy(m_queue);
 		m_queue = nullptr;
 	}
@@ -273,39 +397,51 @@ GSDevice::PresentResult GSDeviceDK::BeginPresent(bool frame_skip)
 	if (frame_skip || !m_swapchain)
 		return PresentResult::FrameSkipped;
 
-	// This will be replaced later with something better, it just needs to work
-	// right now.
+	// This is all testing and will be thrown away once the renderer is more up-to-speed.
 	dkQueueWaitIdle(m_queue);
 	dkCmdBufClear(m_cmdbuf);
 
 	m_present_slot = dkQueueAcquireImage(m_queue, m_swapchain);
 
-	DkImageView color_view;
-	dkImageViewDefaults(&color_view, &m_framebuffers[m_present_slot]);
-	dkCmdBufBindRenderTarget(m_cmdbuf, &color_view, nullptr);
+	DkImageView swapchain_view;
+	dkImageViewDefaults(&swapchain_view, &m_framebuffers[m_present_slot]);
 
-	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(m_present_width),
-		static_cast<float>(m_present_height), 0.0f, 1.0f};
-	const DkScissor scissor = {0, 0, static_cast<u32>(m_present_width), static_cast<u32>(m_present_height)};
-	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
-	dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
-	dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, CLEAR_R, CLEAR_G, CLEAR_B, 1.0f);
-
-	if (m_have_test_triangle)
+	if (m_have_test_texture)
 	{
-		DkRasterizerState rasterizer_state;
-		DkColorState color_state;
-		DkColorWriteState color_write_state;
-		dkRasterizerStateDefaults(&rasterizer_state);
-		dkColorStateDefaults(&color_state);
-		dkColorWriteStateDefaults(&color_write_state);
+		DkImageView rt_view;
+		m_offscreen_rt->GetImageView(&rt_view);
+		DrawTexturedQuad(&rt_view, m_offscreen_rt->GetWidth(), m_offscreen_rt->GetHeight(), 0);
 
-		const DkShader* shaders[] = {&m_vertex_shader, &m_fragment_shader};
-		dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
-		dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
-		dkCmdBufBindColorState(m_cmdbuf, &color_state);
-		dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
-		dkCmdBufDraw(m_cmdbuf, DkPrimitive_Triangles, 3, 1, 0, 0);
+		dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+
+		DrawTexturedQuad(&swapchain_view, m_present_width, m_present_height, 1);
+	}
+	else
+	{
+		dkCmdBufBindRenderTarget(m_cmdbuf, &swapchain_view, nullptr);
+		const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(m_present_width),
+			static_cast<float>(m_present_height), 0.0f, 1.0f};
+		const DkScissor scissor = {0, 0, static_cast<u32>(m_present_width), static_cast<u32>(m_present_height)};
+		dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+		dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
+		dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, CLEAR_R, CLEAR_G, CLEAR_B, 1.0f);
+
+		if (m_have_test_triangle)
+		{
+			DkRasterizerState rasterizer_state;
+			DkColorState color_state;
+			DkColorWriteState color_write_state;
+			dkRasterizerStateDefaults(&rasterizer_state);
+			dkColorStateDefaults(&color_state);
+			dkColorWriteStateDefaults(&color_write_state);
+			dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+			dkCmdBufBindColorState(m_cmdbuf, &color_state);
+			dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
+
+			const DkShader* shaders[] = {&m_vertex_shader, &m_fragment_shader};
+			dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+			dkCmdBufDraw(m_cmdbuf, DkPrimitive_Triangles, 3, 1, 0, 0);
+		}
 	}
 
 	return PresentResult::OK;

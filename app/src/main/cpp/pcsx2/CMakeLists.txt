@@ -891,6 +891,8 @@ if(HORIZON)
 	# deko3d renderer
 	list(APPEND pcsx2GSSources GS/Renderers/DK3D/GSDeviceDK.cpp)
 	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/GSDeviceDK.h)
+	list(APPEND pcsx2GSSources GS/Renderers/DK3D/GSTextureDK.cpp)
+	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/GSTextureDK.h)
 endif()
 
 if(APPLE)

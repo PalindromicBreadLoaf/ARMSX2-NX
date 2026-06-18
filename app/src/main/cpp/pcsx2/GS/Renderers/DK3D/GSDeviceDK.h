@@ -8,7 +8,10 @@
 #include "GS/Renderers/Common/GSTexture.h"
 
 #ifdef __SWITCH__
+#include "GS/Renderers/DK3D/GSTextureDK.h"
+
 #include <deko3d.h>
+#include <memory>
 #endif
 
 // deko3d hardware GS backend for the Nintendo Switch only.
@@ -74,10 +77,15 @@ protected:
 #ifdef __SWITCH__
 private:
 	static constexpr unsigned NUM_FRAMEBUFFERS = 2;
+	// Image descriptor slots for tests
+	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 2;
 
 	bool CreateDeviceObjects();
 	void DestroyDeviceObjects();
 	bool LoadShaders();
+	bool SetupTestTexture();
+	// Draws a fullscreen textured quad
+	void DrawTexturedQuad(const DkImageView* target, int width, int height, u32 image_id);
 
 	DkDevice m_device = nullptr;
 	DkQueue m_queue = nullptr;
@@ -91,7 +99,17 @@ private:
 	DkMemBlock m_code_memblock = nullptr;
 	DkShader m_vertex_shader{};
 	DkShader m_fragment_shader{};
+	DkShader m_present_vsh{};
+	DkShader m_present_fsh{};
 	bool m_have_test_triangle = false;
+	bool m_present_shaders_ok = false;
+
+	DkMemBlock m_descriptor_memblock = nullptr;
+	DkGpuAddr m_image_descriptor_set = 0;
+	DkGpuAddr m_sampler_descriptor_set = 0;
+	std::unique_ptr<GSTextureDK> m_test_texture;
+	std::unique_ptr<GSTextureDK> m_offscreen_rt;
+	bool m_have_test_texture = false;
 
 	u32 m_framebuffer_size = 0;
 	int m_present_width = 0;

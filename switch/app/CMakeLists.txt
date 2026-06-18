@@ -27,25 +27,24 @@ set(DK3D_ROMFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/romfs")
 set(DK3D_ROMFS_SHADER_DIR "${DK3D_ROMFS_DIR}/shaders")
 file(MAKE_DIRECTORY "${DK3D_ROMFS_SHADER_DIR}")
 
-set(DK3D_DKSH_FILES
-	"${DK3D_ROMFS_SHADER_DIR}/triangle_vsh.dksh"
-	"${DK3D_ROMFS_SHADER_DIR}/color_fsh.dksh"
-)
+set(DK3D_DKSH_FILES "")
 
-add_custom_command(
-	OUTPUT "${DK3D_ROMFS_SHADER_DIR}/triangle_vsh.dksh"
-	COMMAND "${UAM_EXE}" -s vert -o "${DK3D_ROMFS_SHADER_DIR}/triangle_vsh.dksh" "${DK3D_SHADER_SRC_DIR}/triangle_vsh.glsl"
-	DEPENDS "${DK3D_SHADER_SRC_DIR}/triangle_vsh.glsl"
-	COMMENT "uam vert: triangle_vsh.glsl -> triangle_vsh.dksh"
-	VERBATIM
-)
-add_custom_command(
-	OUTPUT "${DK3D_ROMFS_SHADER_DIR}/color_fsh.dksh"
-	COMMAND "${UAM_EXE}" -s frag -o "${DK3D_ROMFS_SHADER_DIR}/color_fsh.dksh" "${DK3D_SHADER_SRC_DIR}/color_fsh.glsl"
-	DEPENDS "${DK3D_SHADER_SRC_DIR}/color_fsh.glsl"
-	COMMENT "uam frag: color_fsh.glsl -> color_fsh.dksh"
-	VERBATIM
-)
+# Compile each glsl to dksh with uam. STAGE is the -s argument.
+function(dk3d_add_shader NAME STAGE)
+	add_custom_command(
+		OUTPUT "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh"
+		COMMAND "${UAM_EXE}" -s ${STAGE} -o "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh" "${DK3D_SHADER_SRC_DIR}/${NAME}.glsl"
+		DEPENDS "${DK3D_SHADER_SRC_DIR}/${NAME}.glsl"
+		COMMENT "uam ${STAGE}: ${NAME}.glsl -> ${NAME}.dksh"
+		VERBATIM
+	)
+	set(DK3D_DKSH_FILES ${DK3D_DKSH_FILES} "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh" PARENT_SCOPE)
+endfunction()
+
+dk3d_add_shader(triangle_vsh vert)
+dk3d_add_shader(color_fsh frag)
+dk3d_add_shader(fullscreen_vsh vert)
+dk3d_add_shader(texture_fsh frag)
 
 add_custom_target(armsx2_shaders DEPENDS ${DK3D_DKSH_FILES})
 dkp_add_asset_target(armsx2_romfs "${DK3D_ROMFS_DIR}")
