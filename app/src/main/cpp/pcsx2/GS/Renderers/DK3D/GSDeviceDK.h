@@ -77,15 +77,23 @@ protected:
 #ifdef __SWITCH__
 private:
 	static constexpr unsigned NUM_FRAMEBUFFERS = 2;
-	// Image descriptor slots for tests
-	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 2;
+	// A ring of image descriptors
+	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 1024;
+	// Two fixed samplers
+	static constexpr unsigned SAMPLER_POINT = 0;
+	static constexpr unsigned SAMPLER_LINEAR = 1;
+	static constexpr unsigned NUM_SAMPLERS = 2;
 
 	bool CreateDeviceObjects();
 	void DestroyDeviceObjects();
 	bool LoadShaders();
-	bool SetupTestTexture();
-	// Draws a fullscreen textured quad
-	void DrawTexturedQuad(const DkImageView* target, int width, int height, u32 image_id);
+	bool SetupSamplers();
+	// Resets the per-frame command buffer + stream offsets on a new frame.
+	void BeginFrameIfNeeded();
+	// Flushes a pending ClearRenderTarget to the image
+	void CommitClear(GSTextureDK* tex);
+	void DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
+		const DkShader* fragment_shader, bool linear);
 
 	DkDevice m_device = nullptr;
 	DkQueue m_queue = nullptr;
@@ -95,21 +103,22 @@ private:
 	DkMemBlock m_cmdbuf_memblock = nullptr;
 	DkCmdBuf m_cmdbuf = nullptr;
 
-	// Just don't display anything if missing shaders
+	// Convert/present pipeline
 	DkMemBlock m_code_memblock = nullptr;
-	DkShader m_vertex_shader{};
-	DkShader m_fragment_shader{};
-	DkShader m_present_vsh{};
-	DkShader m_present_fsh{};
-	bool m_have_test_triangle = false;
-	bool m_present_shaders_ok = false;
+	DkShader m_convert_vsh{};
+	DkShader m_copy_fsh{};
+	bool m_convert_shaders_ok = false;
 
 	DkMemBlock m_descriptor_memblock = nullptr;
 	DkGpuAddr m_image_descriptor_set = 0;
 	DkGpuAddr m_sampler_descriptor_set = 0;
-	std::unique_ptr<GSTextureDK> m_test_texture;
-	std::unique_ptr<GSTextureDK> m_offscreen_rt;
-	bool m_have_test_texture = false;
+	u32 m_next_image_slot = 0;
+
+	DkMemBlock m_vertex_memblock = nullptr;
+	u32 m_vertex_offset = 0;
+
+	DkImageView m_swapchain_view{};
+	bool m_frame_active = false;
 
 	u32 m_framebuffer_size = 0;
 	int m_present_width = 0;

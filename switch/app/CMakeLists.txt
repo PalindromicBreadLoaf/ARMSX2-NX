@@ -41,9 +41,7 @@ function(dk3d_add_shader NAME STAGE)
 	set(DK3D_DKSH_FILES ${DK3D_DKSH_FILES} "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh" PARENT_SCOPE)
 endfunction()
 
-dk3d_add_shader(triangle_vsh vert)
-dk3d_add_shader(color_fsh frag)
-dk3d_add_shader(fullscreen_vsh vert)
+dk3d_add_shader(convert_vsh vert)
 dk3d_add_shader(texture_fsh frag)
 
 add_custom_target(armsx2_shaders DEPENDS ${DK3D_DKSH_FILES})
