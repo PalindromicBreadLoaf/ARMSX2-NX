@@ -12,9 +12,12 @@
 #include "common/Console.h"
 #include "common/Horizon/Horizon.h" // nwindowGetDefault()
 
+#include <cstdio>
+
 namespace
 {
 	constexpr u32 CMDBUF_SIZE = 64 * 1024;
+	constexpr u32 CODE_MEMSIZE = 128 * 1024;
 
 	// Cornflower blue because it's funny.
 	constexpr float CLEAR_R = 0.125f;
@@ -128,8 +131,70 @@ bool GSDeviceDK::CreateDeviceObjects()
 	if (!m_queue)
 		return false;
 
-	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers).", m_present_width, m_present_height,
-		NUM_FRAMEBUFFERS);
+	// Temporarily draw a test triangle to verify that shaders are working
+	m_have_test_triangle = LoadShaders();
+	if (!m_have_test_triangle)
+		Console.Warning("DK3D: test-triangle shaders unavailable");
+
+	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers, triangle=%d).", m_present_width,
+		m_present_height, NUM_FRAMEBUFFERS, m_have_test_triangle ? 1 : 0);
+	return true;
+}
+
+bool GSDeviceDK::LoadShaders()
+{
+	DkMemBlockMaker memblock_maker;
+	dkMemBlockMakerDefaults(&memblock_maker, m_device, CODE_MEMSIZE);
+	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+	m_code_memblock = dkMemBlockCreate(&memblock_maker);
+	if (!m_code_memblock)
+		return false;
+
+	u32 code_offset = 0;
+	const auto load_one = [&](DkShader& shader, const char* path) -> bool {
+		std::FILE* f = std::fopen(path, "rb");
+		if (!f)
+		{
+			Console.Error("DK3D: could not open shader %s", path);
+			return false;
+		}
+		std::fseek(f, 0, SEEK_END);
+		const long size = std::ftell(f);
+		std::rewind(f);
+		if (size <= 0)
+		{
+			std::fclose(f);
+			return false;
+		}
+
+		const u32 offset = code_offset;
+		code_offset += (static_cast<u32>(size) + DK_SHADER_CODE_ALIGNMENT - 1) & ~(DK_SHADER_CODE_ALIGNMENT - 1);
+		if (code_offset > CODE_MEMSIZE)
+		{
+			std::fclose(f);
+			Console.Error("DK3D: shader code memblock too small for %s", path);
+			return false;
+		}
+
+		void* dst = static_cast<u8*>(dkMemBlockGetCpuAddr(m_code_memblock)) + offset;
+		const size_t read = std::fread(dst, 1, static_cast<size_t>(size), f);
+		std::fclose(f);
+		if (read != static_cast<size_t>(size))
+			return false;
+
+		DkShaderMaker shader_maker;
+		dkShaderMakerDefaults(&shader_maker, m_code_memblock, offset);
+		dkShaderInitialize(&shader, &shader_maker);
+		return true;
+	};
+
+	if (!load_one(m_vertex_shader, "romfs:/shaders/triangle_vsh.dksh") ||
+		!load_one(m_fragment_shader, "romfs:/shaders/color_fsh.dksh"))
+	{
+		return false;
+	}
+
+	Console.WriteLn("DK3D: test-triangle shaders loaded.");
 	return true;
 }
 
@@ -150,6 +215,12 @@ void GSDeviceDK::DestroyDeviceObjects()
 	{
 		dkMemBlockDestroy(m_cmdbuf_memblock);
 		m_cmdbuf_memblock = nullptr;
+	}
+	if (m_code_memblock)
+	{
+		dkMemBlockDestroy(m_code_memblock);
+		m_code_memblock = nullptr;
+		m_have_test_triangle = false;
 	}
 	if (m_swapchain)
 	{
@@ -219,6 +290,23 @@ GSDevice::PresentResult GSDeviceDK::BeginPresent(bool frame_skip)
 	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
 	dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
 	dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, CLEAR_R, CLEAR_G, CLEAR_B, 1.0f);
+
+	if (m_have_test_triangle)
+	{
+		DkRasterizerState rasterizer_state;
+		DkColorState color_state;
+		DkColorWriteState color_write_state;
+		dkRasterizerStateDefaults(&rasterizer_state);
+		dkColorStateDefaults(&color_state);
+		dkColorWriteStateDefaults(&color_write_state);
+
+		const DkShader* shaders[] = {&m_vertex_shader, &m_fragment_shader};
+		dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+		dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+		dkCmdBufBindColorState(m_cmdbuf, &color_state);
+		dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
+		dkCmdBufDraw(m_cmdbuf, DkPrimitive_Triangles, 3, 1, 0, 0);
+	}
 
 	return PresentResult::OK;
 #else

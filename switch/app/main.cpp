@@ -153,6 +153,11 @@ int main(int argc, char** argv)
 	INFO_LOG("================ ARMSX2-NX ================");
 	INFO_LOG("Logging to {}", LOG_PATH);
 
+	// Mount the .nro's romfs so the DK3D backend can load its shaders
+	const bool have_romfs = R_SUCCEEDED(romfsInit());
+	if (!have_romfs)
+		ERROR_LOG("romfsInit() failed. Deko3d shaders will be unavailable. Things will be broken");
+
 	EmuFolders::AppRoot = ARMSX2_ROOT;
 	EmuFolders::DataRoot = ARMSX2_ROOT;
 	EmuFolders::SetResourcesDirectory();
@@ -170,6 +175,8 @@ int main(int argc, char** argv)
 	{
 		ERROR_LOG("CPUThreadInitialize() failed; aborting.");
 		VMManager::Internal::CPUThreadShutdown();
+		if (have_romfs)
+			romfsExit();
 		if (have_socket)
 			socketExit();
 		return 1;
@@ -237,6 +244,8 @@ int main(int argc, char** argv)
 	VMManager::Internal::CPUThreadShutdown();
 	INFO_LOG("================ Exiting ================");
 
+	if (have_romfs)
+		romfsExit();
 	if (have_socket)
 		socketExit();
 	return 0;

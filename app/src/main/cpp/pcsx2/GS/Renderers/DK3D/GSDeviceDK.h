@@ -77,6 +77,7 @@ private:
 
 	bool CreateDeviceObjects();
 	void DestroyDeviceObjects();
+	bool LoadShaders();
 
 	DkDevice m_device = nullptr;
 	DkQueue m_queue = nullptr;
@@ -85,6 +86,12 @@ private:
 	DkSwapchain m_swapchain = nullptr;
 	DkMemBlock m_cmdbuf_memblock = nullptr;
 	DkCmdBuf m_cmdbuf = nullptr;
+
+	// Just don't display anything if missing shaders
+	DkMemBlock m_code_memblock = nullptr;
+	DkShader m_vertex_shader{};
+	DkShader m_fragment_shader{};
+	bool m_have_test_triangle = false;
 
 	u32 m_framebuffer_size = 0;
 	int m_present_width = 0;
