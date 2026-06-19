@@ -113,6 +113,7 @@ namespace
 
 			s_settings_interface->SetStringValue("Filenames", "Game", "");
 			s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::DK3D));
+			s_settings_interface->SetStringValue("EmuCore/GS", "AspectRatio", "4:3");
 			s_settings_interface->SetIntValue("EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Off));
 			s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Horizon");
 			s_settings_interface->SetBoolValue("EmuCore/GS", "FrameLimitEnable", false);
