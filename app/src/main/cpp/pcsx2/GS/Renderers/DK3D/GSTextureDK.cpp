@@ -27,7 +27,7 @@ DkImageFormat GSTextureDK::LookupFormat(Format format, bool& is_depth)
 		case Format::ColorHQ:      return DkImageFormat_RGB10A2_Unorm;
 		case Format::ColorHDR:     return DkImageFormat_RGBA16_Float;
 		case Format::ColorClip:    return DkImageFormat_RGBA16_Unorm;
-		case Format::DepthStencil: is_depth = true; return DkImageFormat_Z24S8;
+		case Format::DepthStencil: is_depth = true; return DkImageFormat_ZF32_X24S8;
 		case Format::UNorm8:       return DkImageFormat_R8_Unorm;
 		case Format::UInt16:       return DkImageFormat_R16_Uint;
 		case Format::UInt32:       return DkImageFormat_R32_Uint;
@@ -90,7 +90,7 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, DkQueue upload
 
 	dkImageInitialize(&tex->m_image, &layout, memblock, 0);
 
-	// Build the sampler-side descriptor up-front
+	// Build the sampler-side descriptor up front
 	DkImageView view;
 	dkImageViewDefaults(&view, &tex->m_image);
 	dkImageDescriptorInitialize(&tex->m_descriptor, &view, false, false);

@@ -77,23 +77,31 @@ protected:
 #ifdef __SWITCH__
 private:
 	static constexpr unsigned NUM_FRAMEBUFFERS = 2;
-	// A ring of image descriptors
 	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 1024;
-	// Two fixed samplers
 	static constexpr unsigned SAMPLER_POINT = 0;
-	static constexpr unsigned SAMPLER_LINEAR = 1;
-	static constexpr unsigned NUM_SAMPLERS = 2;
+	static constexpr unsigned SAMPLER_LINEAR = 4;
+	static constexpr unsigned NUM_SAMPLERS = 8;
 
 	bool CreateDeviceObjects();
 	void DestroyDeviceObjects();
 	bool LoadShaders();
 	bool SetupSamplers();
-	// Resets the per-frame command buffer + stream offsets on a new frame.
 	void BeginFrameIfNeeded();
-	// Flushes a pending ClearRenderTarget to the image
+	// deko3d cbAddMem hook for command streams that exceed CMDBUF_SIZE.
+	static void AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minReqSize);
+	void AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize);
+	// Flushes a pending ClearRenderTarget
 	void CommitClear(GSTextureDK* tex);
+	// Optional cb is fragment uniform buffer 0 for post-process shaders.
 	void DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
-		const DkShader* fragment_shader, bool linear);
+		const DkShader* fragment_shader, bool linear, const void* cb = nullptr, u32 cb_size = 0);
+	// Bump-allocate into per-frame stream buffers and return the GPU address.
+	DkGpuAddr StreamVertices(const void* data, u32 size);
+	DkGpuAddr StreamIndices(const void* data, u32 size);
+	DkGpuAddr StreamUniform(const void* data, u32 size);
+	u32 PushImage(const GSTextureDK* tex);
+	// Draw tfx geometry, splitting barriers for feedback-loop reads.
+	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
 
 	DkDevice m_device = nullptr;
 	DkQueue m_queue = nullptr;
@@ -109,6 +117,16 @@ private:
 	DkShader m_copy_fsh{};
 	bool m_convert_shaders_ok = false;
 
+	// Hardware tfx pipeline
+	DkShader m_tfx_vsh{};
+	DkShader m_tfx_fsh{};
+	bool m_tfx_shaders_ok = false;
+
+	// Post-processing fragment shaders
+	DkShader m_interlace_fsh{};
+	DkShader m_shadeboost_fsh{};
+	bool m_postprocess_shaders_ok = false;
+
 	DkMemBlock m_descriptor_memblock = nullptr;
 	DkGpuAddr m_image_descriptor_set = 0;
 	DkGpuAddr m_sampler_descriptor_set = 0;
@@ -116,6 +134,10 @@ private:
 
 	DkMemBlock m_vertex_memblock = nullptr;
 	u32 m_vertex_offset = 0;
+	DkMemBlock m_index_memblock = nullptr;
+	u32 m_index_offset = 0;
+	DkMemBlock m_uniform_memblock = nullptr;
+	u32 m_uniform_offset = 0;
 
 	DkImageView m_swapchain_view{};
 	bool m_frame_active = false;
