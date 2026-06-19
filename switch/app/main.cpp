@@ -2,8 +2,8 @@
 // Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
-// ARMSX2 Nintendo Switch entry point
 #include "common/Console.h"
+#include "common/FileSystem.h"
 #include "common/Path.h"
 
 #include "pcsx2/Config.h"
@@ -33,7 +33,7 @@ namespace
 
 	constexpr float STICK_DEADZONE = 0.15f;
 
-	// Hold '+' and '-' together to return to launcher
+	// Hold '+' and '-' to return to launcher
 	constexpr u64 QUIT_COMBO = HidNpadButton_Plus | HidNpadButton_Minus;
 
 	std::unique_ptr<INISettingsInterface> s_settings_interface;
@@ -105,12 +105,13 @@ namespace
 		s_settings_interface = std::make_unique<INISettingsInterface>(ini_path);
 		Host::Internal::SetBaseSettingsLayer(s_settings_interface.get());
 		s_settings_interface->Load();
-		
+
 		if (s_settings_interface->IsEmpty())
 		{
 			INFO_LOG("No settings found; writing default settings to {}", ini_path);
 			VMManager::SetDefaultSettings(*s_settings_interface, true, true, true, true, true);
 
+			s_settings_interface->SetStringValue("Filenames", "Game", "");
 			s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::DK3D));
 			s_settings_interface->SetIntValue("EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Off));
 			s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Horizon");
@@ -153,7 +154,7 @@ int main(int argc, char** argv)
 	INFO_LOG("================ ARMSX2-NX ================");
 	INFO_LOG("Logging to {}", LOG_PATH);
 
-	// Mount the .nro's romfs so the DK3D backend can load its shaders
+	// Mount the romfs so Deko3D can load its shaders
 	const bool have_romfs = R_SUCCEEDED(romfsInit());
 	if (!have_romfs)
 		ERROR_LOG("romfsInit() failed. Deko3d shaders will be unavailable. Things will be broken");
@@ -185,18 +186,26 @@ int main(int argc, char** argv)
 	VMManager::ApplySettings();
 
 	VMBootParameters boot_params;
+	std::string boot_image;
 	if (argc > 1 && argv[1] && argv[1][0])
+		boot_image = argv[1];
+	else
+		boot_image = s_settings_interface->GetStringValue("Filenames", "Game", "");
+
+	if (!boot_image.empty() && FileSystem::FileExists(boot_image.c_str()))
 	{
-		boot_params.filename = argv[1]; // ISO/ELF
+		boot_params.filename = std::move(boot_image);
 		INFO_LOG("Booting image: {}", boot_params.filename);
 	}
 	else
 	{
-		boot_params.fast_boot = false; // boot BIOS
-		INFO_LOG("No image given, booting PS2 BIOS.");
+		if (!boot_image.empty())
+			ERROR_LOG("Game image not found: {}. Booting PS2 BIOS.", boot_image);
+		else
+			INFO_LOG("Booting PS2 BIOS.");
+		boot_params.fast_boot = false;
 	}
 
-	// Player 1 pad
 	padConfigureInput(1, HidNpadStyleSet_NpadStandard);
 	PadState pad;
 	padInitializeDefault(&pad);
