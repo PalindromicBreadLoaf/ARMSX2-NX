@@ -13,8 +13,6 @@
 
 #include "common/Horizon/Horizon.h"
 
-// Returns 0 on failure
-// A lot of these are functionally stubs
 u64 GetPhysicalMemory()
 {
 	u64 size = 0;
@@ -48,7 +46,9 @@ std::string GetOSVersionString()
 
 bool Common::InhibitScreensaver(bool inhibit)
 {
-	return false;
+	// Disable sleep to prevent crash
+	// TODO: See if sleep can be kept enabled without crashing
+	return R_SUCCEEDED(appletSetAutoSleepDisabled(inhibit));
 }
 
 bool Common::PlaySoundAsync(const char* path)
@@ -76,7 +76,6 @@ void Threading::Sleep(int ms)
 
 void Threading::SleepUntil(u64 ticks)
 {
-	// ticks are a part of GetCPUTicks()
 	const s64 diff = static_cast<s64>(ticks - GetCPUTicks());
 	if (diff <= 0)
 		return;
