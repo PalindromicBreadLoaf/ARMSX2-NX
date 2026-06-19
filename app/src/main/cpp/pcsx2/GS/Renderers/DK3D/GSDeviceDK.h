@@ -109,6 +109,8 @@ private:
 	u32 PushImage(const GSTextureDK* tex);
 	// Draw tfx geometry, splitting barriers for feedback-loop reads.
 	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
+	// Present ImGui over game frame
+	void RenderImGui();
 
 	DkDevice m_device = nullptr;
 	DkQueue m_queue = nullptr;
@@ -118,14 +120,14 @@ private:
 	DkMemBlock m_cmdbuf_memblock = nullptr;
 	DkCmdBuf m_cmdbuf = nullptr;
 
-	// Convert/present pipeline
+	// Convert/present
 	DkMemBlock m_code_memblock = nullptr;
 	DkShader m_convert_vsh{};
 	DkShader m_copy_fsh{};
 	DkShader m_convert_fsh{};
 	bool m_convert_shaders_ok = false;
 
-	// Hardware tfx pipeline
+	// Hardware tfx
 	DkShader m_tfx_vsh{};
 	DkShader m_tfx_fsh{};
 	bool m_tfx_shaders_ok = false;
@@ -135,6 +137,11 @@ private:
 	DkShader m_shadeboost_fsh{};
 	DkShader m_fxaa_fsh{};
 	bool m_postprocess_shaders_ok = false;
+
+	// ImGui
+	DkShader m_imgui_vsh{};
+	DkShader m_imgui_fsh{};
+	bool m_imgui_shaders_ok = false;
 
 	DkMemBlock m_descriptor_memblock = nullptr;
 	DkGpuAddr m_image_descriptor_set = 0;

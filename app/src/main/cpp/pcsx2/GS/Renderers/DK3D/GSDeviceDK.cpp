@@ -9,6 +9,8 @@
 
 #include "GS/Renderers/Common/GSVertex.h"
 
+#include "imgui.h"
+
 #ifdef __SWITCH__
 #include "common/Console.h"
 #include "common/Horizon/Horizon.h" // nwindowGetDefault()
@@ -525,6 +527,14 @@ bool GSDeviceDK::LoadShaders()
 	else
 		Console.Warning("DK3D: post-process shaders missing. Enhancements won't work properly.");
 
+	m_imgui_shaders_ok = load_one(m_imgui_vsh, "romfs:/shaders/imgui_vsh.dksh") &&
+						 load_one(m_imgui_fsh, "romfs:/shaders/imgui_fsh.dksh");
+
+	if (m_imgui_shaders_ok)
+		Console.WriteLn("DK3D: imgui shaders loaded.");
+	else
+		Console.Warning("DK3D: imgui shaders missing. No UI will be present.");
+
 	return m_convert_shaders_ok;
 }
 
@@ -646,9 +656,126 @@ GSDevice::PresentResult GSDeviceDK::BeginPresent(bool frame_skip)
 #endif
 }
 
+#ifdef __SWITCH__
+void GSDeviceDK::RenderImGui()
+{
+	ImGui::Render();
+	const ImDrawData* draw_data = ImGui::GetDrawData();
+	if (!draw_data || draw_data->CmdListsCount == 0 || !m_imgui_shaders_ok || !m_frame_active || m_present_slot < 0)
+		return;
+
+	static_assert(sizeof(ImDrawIdx) == sizeof(u16), "ImGui index buffer must be 16-bit");
+
+	const float width = static_cast<float>(m_present_width);
+	const float height = static_cast<float>(m_present_height);
+
+	// Draw over the already-presented frame
+	dkCmdBufBindRenderTarget(m_cmdbuf, &m_swapchain_view, nullptr);
+	const DkViewport viewport = {0.0f, 0.0f, width, height, 0.0f, 1.0f};
+	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+
+	// Ignnore culling and depth
+	DkRasterizerState rasterizer_state;
+	dkRasterizerStateDefaults(&rasterizer_state);
+	rasterizer_state.cullMode = DkFace_None;
+	dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+
+	DkColorState color_state;
+	dkColorStateDefaults(&color_state);
+	dkColorStateSetBlendEnable(&color_state, 0, true);
+	dkCmdBufBindColorState(m_cmdbuf, &color_state);
+
+	DkBlendState blend_state;
+	dkBlendStateDefaults(&blend_state);
+	dkBlendStateSetOps(&blend_state, DkBlendOp_Add, DkBlendOp_Add);
+	dkBlendStateSetFactors(&blend_state, DkBlendFactor_SrcAlpha, DkBlendFactor_InvSrcAlpha, DkBlendFactor_One,
+		DkBlendFactor_Zero);
+	dkCmdBufBindBlendStates(m_cmdbuf, 0, &blend_state, 1);
+
+	DkColorWriteState color_write_state;
+	dkColorWriteStateDefaults(&color_write_state);
+	dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
+
+	DkDepthStencilState depth_state;
+	dkDepthStencilStateDefaults(&depth_state);
+	depth_state.depthTestEnable = false;
+	depth_state.depthWriteEnable = false;
+	dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
+
+	const DkShader* shaders[] = {&m_imgui_vsh, &m_imgui_fsh};
+	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+
+	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
+
+	struct ImGuiConstants
+	{
+		float scale[2];
+		float translate[2];
+	} constants;
+	constants.scale[0] = 2.0f / width;
+	constants.scale[1] = 2.0f / height;
+	constants.translate[0] = -1.0f;
+	constants.translate[1] = -1.0f;
+	const DkGpuAddr cb_addr = StreamUniform(&constants, sizeof(constants));
+	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 0, cb_addr, AlignUp(sizeof(constants), DK_UNIFORM_BUF_ALIGNMENT));
+
+	static const DkVtxAttribState attribs[3] = {
+		{0, 0, offsetof(ImDrawVert, pos), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+		{0, 0, offsetof(ImDrawVert, uv), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+		{0, 0, offsetof(ImDrawVert, col), DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
+	};
+	static const DkVtxBufferState buffer_state = {sizeof(ImDrawVert), 0};
+	dkCmdBufBindVtxAttribState(m_cmdbuf, attribs, 3);
+	dkCmdBufBindVtxBufferState(m_cmdbuf, &buffer_state, 1);
+
+	const GSVector4i rt_bounds = GSVector4i(0, 0, m_present_width, m_present_height);
+
+	for (int n = 0; n < draw_data->CmdListsCount; n++)
+	{
+		const ImDrawList* cmd_list = draw_data->CmdLists[n];
+
+		const u32 vtx_size = static_cast<u32>(cmd_list->VtxBuffer.Size) * sizeof(ImDrawVert);
+		const u32 idx_size = static_cast<u32>(cmd_list->IdxBuffer.Size) * sizeof(ImDrawIdx);
+		const DkGpuAddr vtx_addr = StreamVertices(cmd_list->VtxBuffer.Data, vtx_size);
+		const DkGpuAddr idx_addr = StreamIndices(cmd_list->IdxBuffer.Data, idx_size);
+		dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
+		dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
+
+		for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++)
+		{
+			const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
+			if (pcmd->UserCallback)
+				continue;
+
+			const GSVector4 clip = GSVector4::load<false>(&pcmd->ClipRect);
+			if ((clip.zwzw() <= clip.xyxy()).mask() != 0)
+				continue;
+
+			const GSVector4i iclip = GSVector4i(clip).rintersect(rt_bounds);
+			if (iclip.rempty())
+				continue;
+			const DkScissor dk_scissor = {static_cast<u32>(iclip.x), static_cast<u32>(iclip.y),
+				static_cast<u32>(iclip.width()), static_cast<u32>(iclip.height())};
+			dkCmdBufSetScissors(m_cmdbuf, 0, &dk_scissor, 1);
+
+			GSTextureDK* const tex = reinterpret_cast<GSTextureDK*>(pcmd->GetTexID());
+			const u32 slot = tex ? PushImage(tex) : 0;
+			const DkResHandle handle = dkMakeTextureHandle(slot, SAMPLER_LINEAR);
+			dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 0, &handle, 1);
+
+			dkCmdBufDrawIndexed(m_cmdbuf, DkPrimitive_Triangles, pcmd->ElemCount, 1, pcmd->IdxOffset, pcmd->VtxOffset,
+				0);
+		}
+	}
+}
+#endif
+
 void GSDeviceDK::EndPresent()
 {
 #ifdef __SWITCH__
+	RenderImGui();
+
 	if (!m_frame_active)
 		return;
 

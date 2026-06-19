@@ -123,7 +123,8 @@ GSTextureDK::~GSTextureDK()
 
 void* GSTextureDK::GetNativeHandle() const
 {
-	return const_cast<DkImage*>(&m_image);
+	// ImGui uses this as its ImTextureID
+	return const_cast<GSTextureDK*>(this);
 }
 
 void GSTextureDK::GetImageView(DkImageView* view) const
