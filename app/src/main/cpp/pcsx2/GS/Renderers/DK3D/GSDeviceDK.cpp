@@ -502,7 +502,8 @@ bool GSDeviceDK::LoadShaders()
 		Console.Warning("DK3D: tfx shaders missing. Things will be broken.");
 
 	m_postprocess_shaders_ok = load_one(m_interlace_fsh, "romfs:/shaders/interlace_fsh.dksh") &&
-							   load_one(m_shadeboost_fsh, "romfs:/shaders/shadeboost_fsh.dksh");
+							   load_one(m_shadeboost_fsh, "romfs:/shaders/shadeboost_fsh.dksh") &&
+							   load_one(m_fxaa_fsh, "romfs:/shaders/fxaa_fsh.dksh");
 
 	if (m_postprocess_shaders_ok)
 		Console.WriteLn("DK3D: post-process shaders loaded.");
@@ -682,8 +683,39 @@ void GSDeviceDK::InsertDebugMessage(DebugMessageCategory category, const char* f
 
 std::unique_ptr<GSDownloadTexture> GSDeviceDK::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
 {
+#ifdef __SWITCH__
+	return GSDownloadTextureDK::Create(this, m_device, width, height, format);
+#else
 	return nullptr;
+#endif
 }
+
+#ifdef __SWITCH__
+void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMemBlock dst_block, u32 dst_offset)
+{
+	if (!src || rect.rempty())
+		return;
+
+	// Preserve current frame work
+	BeginFrameIfNeeded();
+	CommitClear(src);
+
+	// Flush and invalidate caches
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
+
+	DkImageView src_view;
+	src->GetImageView(&src_view);
+	const DkImageRect src_rect = {static_cast<u32>(rect.left), static_cast<u32>(rect.top), 0,
+		static_cast<u32>(rect.width()), static_cast<u32>(rect.height()), 1};
+
+	const DkCopyBuf dst = {dkMemBlockGetGpuAddr(dst_block) + dst_offset, 0, 0};
+	dkCmdBufCopyImageToBuffer(m_cmdbuf, &src_view, &src_rect, &dst, 0);
+
+	// Finish this list so EndPresent won't resubmit it
+	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
+	dkQueueWaitIdle(m_queue);
+}
+#endif
 
 void GSDeviceDK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY)
 {
@@ -1131,6 +1163,13 @@ void GSDeviceDK::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 
 void GSDeviceDK::DoFXAA(GSTexture* sTex, GSTexture* dTex)
 {
+#ifdef __SWITCH__
+	if (!m_postprocess_shaders_ok || !sTex || !dTex)
+		return;
+
+	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), GSVector4(0.0f, 0.0f, 1.0f, 1.0f),
+		static_cast<GSTextureDK*>(dTex), GSVector4(dTex->GetRect()), &m_fxaa_fsh, true);
+#endif
 }
 
 void GSDeviceDK::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4])

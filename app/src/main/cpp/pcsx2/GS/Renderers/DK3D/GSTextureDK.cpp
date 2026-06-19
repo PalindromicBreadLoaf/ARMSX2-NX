@@ -5,6 +5,9 @@
 #include "GS/Renderers/DK3D/GSTextureDK.h"
 
 #ifdef __SWITCH__
+#include "GS/Renderers/DK3D/GSDeviceDK.h"
+#include "GS/GSPerfMon.h"
+
 #include "common/Console.h"
 
 #include <algorithm>
@@ -227,6 +230,81 @@ void GSTextureDK::GenerateMipmap()
 
 #ifdef PCSX2_DEVBUILD
 void GSTextureDK::SetDebugName(std::string_view name)
+{
+}
+#endif
+
+GSDownloadTextureDK::GSDownloadTextureDK(GSDeviceDK* device, DkMemBlock memblock, u32 buffer_size, u32 width,
+	u32 height, GSTexture::Format format)
+	: GSDownloadTexture(width, height, format)
+	, m_device(device)
+	, m_memblock(memblock)
+	, m_buffer_size(buffer_size)
+{
+}
+
+GSDownloadTextureDK::~GSDownloadTextureDK()
+{
+	if (m_memblock)
+		dkMemBlockDestroy(m_memblock);
+}
+
+std::unique_ptr<GSDownloadTextureDK> GSDownloadTextureDK::Create(GSDeviceDK* device, DkDevice dk_device, u32 width,
+	u32 height, GSTexture::Format format)
+{
+	const u32 buffer_size = GetBufferSize(width, height, format, 1);
+
+	DkMemBlockMaker memblock_maker;
+	dkMemBlockMakerDefaults(&memblock_maker, dk_device, AlignUp(buffer_size, DK_MEMBLOCK_ALIGNMENT));
+	// CPU reads immediately after the copy
+	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached;
+	DkMemBlock memblock = dkMemBlockCreate(&memblock_maker);
+	if (!memblock)
+	{
+		Console.Error("DK3D: failed to allocate %u byte readback buffer.", buffer_size);
+		return nullptr;
+	}
+
+	auto tex = std::unique_ptr<GSDownloadTextureDK>(
+		new GSDownloadTextureDK(device, memblock, buffer_size, width, height, format));
+	tex->m_map_pointer = static_cast<const u8*>(dkMemBlockGetCpuAddr(memblock));
+	return tex;
+}
+
+void GSDownloadTextureDK::CopyFromTexture(
+	const GSVector4i& drc, GSTexture* stex, const GSVector4i& src, u32 src_level, bool use_transfer_pitch)
+{
+	GSTextureDK* const dktex = static_cast<GSTextureDK*>(stex);
+	if (dktex->GetFormat() != m_format || drc.width() != src.width() || drc.height() != src.height())
+		return;
+
+	m_current_pitch = GetTransferPitch(use_transfer_pitch ? static_cast<u32>(drc.width()) : m_width, 1);
+
+	u32 copy_offset, copy_size, copy_rows;
+	GetTransferSize(drc, &copy_offset, &copy_size, &copy_rows);
+
+	g_perfmon.Put(GSPerfMon::Readbacks, 1);
+
+	// ReadbackTexture waits for completion
+	m_device->ReadbackTexture(dktex, src, m_memblock, copy_offset);
+	m_needs_flush = false;
+}
+
+bool GSDownloadTextureDK::Map(const GSVector4i& read_rc)
+{
+	return (m_map_pointer != nullptr);
+}
+
+void GSDownloadTextureDK::Unmap()
+{
+}
+
+void GSDownloadTextureDK::Flush()
+{
+}
+
+#ifdef PCSX2_DEVBUILD
+void GSDownloadTextureDK::SetDebugName(std::string_view name)
 {
 }
 #endif

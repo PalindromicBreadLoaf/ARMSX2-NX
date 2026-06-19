@@ -45,6 +45,10 @@ public:
 
 	std::unique_ptr<GSDownloadTexture> CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format) override;
 
+#ifdef __SWITCH__
+	void ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMemBlock dst_block, u32 dst_offset);
+#endif
+
 	void CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY) override;
 	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 		ShaderConvert shader = ShaderConvert::COPY, bool linear = true) override;
@@ -125,6 +129,7 @@ private:
 	// Post-processing fragment shaders
 	DkShader m_interlace_fsh{};
 	DkShader m_shadeboost_fsh{};
+	DkShader m_fxaa_fsh{};
 	bool m_postprocess_shaders_ok = false;
 
 	DkMemBlock m_descriptor_memblock = nullptr;

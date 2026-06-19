@@ -52,4 +52,34 @@ private:
 	std::unique_ptr<u8[]> m_map_buffer;
 	GSVector4i m_map_area = GSVector4i::zero();
 };
+
+class GSDeviceDK;
+
+// Deko3D render-target/texture readback
+class GSDownloadTextureDK final : public GSDownloadTexture
+{
+public:
+	~GSDownloadTextureDK() override;
+
+	static std::unique_ptr<GSDownloadTextureDK> Create(GSDeviceDK* device, DkDevice dk_device, u32 width, u32 height,
+		GSTexture::Format format);
+
+	void CopyFromTexture(const GSVector4i& drc, GSTexture* stex, const GSVector4i& src, u32 src_level,
+		bool use_transfer_pitch) override;
+	bool Map(const GSVector4i& read_rc) override;
+	void Unmap() override;
+	void Flush() override;
+
+#ifdef PCSX2_DEVBUILD
+	void SetDebugName(std::string_view name) override;
+#endif
+
+private:
+	GSDownloadTextureDK(GSDeviceDK* device, DkMemBlock memblock, u32 buffer_size, u32 width, u32 height,
+		GSTexture::Format format);
+
+	GSDeviceDK* m_device = nullptr;
+	DkMemBlock m_memblock = nullptr;
+	u32 m_buffer_size = 0;
+};
 #endif

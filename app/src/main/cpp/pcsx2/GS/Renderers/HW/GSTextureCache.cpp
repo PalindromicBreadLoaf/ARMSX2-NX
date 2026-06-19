@@ -3994,7 +3994,7 @@ bool GSTextureCache::PrepareDownloadTexture(u32 width, u32 height, GSTexture::Fo
 	const u32 new_height = ctex ? std::max(ctex->GetHeight(), height) : height;
 	tex->reset();
 	*tex = g_gs_device->CreateDownloadTexture(new_width, new_height, format);
-	if (!tex)
+	if (!tex->get())
 	{
 		Console.WriteLn("TC: Failed to create %ux%u download texture", new_width, new_height);
 		return false;
