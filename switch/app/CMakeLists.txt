@@ -47,6 +47,7 @@ dk3d_add_shader(tfx_vsh vert)
 dk3d_add_shader(tfx_fsh frag)
 dk3d_add_shader(interlace_fsh frag)
 dk3d_add_shader(shadeboost_fsh frag)
+dk3d_add_shader(fxaa_fsh frag)
 
 add_custom_target(armsx2_shaders DEPENDS ${DK3D_DKSH_FILES})
 dkp_add_asset_target(armsx2_romfs "${DK3D_ROMFS_DIR}")
