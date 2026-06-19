@@ -96,9 +96,12 @@ private:
 	void AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize);
 	// Flushes a pending ClearRenderTarget
 	void CommitClear(GSTextureDK* tex);
-	// Optional cb is fragment uniform buffer 0 for post-process shaders.
+	// Optional cb is fragment uniform buffer 0 for post-processing shaders.
 	void DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
-		const DkShader* fragment_shader, bool linear, const void* cb = nullptr, u32 cb_size = 0);
+		const DkShader* fragment_shader, bool linear, const void* cb = nullptr, u32 cb_size = 0,
+		bool depth_output = false, u32 color_write_mask = 0xf);
+	void DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
+		ShaderConvert shader, bool linear, u32 color_write_mask);
 	// Bump-allocate into per-frame stream buffers and return the GPU address.
 	DkGpuAddr StreamVertices(const void* data, u32 size);
 	DkGpuAddr StreamIndices(const void* data, u32 size);
@@ -119,6 +122,7 @@ private:
 	DkMemBlock m_code_memblock = nullptr;
 	DkShader m_convert_vsh{};
 	DkShader m_copy_fsh{};
+	DkShader m_convert_fsh{};
 	bool m_convert_shaders_ok = false;
 
 	// Hardware tfx pipeline

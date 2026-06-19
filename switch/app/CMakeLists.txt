@@ -43,6 +43,7 @@ endfunction()
 
 dk3d_add_shader(convert_vsh vert)
 dk3d_add_shader(texture_fsh frag)
+dk3d_add_shader(convert_fsh frag)
 dk3d_add_shader(tfx_vsh vert)
 dk3d_add_shader(tfx_fsh frag)
 dk3d_add_shader(interlace_fsh frag)

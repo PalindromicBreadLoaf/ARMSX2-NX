@@ -332,12 +332,14 @@ void GSDeviceDK::CommitClear(GSTextureDK* tex)
 }
 
 void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex,
-	const GSVector4& dRect, const DkShader* fragment_shader, bool linear, const void* cb, u32 cb_size)
+	const GSVector4& dRect, const DkShader* fragment_shader, bool linear, const void* cb, u32 cb_size,
+	bool depth_output, u32 color_write_mask)
 {
 	if (!sTex || !m_convert_shaders_ok)
 		return;
-	// Skip depth conversions for now rather than mis-binding a depth image
-	if (sTex->IsDepth() || (dTex && dTex->IsDepth()))
+
+	// Depth output needs a destination depth image
+	if (depth_output && (!dTex || !dTex->IsDepth()))
 		return;
 
 	BeginFrameIfNeeded();
@@ -354,14 +356,24 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 		target_view = m_swapchain_view;
 	else
 		dTex->GetImageView(&target_view);
-	dkCmdBufBindRenderTarget(m_cmdbuf, &target_view, nullptr);
+	if (depth_output)
+		dkCmdBufBindRenderTargets(m_cmdbuf, nullptr, 0, &target_view);
+	else
+		dkCmdBufBindRenderTarget(m_cmdbuf, &target_view, nullptr);
 
 	// Resolve pending clear before writing over the target.
 	if (!is_present && dTex->GetState() == GSTexture::State::Cleared)
 	{
-		float cc[4];
-		GSVector4::store<false>(cc, dTex->GetUNormClearColor());
-		dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, cc[0], cc[1], cc[2], cc[3]);
+		if (depth_output)
+		{
+			dkCmdBufClearDepthStencil(m_cmdbuf, true, dTex->GetClearDepth(), 0xFF, 0);
+		}
+		else
+		{
+			float cc[4];
+			GSVector4::store<false>(cc, dTex->GetUNormClearColor());
+			dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, cc[0], cc[1], cc[2], cc[3]);
+		}
 	}
 
 	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(ds.x), static_cast<float>(ds.y), 0.0f, 1.0f};
@@ -377,14 +389,16 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 	dkColorWriteStateDefaults(&color_write_state);
 	// The default culling mode discards quads too frequently
 	rasterizer_state.cullMode = DkFace_None;
+	dkColorWriteStateSetMask(&color_write_state, 0, color_write_mask);
 	dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
 	dkCmdBufBindColorState(m_cmdbuf, &color_state);
 	dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
-	// No depth attachment is bound
+
 	DkDepthStencilState depth_state;
 	dkDepthStencilStateDefaults(&depth_state);
-	depth_state.depthTestEnable = false;
-	depth_state.depthWriteEnable = false;
+	depth_state.depthTestEnable = depth_output;
+	depth_state.depthWriteEnable = depth_output;
+	depth_state.depthCompareOp = DkCompareOp_Always;
 	dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
 
 	const DkShader* shaders[] = {&m_convert_vsh, fragment_shader};
@@ -488,7 +502,8 @@ bool GSDeviceDK::LoadShaders()
 	};
 
 	m_convert_shaders_ok = load_one(m_convert_vsh, "romfs:/shaders/convert_vsh.dksh") &&
-						   load_one(m_copy_fsh, "romfs:/shaders/texture_fsh.dksh");
+						   load_one(m_copy_fsh, "romfs:/shaders/texture_fsh.dksh") &&
+						   load_one(m_convert_fsh, "romfs:/shaders/convert_fsh.dksh");
 
 	if (m_convert_shaders_ok)
 		Console.WriteLn("DK3D: convert shaders loaded.");
@@ -742,13 +757,33 @@ void GSDeviceDK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r,
 #endif
 }
 
+void GSDeviceDK::DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
+	ShaderConvert shader, bool linear, u32 color_write_mask)
+{
+#ifdef __SWITCH__
+	// COPY uses the plain copy shader
+	if (shader == ShaderConvert::COPY)
+	{
+		DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_copy_fsh, linear, nullptr, 0, false, color_write_mask);
+		return;
+	}
+
+	struct
+	{
+		u32 variant;
+		u32 pad[3];
+	} ub = {static_cast<u32>(shader), {0, 0, 0}};
+	DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_fsh, false, &ub, sizeof(ub), HasDepthOutput(shader),
+		color_write_mask);
+#endif
+}
+
 void GSDeviceDK::StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 	ShaderConvert shader, bool linear)
 {
 #ifdef __SWITCH__
-	// Only Copy is wired up properly for now.
-	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, &m_copy_fsh,
-		linear);
+	DoConvert(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, shader, linear,
+		ShaderConvertWriteMask(shader));
 #endif
 }
 
@@ -756,9 +791,8 @@ void GSDeviceDK::StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 	bool red, bool green, bool blue, bool alpha, ShaderConvert shader)
 {
 #ifdef __SWITCH__
-	// TODO: honour the channel write mask once colour-write state is plumbed.
-	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, &m_copy_fsh,
-		false);
+	const u32 mask = (red ? 1u : 0u) | (green ? 2u : 0u) | (blue ? 4u : 0u) | (alpha ? 8u : 0u);
+	DoConvert(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, shader, false, mask);
 #endif
 }
 
