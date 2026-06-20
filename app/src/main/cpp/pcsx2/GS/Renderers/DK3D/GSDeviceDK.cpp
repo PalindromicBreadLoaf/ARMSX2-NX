@@ -297,6 +297,8 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	m_index_offset = 0;
 	m_uniform_offset = 0;
 	m_next_image_slot = 0;
+	// Refresh command buffer
+	InvalidateHWStateCache();
 
 	m_frame_active = true;
 }
@@ -387,6 +389,8 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 		return;
 
 	BeginFrameIfNeeded();
+	// This pass binds convert shaders/blend/vertex layout
+	InvalidateHWStateCache();
 
 	// Resolve pending clears and flush prior target writes before sampling.
 	CommitClear(sTex);
@@ -732,6 +736,8 @@ void GSDeviceDK::RenderImGui()
 	if (!draw_data || draw_data->CmdListsCount == 0 || !m_imgui_shaders_ok || !m_frame_active || m_present_slot < 0)
 		return;
 
+	InvalidateHWStateCache();
+
 	static_assert(sizeof(ImDrawIdx) == sizeof(u16), "ImGui index buffer must be 16-bit");
 
 	const float width = static_cast<float>(m_present_width);
@@ -913,6 +919,8 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 
 	// Preserve current frame work
 	BeginFrameIfNeeded();
+	// dkCmdBufFinishList below breaks bound-state
+	InvalidateHWStateCache();
 	CommitClear(src);
 
 	// Flush and invalidate caches
@@ -942,6 +950,8 @@ void GSDeviceDK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r,
 	GSTextureDK* const dst = static_cast<GSTextureDK*>(dTex);
 
 	BeginFrameIfNeeded();
+	// dkCmdBufCopyImage may reprogram 3D-engine state
+	InvalidateHWStateCache();
 
 	DkImageView src_view;
 	DkImageView dst_view;
@@ -1083,12 +1093,43 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		ds->SetState(GSTexture::State::Dirty);
 	}
 
-	DkRasterizerState rasterizer_state;
-	dkRasterizerStateDefaults(&rasterizer_state);
-	rasterizer_state.cullMode = DkFace_None;
-	dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+	static const DkVtxAttribState tfx_attribs[7] = {
+		{0, 0, 0, DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+		{0, 0, 8, DkVtxAttribSize_4x8, DkVtxAttribType_Uint, 0},
+		{0, 0, 12, DkVtxAttribSize_1x32, DkVtxAttribType_Float, 0},
+		{0, 0, 16, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
+		{0, 0, 20, DkVtxAttribSize_1x32, DkVtxAttribType_Uint, 0},
+		{0, 0, 24, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
+		{0, 0, 28, DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
+	};
+	static const DkVtxBufferState tfx_buffer_state = {sizeof(GSVertex), 0};
 
-	auto bind_blend = [&](const GSHWDrawConfig::BlendState& blend) {
+	const bool force_state = !m_hw_invariants_bound;
+	if (force_state)
+	{
+		DkRasterizerState rasterizer_state;
+		dkRasterizerStateDefaults(&rasterizer_state);
+		rasterizer_state.cullMode = DkFace_None;
+		dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+
+		const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh};
+		dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+
+		dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+		dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
+
+		dkCmdBufBindVtxAttribState(m_cmdbuf, tfx_attribs, 7);
+		dkCmdBufBindVtxBufferState(m_cmdbuf, &tfx_buffer_state, 1);
+
+		m_hw_invariants_bound = true;
+	}
+
+	// Per-draw state is only re-bound when it differs from the previous draw.
+	auto bind_blend = [&](const GSHWDrawConfig::BlendState& blend, bool force) {
+		if (!force && m_hw_blend_key == blend.key)
+			return;
+		m_hw_blend_key = blend.key;
+
 		DkColorState color_state;
 		dkColorStateDefaults(&color_state);
 		DkBlendState blend_state;
@@ -1110,14 +1151,23 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		dkCmdBufBindBlendStates(m_cmdbuf, 0, &blend_state, 1);
 	};
 
-	auto bind_color_mask = [&](u32 wrgba) {
+	auto bind_color_mask = [&](u32 wrgba, bool force) {
+		if (!force && m_hw_colormask == wrgba)
+			return;
+		m_hw_colormask = wrgba;
 		DkColorWriteState color_write_state;
 		dkColorWriteStateDefaults(&color_write_state);
 		dkColorWriteStateSetMask(&color_write_state, 0, wrgba);
 		dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
 	};
 
-	auto bind_depth = [&](const GSHWDrawConfig::DepthStencilSelector& depth) {
+	auto bind_depth = [&](const GSHWDrawConfig::DepthStencilSelector& depth, bool force) {
+		// Only ztst/zwe affect the bound state
+		const u32 depth_key = has_ds ? ((static_cast<u32>(depth.key) & 0x07u) | 0x100u) : 0u;
+		if (!force && m_hw_depth_key == depth_key)
+			return;
+		m_hw_depth_key = depth_key;
+
 		DkDepthStencilState depth_state;
 		dkDepthStencilStateDefaults(&depth_state);
 		if (has_ds)
@@ -1136,15 +1186,9 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
 	};
 
-	bind_blend(config.blend);
-	bind_color_mask(config.colormask.wrgba);
-	bind_depth(config.depth);
-
-	const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh};
-	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
-
-	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
-	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
+	bind_blend(config.blend, force_state);
+	bind_color_mask(config.colormask.wrgba, force_state);
+	bind_depth(config.depth, force_state);
 
 	const u32 sampler_slot = (config.sampler.biln ? SAMPLER_LINEAR : SAMPLER_POINT) |
 							 (config.sampler.tau ? 2u : 0u) | (config.sampler.tav ? 1u : 0u);
@@ -1243,18 +1287,6 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	const DkGpuAddr vtx_addr = StreamVertices(config.verts, vtx_size);
 	const DkGpuAddr idx_addr = StreamIndices(config.indices, idx_size);
 
-	static const DkVtxAttribState attribs[7] = {
-		{0, 0, 0, DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
-		{0, 0, 8, DkVtxAttribSize_4x8, DkVtxAttribType_Uint, 0},
-		{0, 0, 12, DkVtxAttribSize_1x32, DkVtxAttribType_Float, 0},
-		{0, 0, 16, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
-		{0, 0, 20, DkVtxAttribSize_1x32, DkVtxAttribType_Uint, 0},
-		{0, 0, 24, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
-		{0, 0, 28, DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
-	};
-	static const DkVtxBufferState buffer_state = {sizeof(GSVertex), 0};
-	dkCmdBufBindVtxAttribState(m_cmdbuf, attribs, 7);
-	dkCmdBufBindVtxBufferState(m_cmdbuf, &buffer_state, 1);
 	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
 	dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
 
@@ -1271,7 +1303,7 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	// Blend multi-pass redraws with selector overrides
 	if (config.blend_multi_pass.enable)
 	{
-		bind_blend(config.blend_multi_pass.blend);
+		bind_blend(config.blend_multi_pass.blend, false);
 		DKTfxSelector mp_sel = make_selector(config.ps);
 		mp_sel.blend_hw = config.blend_multi_pass.blend_hw;
 		mp_sel.dither = config.blend_multi_pass.dither;
@@ -1287,9 +1319,9 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 			config.cb_ps.FogColor_AREF.a = config.alpha_second_pass.ps_aref;
 			bind_ps_cb();
 		}
-		bind_color_mask(config.alpha_second_pass.colormask.wrgba);
-		bind_depth(config.alpha_second_pass.depth);
-		bind_blend(config.blend);
+		bind_color_mask(config.alpha_second_pass.colormask.wrgba, false);
+		bind_depth(config.alpha_second_pass.depth, false);
+		bind_blend(config.blend, false);
 		bind_selector(make_selector(config.alpha_second_pass.ps));
 		SendHWDraw(config, primitive, config.alpha_second_pass.require_one_barrier,
 			config.alpha_second_pass.require_full_barrier);

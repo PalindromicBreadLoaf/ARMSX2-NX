@@ -112,6 +112,8 @@ private:
 	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
 	// Present ImGui over game frame
 	void RenderImGui();
+	// Forget the cached tfx pipeline state so the next HW draw re-binds it
+	void InvalidateHWStateCache() { m_hw_invariants_bound = false; }
 
 	DkDevice m_device = nullptr;
 	DkQueue m_queue = nullptr;
@@ -148,6 +150,12 @@ private:
 	DkShader m_tfx_vsh{};
 	DkShader m_tfx_fsh{};
 	bool m_tfx_shaders_ok = false;
+
+	// Skip re-emitting binds that match the previous HW draw
+	bool m_hw_invariants_bound = false;
+	u32 m_hw_blend_key = 0;
+	u32 m_hw_colormask = 0;
+	u32 m_hw_depth_key = 0;
 
 	// Post-processing fragment shaders
 	DkShader m_interlace_fsh{};
