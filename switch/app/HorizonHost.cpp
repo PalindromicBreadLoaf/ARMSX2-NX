@@ -10,6 +10,7 @@
 #include "common/WindowInfo.h"
 
 #include "pcsx2/Achievements.h"
+#include "pcsx2/GameList.h"
 #include "pcsx2/GS/GS.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/ImGui/FullscreenUI.h"
@@ -18,9 +19,62 @@
 #include "pcsx2/Input/InputManager.h"
 #include "pcsx2/VMManager.h"
 
+#include "HorizonHost.h"
+
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+
+namespace
+{
+	std::mutex s_cpu_queue_mutex;
+	std::deque<std::function<void()>> s_cpu_queue;
+
+	std::mutex s_cpu_done_mutex;
+	std::condition_variable s_cpu_done_cv;
+
+	std::thread::id s_cpu_thread_id;
+	std::atomic_bool s_cpu_thread_valid{false};
+	std::atomic_bool s_exit_requested{false};
+
+	std::mutex s_gamelist_refresh_mutex;
+	std::thread s_gamelist_refresh_thread;
+} // namespace
+
+void HorizonHost::SetCPUThread()
+{
+	s_cpu_thread_id = std::this_thread::get_id();
+	s_cpu_thread_valid.store(true, std::memory_order_release);
+}
+
+bool HorizonHost::IsCPUThread()
+{
+	return s_cpu_thread_valid.load(std::memory_order_acquire) && std::this_thread::get_id() == s_cpu_thread_id;
+}
+
+void HorizonHost::RequestExit()
+{
+	s_exit_requested.store(true, std::memory_order_release);
+
+	// Unblock VMManager::Execute() if a game is running
+	if (VMManager::HasValidVM())
+	{
+		const VMState state = VMManager::GetState();
+		if (state == VMState::Running || state == VMState::Paused)
+			VMManager::SetState(VMState::Stopping);
+	}
+}
+
+bool HorizonHost::IsExitRequested()
+{
+	return s_exit_requested.load(std::memory_order_acquire);
+}
 
 // Stubbed render window
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
@@ -186,34 +240,89 @@ void Host::OnCaptureStopped()
 // CPU things
 void Host::PumpMessagesOnCPUThread()
 {
+	for (;;)
+	{
+		std::function<void()> task;
+		{
+			std::lock_guard<std::mutex> lock(s_cpu_queue_mutex);
+			if (s_cpu_queue.empty())
+				break;
+
+			task = std::move(s_cpu_queue.front());
+			s_cpu_queue.pop_front();
+		}
+		task();
+	}
 }
 
 void Host::RunOnCPUThread(std::function<void()> function, bool block /* = false */)
 {
-	pxFailRel("Host::RunOnCPUThread is not implemented");
+	if (HorizonHost::IsCPUThread())
+	{
+		function();
+		return;
+	}
+
+	if (!block)
+	{
+		std::lock_guard<std::mutex> lock(s_cpu_queue_mutex);
+		s_cpu_queue.push_back(std::move(function));
+		return;
+	}
+
+	// Qqueue a wrapper that signals completion, then wait for it.
+	std::atomic_bool completed{false};
+	{
+		std::lock_guard<std::mutex> lock(s_cpu_queue_mutex);
+		s_cpu_queue.push_back([&completed, &function]() {
+			function();
+			{
+				std::lock_guard<std::mutex> done_lock(s_cpu_done_mutex);
+				completed.store(true, std::memory_order_release);
+			}
+			s_cpu_done_cv.notify_all();
+		});
+	}
+
+	std::unique_lock<std::mutex> done_lock(s_cpu_done_mutex);
+	s_cpu_done_cv.wait(done_lock, [&completed]() { return completed.load(std::memory_order_acquire); });
 }
 
 void Host::RefreshGameListAsync(bool invalidate_cache)
 {
+	std::lock_guard<std::mutex> lock(s_gamelist_refresh_mutex);
+	if (s_gamelist_refresh_thread.joinable())
+		s_gamelist_refresh_thread.join();
+
+	s_gamelist_refresh_thread = std::thread([invalidate_cache]() {
+		GameList::Refresh(invalidate_cache, false, nullptr);
+	});
 }
 
 void Host::CancelGameListRefresh()
 {
+	std::lock_guard<std::mutex> lock(s_gamelist_refresh_mutex);
+	if (s_gamelist_refresh_thread.joinable())
+		s_gamelist_refresh_thread.join();
 }
 
 // Goodbye
 void Host::RequestExitApplication(bool allow_confirm)
 {
-	VMManager::SetState(VMState::Stopping);
+	HorizonHost::RequestExit();
 }
 
 void Host::RequestExitBigPicture()
 {
+	// Exit Big Picture just quits the application.
+	HorizonHost::RequestExit();
 }
 
 void Host::RequestVMShutdown(bool allow_confirm, bool allow_save_state, bool default_save_state)
 {
-	VMManager::SetState(VMState::Stopping);
+	// Stop the running VM and return to the FullscreenUI game selector
+	if (VMManager::HasValidVM())
+		VMManager::SetState(VMState::Stopping);
 }
 
 // Input no-ops

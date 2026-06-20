@@ -94,6 +94,7 @@ bool GSDeviceDK::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	m_name = "deko3d";
 	m_max_texture_size = 16384;
 
+	m_window_info.type = WindowInfo::Type::Android;
 	m_window_info.surface_width = 1280;
 	m_window_info.surface_height = 720;
 	m_window_info.surface_scale = 1.0f;
