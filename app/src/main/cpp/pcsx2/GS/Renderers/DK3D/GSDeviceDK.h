@@ -81,6 +81,7 @@ protected:
 #ifdef __SWITCH__
 private:
 	static constexpr unsigned NUM_FRAMEBUFFERS = 2;
+	static constexpr unsigned NUM_FRAMES_IN_FLIGHT = 2;
 	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 1024;
 	static constexpr unsigned SAMPLER_POINT = 0;
 	static constexpr unsigned SAMPLER_LINEAR = 4;
@@ -99,7 +100,7 @@ private:
 	// Optional cb is fragment uniform buffer 0 for post-processing shaders.
 	void DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
 		const DkShader* fragment_shader, bool linear, const void* cb = nullptr, u32 cb_size = 0,
-		bool depth_output = false, u32 color_write_mask = 0xf, bool alpha_blend = false);
+		bool depth_output = false, u32 color_write_mask = 0xf, bool alpha_blend = false, bool integer_output = false);
 	void DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
 		ShaderConvert shader, bool linear, u32 color_write_mask);
 	// Bump-allocate into per-frame stream buffers and return the GPU address.
@@ -117,6 +118,21 @@ private:
 	DkMemBlock m_fb_memblock = nullptr;
 	DkImage m_framebuffers[NUM_FRAMEBUFFERS] = {};
 	DkSwapchain m_swapchain = nullptr;
+
+	// Buffer frame's GPU resources so the CPU can record frame N+1 while the GPU is still executing frame N.
+	struct FrameContext
+	{
+		DkMemBlock cmdbuf_memblock = nullptr;
+		DkCmdBuf cmdbuf = nullptr;
+		DkMemBlock vertex_memblock = nullptr;
+		DkMemBlock index_memblock = nullptr;
+		DkMemBlock uniform_memblock = nullptr;
+		DkFence fence{};
+		bool fence_pending = false;
+	};
+	FrameContext m_frames[NUM_FRAMES_IN_FLIGHT] = {};
+	u32 m_frame_index = 0;
+
 	DkMemBlock m_cmdbuf_memblock = nullptr;
 	DkCmdBuf m_cmdbuf = nullptr;
 
@@ -125,6 +141,7 @@ private:
 	DkShader m_convert_vsh{};
 	DkShader m_copy_fsh{};
 	DkShader m_convert_fsh{};
+	DkShader m_convert_int_fsh{};
 	bool m_convert_shaders_ok = false;
 
 	// Hardware tfx

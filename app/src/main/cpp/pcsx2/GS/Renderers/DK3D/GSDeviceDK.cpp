@@ -55,6 +55,19 @@ namespace
 	};
 	constexpr DkBlendOp kBlendOps[3] = {DkBlendOp_Add, DkBlendOp_Sub, DkBlendOp_RevSub};
 
+	constexpr bool IsIntegerOutput(ShaderConvert shader)
+	{
+		switch (shader)
+		{
+			case ShaderConvert::RGBA8_TO_16_BITS:
+			case ShaderConvert::FLOAT32_TO_16_BITS:
+			case ShaderConvert::FLOAT32_TO_32_BITS:
+				return true;
+			default:
+				return false;
+		}
+	}
+
 	constexpr u32 AlignUp(u32 value, u32 align)
 	{
 		return (value + align - 1) & ~(align - 1);
@@ -145,23 +158,55 @@ bool GSDeviceDK::CreateDeviceObjects()
 	if (!m_swapchain)
 		return false;
 
-	// Command buffer scratch + the command buffer itself.
-	dkMemBlockMakerDefaults(&memblock_maker, m_device, CMDBUF_SIZE);
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	m_cmdbuf_memblock = dkMemBlockCreate(&memblock_maker);
-	if (!m_cmdbuf_memblock)
-		return false;
-
+	// Successive frames overlap instead of serialising through dkQueueWaitIdle.
 	DkCmdBufMaker cmdbuf_maker;
 	dkCmdBufMakerDefaults(&cmdbuf_maker, m_device);
 	cmdbuf_maker.userData = this;
 	cmdbuf_maker.cbAddMem = &GSDeviceDK::AddCmdMemoryThunk;
-	m_cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
-	if (!m_cmdbuf)
-		return false;
-	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
 
-	// Graphics queue we submit to.
+	for (unsigned i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
+	{
+		FrameContext& ctx = m_frames[i];
+
+		dkMemBlockMakerDefaults(&memblock_maker, m_device, CMDBUF_SIZE);
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		ctx.cmdbuf_memblock = dkMemBlockCreate(&memblock_maker);
+		if (!ctx.cmdbuf_memblock)
+			return false;
+
+		ctx.cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
+		if (!ctx.cmdbuf)
+			return false;
+		dkCmdBufAddMemory(ctx.cmdbuf, ctx.cmdbuf_memblock, 0, CMDBUF_SIZE);
+
+		dkMemBlockMakerDefaults(&memblock_maker, m_device, VERTEX_BUFFER_SIZE);
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		ctx.vertex_memblock = dkMemBlockCreate(&memblock_maker);
+		if (!ctx.vertex_memblock)
+			return false;
+
+		dkMemBlockMakerDefaults(&memblock_maker, m_device, INDEX_BUFFER_SIZE);
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		ctx.index_memblock = dkMemBlockCreate(&memblock_maker);
+		if (!ctx.index_memblock)
+			return false;
+
+		dkMemBlockMakerDefaults(&memblock_maker, m_device, UNIFORM_BUFFER_SIZE);
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		ctx.uniform_memblock = dkMemBlockCreate(&memblock_maker);
+		if (!ctx.uniform_memblock)
+			return false;
+	}
+
+	// BeginFrameIfNeeded rotates frame aliases every other frame
+	m_frame_index = 0;
+	m_cmdbuf = m_frames[0].cmdbuf;
+	m_cmdbuf_memblock = m_frames[0].cmdbuf_memblock;
+	m_vertex_memblock = m_frames[0].vertex_memblock;
+	m_index_memblock = m_frames[0].index_memblock;
+	m_uniform_memblock = m_frames[0].uniform_memblock;
+
+	// Graphics queue
 	DkQueueMaker queue_maker;
 	dkQueueMakerDefaults(&queue_maker, m_device);
 	queue_maker.flags = DkQueueFlags_Graphics;
@@ -181,25 +226,6 @@ bool GSDeviceDK::CreateDeviceObjects()
 	const DkGpuAddr descriptor_base = dkMemBlockGetGpuAddr(m_descriptor_memblock);
 	m_image_descriptor_set = descriptor_base;
 	m_sampler_descriptor_set = descriptor_base + NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
-
-	// Vertex / index / uniform stream buffers
-	dkMemBlockMakerDefaults(&memblock_maker, m_device, VERTEX_BUFFER_SIZE);
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	m_vertex_memblock = dkMemBlockCreate(&memblock_maker);
-	if (!m_vertex_memblock)
-		return false;
-
-	dkMemBlockMakerDefaults(&memblock_maker, m_device, INDEX_BUFFER_SIZE);
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	m_index_memblock = dkMemBlockCreate(&memblock_maker);
-	if (!m_index_memblock)
-		return false;
-
-	dkMemBlockMakerDefaults(&memblock_maker, m_device, UNIFORM_BUFFER_SIZE);
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	m_uniform_memblock = dkMemBlockCreate(&memblock_maker);
-	if (!m_uniform_memblock)
-		return false;
 
 	// Allow GSRendererHW to use software blending
 	m_features.texture_barrier = true;
@@ -238,6 +264,7 @@ bool GSDeviceDK::SetupSamplers()
 
 	// Samplers never change
 	dkCmdBufClear(m_cmdbuf);
+	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
 	dkCmdBufPushData(m_cmdbuf, m_sampler_descriptor_set, descriptors, sizeof(descriptors));
 	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
 	dkQueueWaitIdle(m_queue);
@@ -250,7 +277,20 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	if (m_frame_active)
 		return;
 
-	dkQueueWaitIdle(m_queue);
+	m_frame_index = (m_frame_index + 1) % NUM_FRAMES_IN_FLIGHT;
+	FrameContext& ctx = m_frames[m_frame_index];
+	if (ctx.fence_pending)
+	{
+		dkFenceWait(&ctx.fence, -1);
+		ctx.fence_pending = false;
+	}
+
+	m_cmdbuf = ctx.cmdbuf;
+	m_cmdbuf_memblock = ctx.cmdbuf_memblock;
+	m_vertex_memblock = ctx.vertex_memblock;
+	m_index_memblock = ctx.index_memblock;
+	m_uniform_memblock = ctx.uniform_memblock;
+
 	dkCmdBufClear(m_cmdbuf);
 	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
 	m_vertex_offset = 0;
@@ -337,7 +377,7 @@ void GSDeviceDK::CommitClear(GSTextureDK* tex)
 
 void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex,
 	const GSVector4& dRect, const DkShader* fragment_shader, bool linear, const void* cb, u32 cb_size,
-	bool depth_output, u32 color_write_mask, bool alpha_blend)
+	bool depth_output, u32 color_write_mask, bool alpha_blend, bool integer_output)
 {
 	if (!sTex || !m_convert_shaders_ok)
 		return;
@@ -371,6 +411,10 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 		if (depth_output)
 		{
 			dkCmdBufClearDepthStencil(m_cmdbuf, true, dTex->GetClearDepth(), 0xFF, 0);
+		}
+		else if (integer_output)
+		{
+			dkCmdBufClearColorUint(m_cmdbuf, 0, DkColorMask_RGBA, dTex->GetClearColor(), 0, 0, 0);
 		}
 		else
 		{
@@ -515,7 +559,8 @@ bool GSDeviceDK::LoadShaders()
 
 	m_convert_shaders_ok = load_one(m_convert_vsh, "romfs:/shaders/convert_vsh.dksh") &&
 						   load_one(m_copy_fsh, "romfs:/shaders/texture_fsh.dksh") &&
-						   load_one(m_convert_fsh, "romfs:/shaders/convert_fsh.dksh");
+						   load_one(m_convert_fsh, "romfs:/shaders/convert_fsh.dksh") &&
+						   load_one(m_convert_int_fsh, "romfs:/shaders/convert_int_fsh.dksh");
 
 	if (m_convert_shaders_ok)
 		Console.WriteLn("DK3D: convert shaders loaded.");
@@ -554,21 +599,43 @@ void GSDeviceDK::DestroyDeviceObjects()
 	if (m_queue)
 		dkQueueWaitIdle(m_queue);
 
-	if (m_vertex_memblock)
+	// Per-frame contexts
+	for (unsigned i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
 	{
-		dkMemBlockDestroy(m_vertex_memblock);
-		m_vertex_memblock = nullptr;
+		FrameContext& ctx = m_frames[i];
+		if (ctx.cmdbuf)
+		{
+			dkCmdBufDestroy(ctx.cmdbuf);
+			ctx.cmdbuf = nullptr;
+		}
+		if (ctx.cmdbuf_memblock)
+		{
+			dkMemBlockDestroy(ctx.cmdbuf_memblock);
+			ctx.cmdbuf_memblock = nullptr;
+		}
+		if (ctx.vertex_memblock)
+		{
+			dkMemBlockDestroy(ctx.vertex_memblock);
+			ctx.vertex_memblock = nullptr;
+		}
+		if (ctx.index_memblock)
+		{
+			dkMemBlockDestroy(ctx.index_memblock);
+			ctx.index_memblock = nullptr;
+		}
+		if (ctx.uniform_memblock)
+		{
+			dkMemBlockDestroy(ctx.uniform_memblock);
+			ctx.uniform_memblock = nullptr;
+		}
+		ctx.fence_pending = false;
 	}
-	if (m_index_memblock)
-	{
-		dkMemBlockDestroy(m_index_memblock);
-		m_index_memblock = nullptr;
-	}
-	if (m_uniform_memblock)
-	{
-		dkMemBlockDestroy(m_uniform_memblock);
-		m_uniform_memblock = nullptr;
-	}
+	m_cmdbuf = nullptr;
+	m_cmdbuf_memblock = nullptr;
+	m_vertex_memblock = nullptr;
+	m_index_memblock = nullptr;
+	m_uniform_memblock = nullptr;
+
 	if (m_descriptor_memblock)
 	{
 		dkMemBlockDestroy(m_descriptor_memblock);
@@ -578,16 +645,6 @@ void GSDeviceDK::DestroyDeviceObjects()
 	{
 		dkQueueDestroy(m_queue);
 		m_queue = nullptr;
-	}
-	if (m_cmdbuf)
-	{
-		dkCmdBufDestroy(m_cmdbuf);
-		m_cmdbuf = nullptr;
-	}
-	if (m_cmdbuf_memblock)
-	{
-		dkMemBlockDestroy(m_cmdbuf_memblock);
-		m_cmdbuf_memblock = nullptr;
 	}
 	if (m_code_memblock)
 	{
@@ -792,7 +849,12 @@ void GSDeviceDK::EndPresent()
 
 	if (m_present_slot >= 0)
 	{
+		FrameContext& ctx = m_frames[m_frame_index];
 		dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
+		// Signal this context's fence so the next frame reusing it waits precisely on
+		// this frame's completion. dkQueuePresentImage flushes the queue.
+		dkQueueSignalFence(m_queue, &ctx.fence, false);
+		ctx.fence_pending = true;
 		dkQueuePresentImage(m_queue, m_swapchain, m_present_slot);
 	}
 
@@ -911,6 +973,14 @@ void GSDeviceDK::DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureD
 		u32 variant;
 		u32 pad[3];
 	} ub = {static_cast<u32>(shader), {0, 0, 0}};
+
+	if (IsIntegerOutput(shader))
+	{
+		DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_int_fsh, false, &ub, sizeof(ub), false,
+			color_write_mask, false, true);
+		return;
+	}
+
 	DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_fsh, false, &ub, sizeof(ub), HasDepthOutput(shader),
 		color_write_mask);
 #endif
