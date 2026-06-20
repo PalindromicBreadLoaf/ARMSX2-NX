@@ -8,6 +8,7 @@
 #include "GS/Renderers/Null/GSDeviceNull.h"
 
 #include "GS/Renderers/Common/GSVertex.h"
+#include "GS/GSPerfMon.h"
 
 #include "imgui.h"
 
@@ -27,6 +28,10 @@ namespace
 	constexpr u32 VERTEX_BUFFER_SIZE = 4 * 1024 * 1024;
 	constexpr u32 INDEX_BUFFER_SIZE = 2 * 1024 * 1024;
 	constexpr u32 UNIFORM_BUFFER_SIZE = 2 * 1024 * 1024;
+
+	// Each frame owns a 16-byte start and end timestamp
+	constexpr u32 TIMESTAMP_REPORT_SIZE = 16;
+	constexpr u32 TIMESTAMP_FRAME_STRIDE = 2 * TIMESTAMP_REPORT_SIZE;
 
 	struct ConvertVertex
 	{
@@ -228,6 +233,13 @@ bool GSDeviceDK::CreateDeviceObjects()
 	m_image_descriptor_set = descriptor_base;
 	m_sampler_descriptor_set = descriptor_base + NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
 
+	// GPU-timing report buffer
+	dkMemBlockMakerDefaults(&memblock_maker, m_device, DK_MEMBLOCK_ALIGNMENT);
+	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+	m_timestamp_memblock = dkMemBlockCreate(&memblock_maker);
+	if (m_timestamp_memblock)
+		std::memset(dkMemBlockGetCpuAddr(m_timestamp_memblock), 0, DK_MEMBLOCK_ALIGNMENT);
+
 	// Allow GSRendererHW to use software blending
 	m_features.texture_barrier = true;
 
@@ -273,6 +285,29 @@ bool GSDeviceDK::SetupSamplers()
 	return true;
 }
 
+void GSDeviceDK::WriteGPUTimestamp(u32 frame_index, u32 which)
+{
+	if (!m_timestamp_memblock)
+		return;
+	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_timestamp_memblock) +
+						   frame_index * TIMESTAMP_FRAME_STRIDE + which * TIMESTAMP_REPORT_SIZE;
+	dkCmdBufReportCounter(m_cmdbuf, DkCounter_Timestamp, addr);
+}
+
+void GSDeviceDK::ReadGPUTimestamps(u32 frame_index)
+{
+	if (!m_timestamp_memblock)
+		return;
+	const u8* base = static_cast<const u8*>(dkMemBlockGetCpuAddr(m_timestamp_memblock)) +
+					 frame_index * TIMESTAMP_FRAME_STRIDE;
+
+	u64 start, end;
+	std::memcpy(&start, base, sizeof(start));
+	std::memcpy(&end, base + TIMESTAMP_REPORT_SIZE, sizeof(end));
+	if (end > start)
+		m_accumulated_gpu_time += static_cast<float>(static_cast<double>(dkTimestampToNs(end - start)) / 1000000.0);
+}
+
 void GSDeviceDK::BeginFrameIfNeeded()
 {
 	if (m_frame_active)
@@ -284,6 +319,12 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	{
 		dkFenceWait(&ctx.fence, -1);
 		ctx.fence_pending = false;
+		// Frame is now complete
+		if (ctx.timestamp_written)
+		{
+			ReadGPUTimestamps(m_frame_index);
+			ctx.timestamp_written = false;
+		}
 	}
 
 	m_cmdbuf = ctx.cmdbuf;
@@ -302,6 +343,13 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	InvalidateHWStateCache();
 
 	m_frame_active = true;
+
+	// First command of the fresh list
+	if (m_gpu_timing_enabled)
+	{
+		WriteGPUTimestamp(m_frame_index, 0);
+		ctx.timestamp_written = true;
+	}
 }
 
 void GSDeviceDK::AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minReqSize)
@@ -393,9 +441,12 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 	// This pass binds convert shaders/blend/vertex layout
 	InvalidateHWStateCache();
 
+	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
+
 	// Resolve pending clears and flush prior target writes before sampling.
 	CommitClear(sTex);
 	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	const bool is_present = (dTex == nullptr);
 	const GSVector2i ds = is_present ? GSVector2i(m_present_width, m_present_height) : dTex->GetSize();
@@ -510,6 +561,7 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 	dkCmdBufBindVtxBufferState(m_cmdbuf, &buffer_state, 1);
 	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vertex_addr, sizeof(vertices));
 	dkCmdBufDraw(m_cmdbuf, DkPrimitive_TriangleStrip, 4, 1, 0, 0);
+	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 
 	if (!is_present)
 		dTex->SetState(GSTexture::State::Dirty);
@@ -646,6 +698,13 @@ void GSDeviceDK::DestroyDeviceObjects()
 		dkMemBlockDestroy(m_descriptor_memblock);
 		m_descriptor_memblock = nullptr;
 	}
+	if (m_timestamp_memblock)
+	{
+		dkMemBlockDestroy(m_timestamp_memblock);
+		m_timestamp_memblock = nullptr;
+	}
+	m_gpu_timing_enabled = false;
+	m_accumulated_gpu_time = 0.0f;
 	if (m_queue)
 	{
 		dkQueueDestroy(m_queue);
@@ -842,6 +901,8 @@ void GSDeviceDK::RenderImGui()
 			dkCmdBufDrawIndexed(m_cmdbuf, DkPrimitive_Triangles, pcmd->ElemCount, 1, pcmd->IdxOffset, pcmd->VtxOffset,
 				0);
 		}
+
+		g_perfmon.Put(GSPerfMon::DrawCalls, cmd_list->CmdBuffer.Size);
 	}
 }
 #endif
@@ -857,9 +918,12 @@ void GSDeviceDK::EndPresent()
 	if (m_present_slot >= 0)
 	{
 		FrameContext& ctx = m_frames[m_frame_index];
+		// Record when the GPU finishes this frame's work
+		if (ctx.timestamp_written)
+			WriteGPUTimestamp(m_frame_index, 1);
 		dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
 		// Signal this context's fence so the next frame reusing it waits precisely on
-		// this frame's completion. dkQueuePresentImage flushes the queue.
+		// this frame's completion.
 		dkQueueSignalFence(m_queue, &ctx.fence, false);
 		ctx.fence_pending = true;
 		dkQueuePresentImage(m_queue, m_swapchain, m_present_slot);
@@ -883,12 +947,26 @@ std::string GSDeviceDK::GetDriverInfo() const
 
 bool GSDeviceDK::SetGPUTimingEnabled(bool enabled)
 {
+#ifdef __SWITCH__
+	// Timing needs the report buffer
+	m_gpu_timing_enabled = enabled && (m_timestamp_memblock != nullptr);
+	if (!m_gpu_timing_enabled)
+		m_accumulated_gpu_time = 0.0f;
+	return (enabled == m_gpu_timing_enabled);
+#else
 	return false;
+#endif
 }
 
 float GSDeviceDK::GetAndResetAccumulatedGPUTime()
 {
+#ifdef __SWITCH__
+	const float time = m_accumulated_gpu_time;
+	m_accumulated_gpu_time = 0.0f;
+	return time;
+#else
 	return 0.0f;
+#endif
 }
 
 void GSDeviceDK::PushDebugGroup(const char* fmt, ...)
@@ -926,6 +1004,7 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 
 	// Flush and invalidate caches
 	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	DkImageView src_view;
 	src->GetImageView(&src_view);
@@ -949,6 +1028,8 @@ void GSDeviceDK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r,
 
 	GSTextureDK* const src = static_cast<GSTextureDK*>(sTex);
 	GSTextureDK* const dst = static_cast<GSTextureDK*>(dTex);
+
+	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 	BeginFrameIfNeeded();
 	// dkCmdBufCopyImage may reprogram 3D-engine state
@@ -1058,10 +1139,13 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 
 	BeginFrameIfNeeded();
 
+	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
+
 	// Resolve any pending clears on the source texture and flush
 	if (tex)
 		CommitClear(tex);
 	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	DkImageView rt_view;
 	DkImageView ds_view;
@@ -1310,6 +1394,7 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		mp_sel.dither = config.blend_multi_pass.dither;
 		bind_selector(mp_sel);
 		dkCmdBufDrawIndexed(m_cmdbuf, primitive, config.nindices, 1, 0, 0, 0);
+		g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 	}
 
 	// Alpha pass swaps PS selector, colour mask, depth, and restores original blend.
@@ -1347,24 +1432,34 @@ void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive,
 				dkCmdBufDrawIndexed(m_cmdbuf, primitive, count, 1, p, 0, 0);
 				p += count;
 			}
+			g_perfmon.Put(GSPerfMon::Barriers, draw_list_size);
+			g_perfmon.Put(GSPerfMon::DrawCalls, draw_list_size);
 			return;
 		}
 
 		// Overlapping geometry needs a barrier between primitives.
 		const u32 indices_per_prim = config.indices_per_prim;
+		u32 prims = 0;
 		for (u32 p = 0; p < config.nindices; p += indices_per_prim)
 		{
 			dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
 			dkCmdBufDrawIndexed(m_cmdbuf, primitive, indices_per_prim, 1, p, 0, 0);
+			prims++;
 		}
+		g_perfmon.Put(GSPerfMon::Barriers, prims);
+		g_perfmon.Put(GSPerfMon::DrawCalls, prims);
 		return;
 	}
 
 	// A single barrier before the whole draw suffices.
 	if (one_barrier)
+	{
 		dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+	}
 
 	dkCmdBufDrawIndexed(m_cmdbuf, primitive, config.nindices, 1, 0, 0, 0);
+	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 }
 #endif
 

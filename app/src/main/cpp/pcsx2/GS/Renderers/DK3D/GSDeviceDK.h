@@ -114,6 +114,10 @@ private:
 	void RenderImGui();
 	// Forget the cached tfx pipeline state so the next HW draw re-binds it
 	void InvalidateHWStateCache() { m_hw_invariants_bound = false; }
+	// GPU-side timestamp report into the per-frame timing slot
+	void WriteGPUTimestamp(u32 frame_index, u32 which);
+	// Harvest the start/end timestamps of a finished frame into m_accumulated_gpu_time.
+	void ReadGPUTimestamps(u32 frame_index);
 
 	DkDevice m_device = nullptr;
 	DkQueue m_queue = nullptr;
@@ -131,6 +135,7 @@ private:
 		DkMemBlock uniform_memblock = nullptr;
 		DkFence fence{};
 		bool fence_pending = false;
+		bool timestamp_written = false;
 	};
 	FrameContext m_frames[NUM_FRAMES_IN_FLIGHT] = {};
 	u32 m_frame_index = 0;
@@ -183,6 +188,11 @@ private:
 
 	DkImageView m_swapchain_view{};
 	bool m_frame_active = false;
+
+	// GPU-busy %.
+	DkMemBlock m_timestamp_memblock = nullptr;
+	bool m_gpu_timing_enabled = false;
+	float m_accumulated_gpu_time = 0.0f;
 
 	u32 m_framebuffer_size = 0;
 	int m_present_width = 0;

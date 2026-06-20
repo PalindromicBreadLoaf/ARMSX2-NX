@@ -186,6 +186,8 @@ bool GSTextureDK::Update(const GSVector4i& r, const void* data, int pitch, int l
 		static_cast<u32>(height), 1};
 	dkCmdBufCopyBufferToImage(cmdbuf, &copy_src, &view, &copy_rect, 0);
 
+	g_perfmon.Put(GSPerfMon::TextureUploads, 1);
+
 	dkQueueSubmitCommands(m_upload_queue, dkCmdBufFinishList(cmdbuf));
 	dkQueueWaitIdle(m_upload_queue);
 
