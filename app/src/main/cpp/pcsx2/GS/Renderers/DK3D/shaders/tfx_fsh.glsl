@@ -80,6 +80,8 @@ layout(std140, binding = 0) uniform cbSel
 	uint sel_depth_fmt;
 	uint sel_urban_chaos;
 	uint sel_tales;
+	uint sel_automatic_lod;
+	uint sel_manual_lod;
 };
 
 layout(binding = 2) uniform sampler2D Texture;
@@ -193,6 +195,19 @@ vec4 sample_c(vec2 uv)
 		uv.y = (sel_adjt != 0u) ? (uv.y - STRange.y) * STRange.w : uv.y * STScale.y;
 	}
 
+	// Automatic (derivative) LOD, PS2 manual LOD (K/L), or base
+	if (sel_automatic_lod != 0u)
+		return texture(Texture, uv);
+	if (sel_manual_lod != 0u)
+	{
+		float K = LODParams.x;
+		float L = LODParams.y;
+		float bias = LODParams.z;
+		float max_lod = LODParams.w;
+		float gs_lod = K - log2(abs(v_t.w)) * L;
+		float lod = min(gs_lod, max_lod) - bias;
+		return textureLod(Texture, uv, lod);
+	}
 	return textureLod(Texture, uv, 0.0f);
 }
 

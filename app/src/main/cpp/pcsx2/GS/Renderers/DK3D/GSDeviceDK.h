@@ -99,7 +99,7 @@ private:
 	// Optional cb is fragment uniform buffer 0 for post-processing shaders.
 	void DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
 		const DkShader* fragment_shader, bool linear, const void* cb = nullptr, u32 cb_size = 0,
-		bool depth_output = false, u32 color_write_mask = 0xf);
+		bool depth_output = false, u32 color_write_mask = 0xf, bool alpha_blend = false);
 	void DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
 		ShaderConvert shader, bool linear, u32 color_write_mask);
 	// Bump-allocate into per-frame stream buffers and return the GPU address.
@@ -136,6 +136,7 @@ private:
 	DkShader m_interlace_fsh{};
 	DkShader m_shadeboost_fsh{};
 	DkShader m_fxaa_fsh{};
+	DkShader m_merge_fsh{};
 	bool m_postprocess_shaders_ok = false;
 
 	// ImGui

@@ -65,6 +65,8 @@ layout(std140, binding = 0) uniform cbSel
 	uint sel_depth_fmt;
 	uint sel_urban_chaos;
 	uint sel_tales;
+	uint sel_automatic_lod;
+	uint sel_manual_lod;
 };
 
 layout(location = 0) in vec2 a_st;

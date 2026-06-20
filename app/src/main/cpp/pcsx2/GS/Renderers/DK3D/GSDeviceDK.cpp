@@ -44,6 +44,7 @@ namespace
 		u32 channel, shuffle, shuffle_same, read16src, process_ba, process_rg, shuffle_across, write_rg;
 		u32 fbmask, scanmsk, date;
 		u32 depth_fmt, urban_chaos, tales;
+		u32 automatic_lod, manual_lod;
 	};
 
 	constexpr DkBlendFactor kBlendFactors[16] = {
@@ -228,6 +229,7 @@ bool GSDeviceDK::SetupSamplers()
 		dkSamplerDefaults(&sampler);
 		sampler.minFilter = biln ? DkFilter_Linear : DkFilter_Nearest;
 		sampler.magFilter = biln ? DkFilter_Linear : DkFilter_Nearest;
+		sampler.mipFilter = DkMipFilter_Linear;
 		sampler.wrapMode[0] = tau ? DkWrapMode_Repeat : DkWrapMode_ClampToEdge;
 		sampler.wrapMode[1] = tav ? DkWrapMode_Repeat : DkWrapMode_ClampToEdge;
 		sampler.wrapMode[2] = DkWrapMode_ClampToEdge;
@@ -335,7 +337,7 @@ void GSDeviceDK::CommitClear(GSTextureDK* tex)
 
 void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex,
 	const GSVector4& dRect, const DkShader* fragment_shader, bool linear, const void* cb, u32 cb_size,
-	bool depth_output, u32 color_write_mask)
+	bool depth_output, u32 color_write_mask, bool alpha_blend)
 {
 	if (!sTex || !m_convert_shaders_ok)
 		return;
@@ -392,9 +394,17 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 	// The default culling mode discards quads too frequently
 	rasterizer_state.cullMode = DkFace_None;
 	dkColorWriteStateSetMask(&color_write_state, 0, color_write_mask);
+	if (alpha_blend)
+		dkColorStateSetBlendEnable(&color_state, 0, true);
 	dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
 	dkCmdBufBindColorState(m_cmdbuf, &color_state);
 	dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
+	if (alpha_blend)
+	{
+		DkBlendState blend_state;
+		dkBlendStateDefaults(&blend_state);
+		dkCmdBufBindBlendStates(m_cmdbuf, 0, &blend_state, 1);
+	}
 
 	DkDepthStencilState depth_state;
 	dkDepthStencilStateDefaults(&depth_state);
@@ -520,7 +530,8 @@ bool GSDeviceDK::LoadShaders()
 
 	m_postprocess_shaders_ok = load_one(m_interlace_fsh, "romfs:/shaders/interlace_fsh.dksh") &&
 							   load_one(m_shadeboost_fsh, "romfs:/shaders/shadeboost_fsh.dksh") &&
-							   load_one(m_fxaa_fsh, "romfs:/shaders/fxaa_fsh.dksh");
+							   load_one(m_fxaa_fsh, "romfs:/shaders/fxaa_fsh.dksh") &&
+							   load_one(m_merge_fsh, "romfs:/shaders/merge_fsh.dksh");
 
 	if (m_postprocess_shaders_ok)
 		Console.WriteLn("DK3D: post-process shaders loaded.");
@@ -1135,6 +1146,8 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		sel.depth_fmt = ps.depth_fmt;
 		sel.urban_chaos = ps.urban_chaos_hle;
 		sel.tales = ps.tales_of_abyss_hle;
+		sel.automatic_lod = ps.automatic_lod;
+		sel.manual_lod = ps.manual_lod;
 		return sel;
 	};
 
@@ -1278,8 +1291,11 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		return;
 
 	GSTextureDK* const dst = static_cast<GSTextureDK*>(dTex);
+	GSTextureDK* const src0 = static_cast<GSTextureDK*>(sTex[0]); // output 1 (alpha-blended foreground)
+	GSTextureDK* const src1 = static_cast<GSTextureDK*>(sTex[1]); // output 2 (blend background)
 	BeginFrameIfNeeded();
 
+	// Fill the whole target with the PCRTC background colour
 	DkImageView dst_view;
 	dst->GetImageView(&dst_view);
 	dkCmdBufBindRenderTarget(m_cmdbuf, &dst_view, nullptr);
@@ -1288,15 +1304,36 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 	const DkScissor scissor = {0, 0, static_cast<u32>(dst->GetWidth()), static_cast<u32>(dst->GetHeight())};
 	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
 	dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
+	const GSVector4 bg_color = GSVector4::unorm8(c);
 	float bg[4];
-	GSVector4::store<false>(bg, GSVector4::unorm8(c));
+	GSVector4::store<false>(bg, bg_color);
 	dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, bg[0], bg[1], bg[2], bg[3]);
 	dst->SetState(GSTexture::State::Dirty);
 
-	if (sTex[1] && PMODE.EN2)
-		DoStretchRectImpl(static_cast<GSTextureDK*>(sTex[1]), sRect[1], dst, dRect[1], &m_copy_fsh, linear);
-	if (sTex[0] && PMODE.EN1)
-		DoStretchRectImpl(static_cast<GSTextureDK*>(sTex[0]), sRect[0], dst, dRect[0], &m_copy_fsh, linear);
+	// Output 2 is the blend background
+	if (src1 && PMODE.EN2 && PMODE.SLBG == 0)
+		DoStretchRectImpl(src1, sRect[1], dst, dRect[1], &m_copy_fsh, linear);
+
+	// Output 1 is alpha-blended over the background
+	if (src0 && PMODE.EN1)
+	{
+		if (m_postprocess_shaders_ok)
+		{
+			struct
+			{
+				float BGColor[4];
+				u32 mmod;
+				u32 pad[3];
+			} ub = {};
+			GSVector4::store<false>(ub.BGColor, bg_color);
+			ub.mmod = PMODE.MMOD;
+			DoStretchRectImpl(src0, sRect[0], dst, dRect[0], &m_merge_fsh, linear, &ub, sizeof(ub), false, 0xf, true);
+		}
+		else
+		{
+			DoStretchRectImpl(src0, sRect[0], dst, dRect[0], &m_copy_fsh, linear);
+		}
+	}
 #endif
 }
 

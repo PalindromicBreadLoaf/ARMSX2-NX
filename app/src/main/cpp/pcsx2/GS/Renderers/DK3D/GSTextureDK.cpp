@@ -67,7 +67,9 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, DkQueue upload
 			break;
 		case Type::Texture:
 		default:
-			layout_maker.flags = 0;
+			layout_maker.flags = (std::max(1, levels) > 1 && !IsCompressedFormat(format))
+									  ? (DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine)
+									  : 0;
 			break;
 	}
 
@@ -226,7 +228,49 @@ void GSTextureDK::Unmap()
 
 void GSTextureDK::GenerateMipmap()
 {
-	// TODO: generate mips on the 2D engine.
+	if (m_is_depth || m_mipmap_levels <= 1)
+		return;
+
+	DkMemBlockMaker memblock_maker;
+	dkMemBlockMakerDefaults(&memblock_maker, m_device, DK_MEMBLOCK_ALIGNMENT);
+	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+	DkMemBlock cmd_memblock = dkMemBlockCreate(&memblock_maker);
+	if (!cmd_memblock)
+		return;
+
+	DkCmdBufMaker cmdbuf_maker;
+	dkCmdBufMakerDefaults(&cmdbuf_maker, m_device);
+	DkCmdBuf cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
+	dkCmdBufAddMemory(cmdbuf, cmd_memblock, 0, DK_MEMBLOCK_ALIGNMENT);
+
+	// Downsample each level from the previous with a linear filter
+	for (int level = 1; level < m_mipmap_levels; level++)
+	{
+		DkImageView src_view;
+		dkImageViewDefaults(&src_view, &m_image);
+		src_view.mipLevelOffset = static_cast<uint8_t>(level - 1);
+		src_view.mipLevelCount = 1;
+
+		DkImageView dst_view;
+		dkImageViewDefaults(&dst_view, &m_image);
+		dst_view.mipLevelOffset = static_cast<uint8_t>(level);
+		dst_view.mipLevelCount = 1;
+
+		const DkImageRect src_rect = {0, 0, 0, static_cast<u32>(std::max(1, m_size.x >> (level - 1))),
+			static_cast<u32>(std::max(1, m_size.y >> (level - 1))), 1};
+		const DkImageRect dst_rect = {0, 0, 0, static_cast<u32>(std::max(1, m_size.x >> level)),
+			static_cast<u32>(std::max(1, m_size.y >> level)), 1};
+
+		dkCmdBufBlitImage(cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect, DkBlitFlag_FilterLinear, 0);
+		// Make this level visible to the next sample
+		dkCmdBufBarrier(cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	}
+
+	dkQueueSubmitCommands(m_upload_queue, dkCmdBufFinishList(cmdbuf));
+	dkQueueWaitIdle(m_upload_queue);
+
+	dkCmdBufDestroy(cmdbuf);
+	dkMemBlockDestroy(cmd_memblock);
 }
 
 #ifdef PCSX2_DEVBUILD

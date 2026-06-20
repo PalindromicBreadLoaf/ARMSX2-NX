@@ -49,6 +49,7 @@ dk3d_add_shader(tfx_fsh frag)
 dk3d_add_shader(interlace_fsh frag)
 dk3d_add_shader(shadeboost_fsh frag)
 dk3d_add_shader(fxaa_fsh frag)
+dk3d_add_shader(merge_fsh frag)
 dk3d_add_shader(imgui_vsh vert)
 dk3d_add_shader(imgui_fsh frag)
 
