@@ -637,6 +637,15 @@ bool GSDeviceDK::LoadShaders()
 	if (m_convert_shaders_ok)
 		Console.WriteLn("DK3D: convert shaders loaded.");
 
+	m_texconvert_shaders_ok = load_one(m_downsample_fsh, "romfs:/shaders/downsample_fsh.dksh") &&
+							  load_one(m_clut_fsh, "romfs:/shaders/clut_fsh.dksh") &&
+							  load_one(m_convert_8i_fsh, "romfs:/shaders/convert_8i_fsh.dksh");
+
+	if (m_texconvert_shaders_ok)
+		Console.WriteLn("DK3D: texture cache convert shaders loaded.");
+	else
+		Console.Warning("DK3D: texture cache convert shaders missing. CLUT/downsample disabled.");
+
 	m_tfx_shaders_ok = load_one(m_tfx_vsh, "romfs:/shaders/tfx_vsh.dksh") &&
 					   load_one(m_tfx_fsh, "romfs:/shaders/tfx_fsh.dksh");
 
@@ -1207,16 +1216,68 @@ void GSDeviceDK::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 void GSDeviceDK::UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex,
 	u32 dOffset, u32 dSize)
 {
+#ifdef __SWITCH__
+	if (!m_texconvert_shaders_ok)
+		return;
+
+	struct
+	{
+		u32 offset[2];
+		u32 doffset;
+		u32 variant; // 0 = CLUT_4, 1 = CLUT_8
+		float scale;
+		float pad[3];
+	} ub = {{offsetX, offsetY}, dOffset, (dSize == 16) ? 0u : 1u, sScale, {}};
+
+	const GSVector4 dRect(0.0f, 0.0f, static_cast<float>(dSize), 1.0f);
+	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), GSVector4::zero(), static_cast<GSTextureDK*>(dTex), dRect,
+		&m_clut_fsh, false, &ub, sizeof(ub));
+#endif
 }
 
 void GSDeviceDK::ConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM,
 	GSTexture* dTex, u32 DBW, u32 DPSM)
 {
+#ifdef __SWITCH__
+	if (!m_texconvert_shaders_ok)
+		return;
+
+	struct
+	{
+		u32 SBW;
+		u32 DBW;
+		u32 PSM;
+		u32 variant; // 0 = RGBA_TO_8I, 1 = RGB5A1_TO_8I
+		float ScaleFactor;
+		float pad[3];
+	} ub = {SBW, DBW, SPSM, ((SPSM & 0xE) == 0) ? 0u : 1u, sScale, {}};
+
+	const GSVector4 dRect(0.0f, 0.0f, static_cast<float>(dTex->GetWidth()), static_cast<float>(dTex->GetHeight()));
+	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), GSVector4::zero(), static_cast<GSTextureDK*>(dTex), dRect,
+		&m_convert_8i_fsh, false, &ub, sizeof(ub));
+#endif
 }
 
 void GSDeviceDK::FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32 downsample_factor,
 	const GSVector2i& clamp_min, const GSVector4& dRect)
 {
+#ifdef __SWITCH__
+	if (!m_texconvert_shaders_ok)
+		return;
+
+	struct
+	{
+		s32 ClampMin[2];
+		s32 DownsampleFactor;
+		s32 pad0;
+		float Weight;
+		float pad1[3];
+	} ub = {{clamp_min.x, clamp_min.y}, static_cast<s32>(downsample_factor), 0,
+		static_cast<float>(downsample_factor * downsample_factor), {}};
+
+	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), GSVector4::zero(), static_cast<GSTextureDK*>(dTex), dRect,
+		&m_downsample_fsh, false, &ub, sizeof(ub));
+#endif
 }
 
 void GSDeviceDK::RenderHW(GSHWDrawConfig& config)

@@ -161,6 +161,12 @@ private:
 	DkShader m_convert_int_fsh{};
 	bool m_convert_shaders_ok = false;
 
+	// Texture cache converts
+	DkShader m_downsample_fsh{};
+	DkShader m_clut_fsh{};
+	DkShader m_convert_8i_fsh{};
+	bool m_texconvert_shaders_ok = false;
+
 	// Hardware tfx
 	DkShader m_tfx_vsh{};
 	DkShader m_tfx_fsh{};
