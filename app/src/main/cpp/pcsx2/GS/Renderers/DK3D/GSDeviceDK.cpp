@@ -657,7 +657,8 @@ bool GSDeviceDK::LoadShaders()
 	m_postprocess_shaders_ok = load_one(m_interlace_fsh, "romfs:/shaders/interlace_fsh.dksh") &&
 							   load_one(m_shadeboost_fsh, "romfs:/shaders/shadeboost_fsh.dksh") &&
 							   load_one(m_fxaa_fsh, "romfs:/shaders/fxaa_fsh.dksh") &&
-							   load_one(m_merge_fsh, "romfs:/shaders/merge_fsh.dksh");
+							   load_one(m_merge_fsh, "romfs:/shaders/merge_fsh.dksh") &&
+							   load_one(m_yuv_fsh, "romfs:/shaders/yuv_fsh.dksh");
 
 	if (m_postprocess_shaders_ok)
 		Console.WriteLn("DK3D: post-process shaders loaded.");
@@ -1666,28 +1667,58 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		return;
 
 	GSTextureDK* const dst = static_cast<GSTextureDK*>(dTex);
-	GSTextureDK* const src0 = static_cast<GSTextureDK*>(sTex[0]); // output 1 (alpha-blended foreground)
-	GSTextureDK* const src1 = static_cast<GSTextureDK*>(sTex[1]); // output 2 (blend background)
+	GSTextureDK* const src0 = static_cast<GSTextureDK*>(sTex[0]); // alpha-blended foreground
+	GSTextureDK* const src1 = static_cast<GSTextureDK*>(sTex[1]); // blend background
+	GSTextureDK* const src2 = static_cast<GSTextureDK*>(sTex[2]); // EXTBUF feedback target
 	BeginFrameIfNeeded();
 
-	// Fill the whole target with the PCRTC background colour
-	DkImageView dst_view;
-	dst->GetImageView(&dst_view);
-	dkCmdBufBindRenderTarget(m_cmdbuf, &dst_view, nullptr);
-	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(dst->GetWidth()), static_cast<float>(dst->GetHeight()),
-		0.0f, 1.0f};
-	const DkScissor scissor = {0, 0, static_cast<u32>(dst->GetWidth()), static_cast<u32>(dst->GetHeight())};
-	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
-	dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
+	// A YUV-converted copy of the merge circuit is written back into sTex[2] so it becomes a texture for a later draw
+	const bool feedback_write_2 = PMODE.EN2 && src2 != nullptr && EXTBUF.FBIN == 1;
+	const bool feedback_write_1 = PMODE.EN1 && src2 != nullptr && EXTBUF.FBIN == 0;
+	const bool feedback_write_2_but_blend_bg = feedback_write_2 && PMODE.SLBG == 1;
+	const bool can_yuv = m_postprocess_shaders_ok && (feedback_write_1 || feedback_write_2);
+
+	struct
+	{
+		s32 EMODA;
+		s32 EMODC;
+		u32 pad[2];
+	} yuv_cb = {static_cast<s32>(EXTBUF.EMODA), static_cast<s32>(EXTBUF.EMODC), {}};
+	const GSVector4 full_r(0.0f, 0.0f, 1.0f, 1.0f);
+
 	const GSVector4 bg_color = GSVector4::unorm8(c);
 	float bg[4];
 	GSVector4::store<false>(bg, bg_color);
-	dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, bg[0], bg[1], bg[2], bg[3]);
-	dst->SetState(GSTexture::State::Dirty);
 
-	// Output 2 is the blend background
-	if (src1 && PMODE.EN2 && PMODE.SLBG == 0)
+	// Fill the whole target with the PCRTC background colour
+	const auto clear_dst_bg = [&]() {
+		DkImageView dst_view;
+		dst->GetImageView(&dst_view);
+		dkCmdBufBindRenderTarget(m_cmdbuf, &dst_view, nullptr);
+		const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(dst->GetWidth()),
+			static_cast<float>(dst->GetHeight()), 0.0f, 1.0f};
+		const DkScissor scissor = {0, 0, static_cast<u32>(dst->GetWidth()), static_cast<u32>(dst->GetHeight())};
+		dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+		dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
+		dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, bg[0], bg[1], bg[2], bg[3]);
+		dst->SetState(GSTexture::State::Dirty);
+	};
+
+	clear_dst_bg();
+
+	// With feedback_write_2_but_blend_bg it is composited only so the feedback can capture it.
+	// It is then overwritten by the background again below.
+	const bool composite_output2 = src1 && PMODE.EN2 && (PMODE.SLBG == 0 || feedback_write_2_but_blend_bg);
+	if (composite_output2)
 		DoStretchRectImpl(src1, sRect[1], dst, dRect[1], &m_copy_fsh, linear);
+
+	// Capture circuit 2 into the feedback buffer before output 1 is blended.
+	if (feedback_write_2 && composite_output2 && can_yuv)
+		DoStretchRectImpl(dst, full_r, src2, dRect[2], &m_yuv_fsh, linear, &yuv_cb, sizeof(yuv_cb));
+
+	// Restore the background colour for the final merge
+	if (feedback_write_2_but_blend_bg)
+		clear_dst_bg();
 
 	// Output 1 is alpha-blended over the background
 	if (src0 && PMODE.EN1)
@@ -1709,6 +1740,10 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 			DoStretchRectImpl(src0, sRect[0], dst, dRect[0], &m_copy_fsh, linear);
 		}
 	}
+
+	// Capture circuit 1 into the feedback buffer after blending
+	if (feedback_write_1 && can_yuv)
+		DoStretchRectImpl(dst, full_r, src2, dRect[2], &m_yuv_fsh, linear, &yuv_cb, sizeof(yuv_cb));
 #endif
 }
 

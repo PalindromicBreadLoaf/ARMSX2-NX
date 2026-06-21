@@ -190,6 +190,7 @@ private:
 	DkShader m_shadeboost_fsh{};
 	DkShader m_fxaa_fsh{};
 	DkShader m_merge_fsh{};
+	DkShader m_yuv_fsh{};
 	bool m_postprocess_shaders_ok = false;
 
 	// ImGui
