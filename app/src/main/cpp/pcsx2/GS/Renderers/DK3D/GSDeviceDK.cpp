@@ -1114,7 +1114,6 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 
 	// Preserve current frame work
 	BeginFrameIfNeeded();
-	// dkCmdBufFinishList below breaks bound-state
 	InvalidateHWStateCache();
 	CommitClear(src);
 
@@ -1130,9 +1129,25 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 	const DkCopyBuf dst = {dkMemBlockGetGpuAddr(dst_block) + dst_offset, 0, 0};
 	dkCmdBufCopyImageToBuffer(m_cmdbuf, &src_view, &src_rect, &dst, 0);
 
-	// Finish this list so EndPresent won't resubmit it
+	// Copy now rides in the frame command buffer
+	m_readback_pending = true;
+}
+
+void GSDeviceDK::FlushReadback()
+{
+	if (!m_readback_pending)
+		return;
+	m_readback_pending = false;
+
+	// A frame should always be active
+	if (!m_frame_active)
+		return;
+
+	// Finish this list so EndPresent won't resubmit it, then wait only on the copy, not the entire frame
 	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
-	dkQueueWaitIdle(m_queue);
+	dkQueueSignalFence(m_queue, &m_readback_fence, false);
+	dkQueueFlush(m_queue);
+	dkFenceWait(&m_readback_fence, -1);
 }
 
 bool GSDeviceDK::UploadToImage(const DkImageView& view, const DkImageRect& rect, const void* data, u32 src_pitch,

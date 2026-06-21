@@ -259,9 +259,9 @@ void GSDownloadTextureDK::CopyFromTexture(
 
 	g_perfmon.Put(GSPerfMon::Readbacks, 1);
 
-	// ReadbackTexture waits for completion
+	// Records the copy into the frame command buffer
 	m_device->ReadbackTexture(dktex, src, m_memblock, copy_offset);
-	m_needs_flush = false;
+	m_needs_flush = true;
 }
 
 bool GSDownloadTextureDK::Map(const GSVector4i& read_rc)
@@ -275,6 +275,12 @@ void GSDownloadTextureDK::Unmap()
 
 void GSDownloadTextureDK::Flush()
 {
+	if (!m_needs_flush)
+		return;
+
+	m_needs_flush = false;
+	// Block once for the queued copy instead of per copy.
+	m_device->FlushReadback();
 }
 
 #ifdef PCSX2_DEVBUILD

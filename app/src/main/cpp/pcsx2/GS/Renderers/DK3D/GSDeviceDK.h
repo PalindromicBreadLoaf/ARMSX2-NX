@@ -46,7 +46,10 @@ public:
 	std::unique_ptr<GSDownloadTexture> CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format) override;
 
 #ifdef __SWITCH__
+	// Record a render-target to buffer copy into the current frame command buffer
 	void ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMemBlock dst_block, u32 dst_offset);
+	// Submit the pending readback copy and wait only on it
+	void FlushReadback();
 	// Record a buffer to image copy into the current frame command buffer
 	bool UploadToImage(const DkImageView& view, const DkImageRect& rect, const void* data, u32 src_pitch,
 		u32 upload_pitch, u32 num_rows);
@@ -228,6 +231,9 @@ private:
 
 	DkImageView m_swapchain_view{};
 	bool m_frame_active = false;
+
+	DkFence m_readback_fence{};
+	bool m_readback_pending = false;
 
 	// GPU-busy %
 	DkMemBlock m_timestamp_memblock = nullptr;

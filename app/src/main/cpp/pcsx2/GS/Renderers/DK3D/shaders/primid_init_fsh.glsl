@@ -1,6 +1,6 @@
 #version 460
 
-Initialises the PrimID tracking image Ported from the ps_stencil_image_init_* variants in vulkan/convert.glsl
+// Initialises the PrimID tracking image Ported from the ps_stencil_image_init_* variants in vulkan/convert.glsl
 
 layout (location = 0) in vec2 vTexCoord;
 layout (location = 0) out vec4 oColor;
