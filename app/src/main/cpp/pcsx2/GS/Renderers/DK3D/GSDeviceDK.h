@@ -115,6 +115,10 @@ private:
 	u32 PushImage(const GSTextureDK* tex);
 	// Draw tfx geometry, splitting barriers for feedback-loop reads.
 	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
+	// Write stencil=1 to pixels that pass the destination-alpha test.
+	void SetupDATE(GSTextureDK* rt, GSTextureDK* ds, SetDATM datm, const GSVector4i& bbox);
+	// Return the PrimID image to bind for the main draw.
+	GSTextureDK* SetupPrimitiveTrackingDATE(GSHWDrawConfig& config);
 	// Present ImGui over game frame
 	void RenderImGui();
 	// Forget the cached tfx pipeline state so the next HW draw re-binds it
@@ -166,6 +170,11 @@ private:
 	DkShader m_clut_fsh{};
 	DkShader m_convert_8i_fsh{};
 	bool m_texconvert_shaders_ok = false;
+
+	// Destination-alpha (DATE)
+	DkShader m_date_fsh{};        // stencil setup
+	DkShader m_primid_init_fsh{}; // PrimID prefill
+	bool m_date_shaders_ok = false;
 
 	// Hardware tfx
 	DkShader m_tfx_vsh{};

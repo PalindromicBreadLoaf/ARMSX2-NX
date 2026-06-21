@@ -33,7 +33,7 @@ namespace
 	// Source base alignment for buffer to image copies
 	constexpr u32 STAGING_ALIGNMENT = 256;
 
-	// Each frame owns a 16-byte start and end timestamp
+	// Each frame owns a 16-byte start and end timestamp for le debugging
 	constexpr u32 TIMESTAMP_REPORT_SIZE = 16;
 	constexpr u32 TIMESTAMP_FRAME_STRIDE = 2 * TIMESTAMP_REPORT_SIZE;
 
@@ -55,6 +55,67 @@ namespace
 		u32 depth_fmt, urban_chaos, tales;
 		u32 automatic_lod, manual_lod;
 	};
+
+	// Translate a PSSelector into the tfx ubershader's cbSel uniform
+	DKTfxSelector MakeTfxSelector(const GSHWDrawConfig::PSSelector& ps, bool has_tex)
+	{
+		DKTfxSelector sel = {};
+		sel.fst = ps.fst;
+		// tex_is_fb samples the RT without config.tex
+		// Depth sources still need ST from the VS even when config.tex is a depth copy.
+		sel.tme = (has_tex || ps.tex_is_fb || ps.depth_fmt != 0) ? 1u : 0u;
+		sel.tfx = ps.tfx;
+		sel.tcc = ps.tcc;
+		sel.atst = ps.atst;
+		sel.afail = ps.afail;
+		sel.fog = ps.fog;
+		sel.aem = ps.aem;
+		sel.aem_fmt = ps.aem_fmt;
+		sel.pal_fmt = ps.pal_fmt;
+		sel.ltf = ps.ltf;
+		sel.wms = ps.wms;
+		sel.wmt = ps.wmt;
+		sel.dst_fmt = ps.dst_fmt;
+		sel.fba = ps.fba;
+		sel.iip = ps.iip;
+		sel.region_rect = ps.region_rect;
+		sel.adjs = ps.adjs;
+		sel.adjt = ps.adjt;
+		sel.tcoffsethack = ps.tcoffsethack;
+		sel.blend_a = ps.blend_a;
+		sel.blend_b = ps.blend_b;
+		sel.blend_c = ps.blend_c;
+		sel.blend_d = ps.blend_d;
+		sel.blend_mix = ps.blend_mix;
+		sel.blend_hw = ps.blend_hw;
+		sel.pabe = ps.pabe;
+		sel.fixed_one_a = ps.fixed_one_a;
+		sel.a_masked = ps.a_masked;
+		sel.colclip = ps.colclip;
+		sel.colclip_hw = ps.colclip_hw;
+		sel.rta_correction = ps.rta_correction;
+		sel.dither = ps.dither;
+		sel.dither_adjust = ps.dither_adjust;
+		sel.round_inv = ps.round_inv;
+		sel.tex_is_fb = ps.tex_is_fb;
+		sel.channel = ps.channel;
+		sel.shuffle = ps.shuffle;
+		sel.shuffle_same = ps.shuffle_same;
+		sel.read16src = ps.real16src;
+		sel.process_ba = ps.process_ba;
+		sel.process_rg = ps.process_rg;
+		sel.shuffle_across = ps.shuffle_across;
+		sel.write_rg = ps.write_rg;
+		sel.fbmask = ps.fbmask;
+		sel.scanmsk = ps.scanmsk;
+		sel.date = ps.date;
+		sel.depth_fmt = ps.depth_fmt;
+		sel.urban_chaos = ps.urban_chaos_hle;
+		sel.tales = ps.tales_of_abyss_hle;
+		sel.automatic_lod = ps.automatic_lod;
+		sel.manual_lod = ps.manual_lod;
+		return sel;
+	}
 
 	constexpr DkBlendFactor kBlendFactors[16] = {
 		DkBlendFactor_SrcColor, DkBlendFactor_InvSrcColor, DkBlendFactor_DstColor, DkBlendFactor_InvDstColor,
@@ -128,6 +189,11 @@ bool GSDeviceDK::CreateDeviceObjects()
 {
 	DkDeviceMaker device_maker;
 	dkDeviceMakerDefaults(&device_maker);
+	//Log errors for when this inevitably breaks some games and issues are opened regarding them.
+	device_maker.cbDebug = [](void* userData, const char* context, DkResult result, const char* message) {
+		Console.Error("DK3D deko3d error: context='%s' result=%d message='%s'", context ? context : "?",
+			static_cast<int>(result), message ? message : "?");
+	};
 	m_device = dkDeviceCreate(&device_maker);
 	if (!m_device)
 		return false;
@@ -261,6 +327,10 @@ bool GSDeviceDK::CreateDeviceObjects()
 		SetupSamplers();
 
 	m_features.cas_sharpening = m_cas_shader_ok;
+
+	// DATE shaders
+	m_features.stencil_buffer = m_date_shaders_ok;
+	m_features.primitive_id = m_date_shaders_ok && m_tfx_shaders_ok;
 
 	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers, convert=%d, tfx=%d).", m_present_width,
 		m_present_height, NUM_FRAMEBUFFERS, m_convert_shaders_ok ? 1 : 0, m_tfx_shaders_ok ? 1 : 0);
@@ -645,6 +715,14 @@ bool GSDeviceDK::LoadShaders()
 		Console.WriteLn("DK3D: texture cache convert shaders loaded.");
 	else
 		Console.Warning("DK3D: texture cache convert shaders missing. CLUT/downsample disabled.");
+
+	m_date_shaders_ok = load_one(m_date_fsh, "romfs:/shaders/date_fsh.dksh") &&
+						load_one(m_primid_init_fsh, "romfs:/shaders/primid_init_fsh.dksh");
+
+	if (m_date_shaders_ok)
+		Console.WriteLn("DK3D: DATE setup shaders loaded.");
+	else
+		Console.Warning("DK3D: DATE setup shaders missing. Using slower COPY shader instead.");
 
 	m_tfx_shaders_ok = load_one(m_tfx_vsh, "romfs:/shaders/tfx_vsh.dksh") &&
 					   load_one(m_tfx_fsh, "romfs:/shaders/tfx_fsh.dksh");
@@ -1308,6 +1386,19 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
+	// Destination-alpha setup
+	GSTextureDK* date_image = nullptr;
+	if (config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::Stencil)
+	{
+		SetupDATE(rt, ds, config.datm, config.drawarea);
+	}
+	else if (config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::PrimIDTracking)
+	{
+		date_image = SetupPrimitiveTrackingDATE(config);
+		if (!date_image)
+			return; // allocation faild
+	}
+
 	DkImageView rt_view;
 	DkImageView ds_view;
 	rt->GetImageView(&rt_view);
@@ -1334,9 +1425,13 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	rt->SetState(GSTexture::State::Dirty);
 	if (has_ds)
 	{
+		// Stencil clears to 1. This is important. Do not mess this up.
 		if (ds->GetState() == GSTexture::State::Cleared)
-			dkCmdBufClearDepthStencil(m_cmdbuf, true, ds->GetClearDepth(), 0xFF, 0);
+			dkCmdBufClearDepthStencil(m_cmdbuf, true, ds->GetClearDepth(), 0xFF, 1);
 		ds->SetState(GSTexture::State::Dirty);
+
+		if (config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::StencilOne)
+			dkCmdBufClearDepthStencil(m_cmdbuf, false, 0.0f, 0xFF, 1);
 	}
 
 	static const DkVtxAttribState tfx_attribs[7] = {
@@ -1408,8 +1503,8 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	};
 
 	auto bind_depth = [&](const GSHWDrawConfig::DepthStencilSelector& depth, bool force) {
-		// Only ztst/zwe affect the bound state
-		const u32 depth_key = has_ds ? ((static_cast<u32>(depth.key) & 0x07u) | 0x100u) : 0u;
+		// ztst/zwe plus the stencil DATE bits affect the state.
+		const u32 depth_key = has_ds ? ((static_cast<u32>(depth.key) & 0x1Fu) | 0x100u) : 0u;
 		if (!force && m_hw_depth_key == depth_key)
 			return;
 		m_hw_depth_key = depth_key;
@@ -1423,6 +1518,21 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 			depth_state.depthTestEnable = (depth.ztst != ZTST_ALWAYS || depth.zwe);
 			depth_state.depthWriteEnable = depth.zwe;
 			depth_state.depthCompareOp = ztst[depth.ztst];
+
+			// Only pixels whose stencil == 1 survive
+			if (depth.date)
+			{
+				depth_state.stencilTestEnable = true;
+				depth_state.stencilFrontCompareOp = DkCompareOp_Equal;
+				depth_state.stencilFrontFailOp = DkStencilOp_Keep;
+				depth_state.stencilFrontDepthFailOp = DkStencilOp_Keep;
+				depth_state.stencilFrontPassOp = depth.date_one ? DkStencilOp_Zero : DkStencilOp_Keep;
+				depth_state.stencilBackCompareOp = DkCompareOp_Equal;
+				depth_state.stencilBackFailOp = DkStencilOp_Keep;
+				depth_state.stencilBackDepthFailOp = DkStencilOp_Keep;
+				depth_state.stencilBackPassOp = depth.date_one ? DkStencilOp_Zero : DkStencilOp_Keep;
+				dkCmdBufSetStencil(m_cmdbuf, DkFace_FrontAndBack, 1, 1, 1);
+			}
 		}
 		else
 		{
@@ -1451,65 +1561,15 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 4, &rt_handle, 1);
 	}
 
+	// Bind the per-pixel minimum primitive id image (DATE 3)
+	if (date_image)
+	{
+		const DkResHandle primid_handle = dkMakeTextureHandle(PushImage(date_image), SAMPLER_POINT);
+		dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 5, &primid_handle, 1);
+	}
+
 	// Rebuild the selector from PSSelector so second passes can swap overrides.
-	auto make_selector = [&](const GSHWDrawConfig::PSSelector& ps) {
-		DKTfxSelector sel = {};
-		sel.fst = ps.fst;
-		// tex_is_fb samples the RT without config.tex
-		// Depth sources still need ST from the VS even when config.tex is a depth copy.
-		sel.tme = (tex != nullptr || ps.tex_is_fb || ps.depth_fmt != 0) ? 1u : 0u;
-		sel.tfx = ps.tfx;
-		sel.tcc = ps.tcc;
-		sel.atst = ps.atst;
-		sel.afail = ps.afail;
-		sel.fog = ps.fog;
-		sel.aem = ps.aem;
-		sel.aem_fmt = ps.aem_fmt;
-		sel.pal_fmt = ps.pal_fmt;
-		sel.ltf = ps.ltf;
-		sel.wms = ps.wms;
-		sel.wmt = ps.wmt;
-		sel.dst_fmt = ps.dst_fmt;
-		sel.fba = ps.fba;
-		sel.iip = ps.iip;
-		sel.region_rect = ps.region_rect;
-		sel.adjs = ps.adjs;
-		sel.adjt = ps.adjt;
-		sel.tcoffsethack = ps.tcoffsethack;
-		sel.blend_a = ps.blend_a;
-		sel.blend_b = ps.blend_b;
-		sel.blend_c = ps.blend_c;
-		sel.blend_d = ps.blend_d;
-		sel.blend_mix = ps.blend_mix;
-		sel.blend_hw = ps.blend_hw;
-		sel.pabe = ps.pabe;
-		sel.fixed_one_a = ps.fixed_one_a;
-		sel.a_masked = ps.a_masked;
-		sel.colclip = ps.colclip;
-		sel.colclip_hw = ps.colclip_hw;
-		sel.rta_correction = ps.rta_correction;
-		sel.dither = ps.dither;
-		sel.dither_adjust = ps.dither_adjust;
-		sel.round_inv = ps.round_inv;
-		sel.tex_is_fb = ps.tex_is_fb;
-		sel.channel = ps.channel;
-		sel.shuffle = ps.shuffle;
-		sel.shuffle_same = ps.shuffle_same;
-		sel.read16src = ps.real16src;
-		sel.process_ba = ps.process_ba;
-		sel.process_rg = ps.process_rg;
-		sel.shuffle_across = ps.shuffle_across;
-		sel.write_rg = ps.write_rg;
-		sel.fbmask = ps.fbmask;
-		sel.scanmsk = ps.scanmsk;
-		sel.date = ps.date;
-		sel.depth_fmt = ps.depth_fmt;
-		sel.urban_chaos = ps.urban_chaos_hle;
-		sel.tales = ps.tales_of_abyss_hle;
-		sel.automatic_lod = ps.automatic_lod;
-		sel.manual_lod = ps.manual_lod;
-		return sel;
-	};
+	auto make_selector = [&](const GSHWDrawConfig::PSSelector& ps) { return MakeTfxSelector(ps, tex != nullptr); };
 
 	auto bind_selector = [&](const DKTfxSelector& sel) {
 		const DkGpuAddr sel_addr = StreamUniform(&sel, sizeof(sel));
@@ -1590,10 +1650,289 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 
 	if (config.blend_multi_pass.enable || config.alpha_second_pass.enable)
 		m_hw_uniforms_valid = false;
+
+	// The PrimID tracking image was only needed here
+	if (date_image)
+		Recycle(date_image);
 #endif
 }
 
 #ifdef __SWITCH__
+void GSDeviceDK::SetupDATE(GSTextureDK* rt, GSTextureDK* ds, SetDATM datm, const GSVector4i& bbox)
+{
+	if (!rt || !ds || !ds->IsDepth() || !m_date_shaders_ok)
+		return;
+
+	BeginFrameIfNeeded();
+	InvalidateHWStateCache();
+
+	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
+
+	// Make the RT's prior writes visible
+	CommitClear(rt);
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
+
+	// Bind the depth-stencil as the only target (no colour)
+	DkImageView ds_view;
+	ds->GetImageView(&ds_view);
+	dkCmdBufBindRenderTargets(m_cmdbuf, nullptr, 0, &ds_view);
+
+	const GSVector2i dssize = ds->GetSize();
+	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(dssize.x), static_cast<float>(dssize.y), 0.0f, 1.0f};
+	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+	const DkScissor scissor = {0, 0, static_cast<u32>(dssize.x), static_cast<u32>(dssize.y)};
+	dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
+
+	// Clear stencil to 0
+	if (ds->GetState() == GSTexture::State::Cleared)
+		dkCmdBufClearDepthStencil(m_cmdbuf, true, ds->GetClearDepth(), 0xFF, 0);
+	else
+		dkCmdBufClearDepthStencil(m_cmdbuf, false, 0.0f, 0xFF, 0);
+	ds->SetState(GSTexture::State::Dirty);
+
+	// Cull none, no colour, stencil replace-with-1 on pass.
+	DkRasterizerState rasterizer_state;
+	dkRasterizerStateDefaults(&rasterizer_state);
+	rasterizer_state.cullMode = DkFace_None;
+	dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+
+	DkColorWriteState color_write_state;
+	dkColorWriteStateDefaults(&color_write_state);
+	dkColorWriteStateSetMask(&color_write_state, 0, 0);
+	dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
+
+	DkDepthStencilState depth_state;
+	dkDepthStencilStateDefaults(&depth_state);
+	depth_state.depthTestEnable = false;
+	depth_state.depthWriteEnable = false;
+	depth_state.stencilTestEnable = true;
+	depth_state.stencilFrontCompareOp = DkCompareOp_Always;
+	depth_state.stencilFrontFailOp = DkStencilOp_Keep;
+	depth_state.stencilFrontDepthFailOp = DkStencilOp_Keep;
+	depth_state.stencilFrontPassOp = DkStencilOp_Replace;
+	depth_state.stencilBackCompareOp = DkCompareOp_Always;
+	depth_state.stencilBackFailOp = DkStencilOp_Keep;
+	depth_state.stencilBackDepthFailOp = DkStencilOp_Keep;
+	depth_state.stencilBackPassOp = DkStencilOp_Replace;
+	dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
+	dkCmdBufSetStencil(m_cmdbuf, DkFace_FrontAndBack, 1, 1, 1);
+
+	const DkShader* shaders[] = {&m_convert_vsh, &m_date_fsh};
+	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+
+	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
+
+	const DkResHandle rt_handle = dkMakeTextureHandle(PushImage(rt), SAMPLER_POINT);
+	dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 0, &rt_handle, 1);
+
+	const struct
+	{
+		u32 variant;
+		u32 pad[3];
+	} ub = {static_cast<u32>(datm), {0, 0, 0}};
+	const DkGpuAddr cb_addr = StreamUniform(&ub, sizeof(ub));
+	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Fragment, 0, cb_addr, AlignUp(sizeof(ub), DK_UNIFORM_BUF_ALIGNMENT));
+
+	// Fullscreen quad over the modified region.
+	const GSVector4 dRect(bbox);
+	const float left = dRect.x * 2.0f / dssize.x - 1.0f;
+	const float top = 1.0f - dRect.y * 2.0f / dssize.y;
+	const float right = dRect.z * 2.0f / dssize.x - 1.0f;
+	const float bottom = 1.0f - dRect.w * 2.0f / dssize.y;
+	const ConvertVertex vertices[4] = {
+		{{left, top, 0.5f, 1.0f}, {0.0f, 0.0f}},
+		{{right, top, 0.5f, 1.0f}, {1.0f, 0.0f}},
+		{{left, bottom, 0.5f, 1.0f}, {0.0f, 1.0f}},
+		{{right, bottom, 0.5f, 1.0f}, {1.0f, 1.0f}},
+	};
+
+	m_vertex_offset = AlignUp(m_vertex_offset, sizeof(ConvertVertex));
+	if (m_vertex_offset + sizeof(vertices) > VERTEX_BUFFER_SIZE)
+		m_vertex_offset = 0;
+	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_vertex_memblock)) + m_vertex_offset, vertices, sizeof(vertices));
+	const DkGpuAddr vertex_addr = dkMemBlockGetGpuAddr(m_vertex_memblock) + m_vertex_offset;
+	m_vertex_offset += sizeof(vertices);
+
+	static const DkVtxAttribState attribs[2] = {
+		{0, 0, offsetof(ConvertVertex, pos), DkVtxAttribSize_4x32, DkVtxAttribType_Float, 0},
+		{0, 0, offsetof(ConvertVertex, uv), DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+	};
+	static const DkVtxBufferState buffer_state = {sizeof(ConvertVertex), 0};
+	dkCmdBufBindVtxAttribState(m_cmdbuf, attribs, 2);
+	dkCmdBufBindVtxBufferState(m_cmdbuf, &buffer_state, 1);
+	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vertex_addr, sizeof(vertices));
+	dkCmdBufDraw(m_cmdbuf, DkPrimitive_TriangleStrip, 4, 1, 0, 0);
+	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+
+	// Order the stencil writes before the main draw's test.
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
+}
+
+GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
+{
+	if (!m_date_shaders_ok || !m_tfx_shaders_ok)
+		return nullptr;
+
+	GSTextureDK* const rt = static_cast<GSTextureDK*>(config.rt);
+	GSTextureDK* const ds = static_cast<GSTextureDK*>(config.ds);
+	const bool has_ds = (ds && ds->IsDepth());
+	const GSVector2i rtsize = rt->GetSize();
+
+	// The per-pixel "lowest failing primitive id" image.
+	GSTextureDK* const image =
+		static_cast<GSTextureDK*>(CreateRenderTarget(rtsize.x, rtsize.y, GSTexture::Format::PrimID, false));
+	if (!image)
+	{
+		Console.Warning("DK3D: failed to allocate PrimID DATE image. Aborting draw.");
+		return nullptr;
+	}
+
+	const GSVector4 drawareaf(config.drawarea);
+	const GSVector4 sRect = drawareaf / GSVector4(rtsize).xyxy();
+
+	// INT_MAX everywhere, -1 where the existing RT alpha already fails the date test.
+	{
+		const struct
+		{
+			u32 variant;
+			u32 pad[3];
+		} ub = {static_cast<u32>(config.datm), {0, 0, 0}};
+		DoStretchRectImpl(rt, sRect, image, drawareaf, &m_primid_init_fsh, false, &ub, sizeof(ub));
+	}
+
+	// MIN-blend each primitive's id into the image
+	BeginFrameIfNeeded();
+	InvalidateHWStateCache();
+	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
+
+	DkImageView image_view;
+	image->GetImageView(&image_view);
+	DkImageView ds_view;
+	if (has_ds)
+		ds->GetImageView(&ds_view);
+	dkCmdBufBindRenderTarget(m_cmdbuf, &image_view, has_ds ? &ds_view : nullptr);
+
+	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(rtsize.x), static_cast<float>(rtsize.y), 0.0f, 1.0f};
+	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+	// Scissor to the modified area
+	const GSVector4i pp_scissor = config.drawarea.rintersect(GSVector4i::loadh(rtsize));
+	const DkScissor dk_scissor = {static_cast<u32>(std::max(0, pp_scissor.x)),
+		static_cast<u32>(std::max(0, pp_scissor.y)), static_cast<u32>(std::max(0, pp_scissor.width())),
+		static_cast<u32>(std::max(0, pp_scissor.height()))};
+	dkCmdBufSetScissors(m_cmdbuf, 0, &dk_scissor, 1);
+	image->SetState(GSTexture::State::Dirty);
+
+	DkRasterizerState rasterizer_state;
+	dkRasterizerStateDefaults(&rasterizer_state);
+	rasterizer_state.cullMode = DkFace_None;
+	dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
+
+	DkColorState color_state;
+	dkColorStateDefaults(&color_state);
+	dkColorStateSetBlendEnable(&color_state, 0, true);
+	dkCmdBufBindColorState(m_cmdbuf, &color_state);
+	DkBlendState blend_state;
+	dkBlendStateDefaults(&blend_state);
+	dkBlendStateSetOps(&blend_state, DkBlendOp_Min, DkBlendOp_Min);
+	dkBlendStateSetFactors(&blend_state, DkBlendFactor_One, DkBlendFactor_Zero, DkBlendFactor_One,
+		DkBlendFactor_Zero);
+	dkCmdBufBindBlendStates(m_cmdbuf, 0, &blend_state, 1);
+
+	DkColorWriteState color_write_state;
+	dkColorWriteStateDefaults(&color_write_state);
+	dkColorWriteStateSetMask(&color_write_state, 0, DkColorMask_R);
+	dkCmdBufBindColorWriteState(m_cmdbuf, &color_write_state);
+
+	DkDepthStencilState depth_state;
+	dkDepthStencilStateDefaults(&depth_state);
+	if (has_ds)
+	{
+		static const DkCompareOp ztst[] = {DkCompareOp_Never, DkCompareOp_Always, DkCompareOp_Gequal,
+			DkCompareOp_Greater};
+		depth_state.depthTestEnable = (config.depth.ztst != ZTST_ALWAYS);
+		depth_state.depthWriteEnable = false;
+		depth_state.depthCompareOp = ztst[config.depth.ztst];
+	}
+	else
+	{
+		depth_state.depthTestEnable = false;
+		depth_state.depthWriteEnable = false;
+	}
+	dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
+
+	const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh};
+	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+
+	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
+
+	// Bind config.tex/pal so the prepass computes the same alpha the main draw would.
+	GSTextureDK* const tex = static_cast<GSTextureDK*>(config.tex);
+	GSTextureDK* const pal = static_cast<GSTextureDK*>(config.pal);
+	if (tex)
+		CommitClear(tex);
+	const u32 sampler_slot = (config.sampler.biln ? SAMPLER_LINEAR : SAMPLER_POINT) |
+							 (config.sampler.tau ? 2u : 0u) | (config.sampler.tav ? 1u : 0u);
+	DkResHandle handles[2];
+	handles[0] = tex ? dkMakeTextureHandle(PushImage(tex), sampler_slot) : dkMakeTextureHandle(0, SAMPLER_POINT);
+	handles[1] = pal ? dkMakeTextureHandle(PushImage(pal), SAMPLER_POINT) : dkMakeTextureHandle(0, SAMPLER_POINT);
+	dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 2, handles, 2);
+
+	// Select which path to use in the TFX shader
+	const DkGpuAddr vs_addr = StreamUniform(&config.cb_vs, sizeof(config.cb_vs));
+	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 1, vs_addr,
+		AlignUp(sizeof(config.cb_vs), DK_UNIFORM_BUF_ALIGNMENT));
+	const DkGpuAddr ps_addr = StreamUniform(&config.cb_ps, sizeof(config.cb_ps));
+	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Fragment, 1, ps_addr,
+		AlignUp(sizeof(config.cb_ps), DK_UNIFORM_BUF_ALIGNMENT));
+	const DKTfxSelector pre_sel = MakeTfxSelector(config.ps, tex != nullptr);
+	const DkGpuAddr sel_addr = StreamUniform(&pre_sel, sizeof(pre_sel));
+	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 0, sel_addr, AlignUp(sizeof(pre_sel), DK_UNIFORM_BUF_ALIGNMENT));
+	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Fragment, 0, sel_addr, AlignUp(sizeof(pre_sel), DK_UNIFORM_BUF_ALIGNMENT));
+
+	const u32 vtx_size = config.nverts * sizeof(GSVertex);
+	const u32 idx_size = config.nindices * sizeof(u16);
+	const DkGpuAddr vtx_addr = StreamVertices(config.verts, vtx_size);
+	const DkGpuAddr idx_addr = StreamIndices(config.indices, idx_size);
+	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
+	dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
+
+	static const DkVtxAttribState tfx_attribs[7] = {
+		{0, 0, 0, DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+		{0, 0, 8, DkVtxAttribSize_4x8, DkVtxAttribType_Uint, 0},
+		{0, 0, 12, DkVtxAttribSize_1x32, DkVtxAttribType_Float, 0},
+		{0, 0, 16, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
+		{0, 0, 20, DkVtxAttribSize_1x32, DkVtxAttribType_Uint, 0},
+		{0, 0, 24, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
+		{0, 0, 28, DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
+	};
+	static const DkVtxBufferState tfx_buffer_state = {sizeof(GSVertex), 0};
+	dkCmdBufBindVtxAttribState(m_cmdbuf, tfx_attribs, 7);
+	dkCmdBufBindVtxBufferState(m_cmdbuf, &tfx_buffer_state, 1);
+
+	DkPrimitive primitive = DkPrimitive_Triangles;
+	switch (config.topology)
+	{
+		case GSHWDrawConfig::Topology::Point: primitive = DkPrimitive_Points; break;
+		case GSHWDrawConfig::Topology::Line: primitive = DkPrimitive_Lines; break;
+		case GSHWDrawConfig::Topology::Triangle: primitive = DkPrimitive_Triangles; break;
+	}
+	dkCmdBufDrawIndexed(m_cmdbuf, primitive, config.nindices, 1, 0, 0, 0);
+	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+
+	// Order the prepass writes before the main draw samples the image.
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
+
+	// The main draw (and its alpha second pass) run as DATE 3.
+	config.ps.date = 3;
+	config.alpha_second_pass.ps.date = 3;
+	return image;
+}
+
 void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier)
 {
 	if (full_barrier)

@@ -88,6 +88,8 @@ layout(binding = 2) uniform sampler2D Texture;
 layout(binding = 3) uniform sampler2D Palette;
 // Bound only for feedback-loop draws
 layout(binding = 4) uniform sampler2D RtSampler;
+// Bound only for PrimID-tracking (DATE 3)
+layout(binding = 5) uniform sampler2D PrimMinTexture;
 
 layout(location = 0) in vec4 v_t;
 layout(location = 1) in vec4 v_ti;
@@ -693,8 +695,7 @@ void main()
 			discard;
 	}
 
-	// DATE >= 5 reads current alpha from the RT
-	// TODO: DATE 1/2/3 need dedicated targets.
+	// DATE >= 5 reads current alpha from the RT (in-shader full barrier DATE)
 	if (sel_date >= 5u)
 	{
 		vec4 RTd = sample_from_rt();
@@ -703,6 +704,14 @@ void main()
 			? (((sel_date & 3u) == 1u) ? (rt_a > (254.5f / 255.0f)) : (rt_a < (254.5f / 255.0f)))
 			: (((sel_date & 3u) == 1u) ? (rt_a > 0.5f) : (rt_a < 0.5f));
 		if (bad)
+			discard;
+	}
+
+	// PrimID tracking (DATE 3)
+	if (sel_date == 3u)
+	{
+		int stencil_ceil = int(texelFetch(PrimMinTexture, ivec2(gl_FragCoord.xy), 0).r);
+		if (gl_PrimitiveID > stencil_ceil)
 			discard;
 	}
 
@@ -738,6 +747,20 @@ void main()
 	{
 		if (C.a < 128.0f)
 			C.a += 128.0f;
+	}
+
+	// Emit the primitive id where this fragment would write a failing alpha else INT_MAX (DATE 1/2)
+	if (sel_date == 1u)
+	{
+		// alpha >= 0x80 fails
+		o_col0 = (C.a > 127.5f) ? vec4(gl_PrimitiveID) : vec4(0x7FFFFFFF);
+		return;
+	}
+	else if (sel_date == 2u)
+	{
+		// alpha < 0x80 fails
+		o_col0 = (C.a < 127.5f) ? vec4(gl_PrimitiveID) : vec4(0x7FFFFFFF);
+		return;
 	}
 
 	ps_blend(C, alpha_blend);
