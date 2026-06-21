@@ -137,6 +137,30 @@ void GSRendererHW::VSync(u32 field, bool registers_written, bool idle_frame)
 		GSConfig.TexturePreloading = TexturePreloadingLevel::Partial;
 	}
 
+#ifdef __SWITCH__
+	// Switch only gives about 3GB to an application, so cap VRAM to 768MB.
+	{
+		static constexpr u64 SWITCH_TC_VRAM_CAP = 768 * 1024 * 1024;
+
+		const auto vram_usage = []() {
+			return g_texture_cache->GetTargetMemoryUsage() + g_texture_cache->GetSourceMemoryUsage() +
+				   g_texture_cache->GetTotalHashCacheMemoryUsage() + g_gs_device->GetPoolMemoryUsage();
+		};
+
+		if (vram_usage() > SWITCH_TC_VRAM_CAP)
+		{
+			g_gs_device->PurgePool();
+
+			// If still over remove hashmap too
+			if (vram_usage() > SWITCH_TC_VRAM_CAP)
+			{
+				g_texture_cache->RemoveAll(true, false, true);
+				g_gs_device->PurgePool();
+			}
+		}
+	}
+#endif
+
 	m_skip = 0;
 	m_skip_offset = 0;
 
