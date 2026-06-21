@@ -1451,11 +1451,25 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 			AlignUp(sizeof(config.cb_ps), DK_UNIFORM_BUF_ALIGNMENT));
 	};
 
-	const DkGpuAddr vs_addr = StreamUniform(&config.cb_vs, sizeof(config.cb_vs));
-	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 1, vs_addr,
-		AlignUp(sizeof(config.cb_vs), DK_UNIFORM_BUF_ALIGNMENT));
-	bind_ps_cb();
-	bind_selector(make_selector(config.ps));
+	// Skip drawing the bindings if all three are the same as before
+	const bool has_tex = (tex != nullptr);
+	const bool uniforms_changed = !m_hw_uniforms_valid || m_hw_last_vs != config.cb_vs ||
+								  m_hw_last_ps != config.cb_ps || m_hw_last_pssel != config.ps ||
+								  m_hw_last_has_tex != has_tex;
+	if (uniforms_changed)
+	{
+		const DkGpuAddr vs_addr = StreamUniform(&config.cb_vs, sizeof(config.cb_vs));
+		dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 1, vs_addr,
+			AlignUp(sizeof(config.cb_vs), DK_UNIFORM_BUF_ALIGNMENT));
+		bind_ps_cb();
+		bind_selector(make_selector(config.ps));
+
+		m_hw_last_vs = config.cb_vs;
+		m_hw_last_ps = config.cb_ps;
+		m_hw_last_pssel = config.ps;
+		m_hw_last_has_tex = has_tex;
+		m_hw_uniforms_valid = true;
+	}
 
 	const u32 vtx_size = config.nverts * sizeof(GSVertex);
 	const u32 idx_size = config.nindices * sizeof(u16);
@@ -1502,6 +1516,9 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		SendHWDraw(config, primitive, config.alpha_second_pass.require_one_barrier,
 			config.alpha_second_pass.require_full_barrier);
 	}
+
+	if (config.blend_multi_pass.enable || config.alpha_second_pass.enable)
+		m_hw_uniforms_valid = false;
 #endif
 }
 

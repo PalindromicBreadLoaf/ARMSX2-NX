@@ -118,7 +118,11 @@ private:
 	// Present ImGui over game frame
 	void RenderImGui();
 	// Forget the cached tfx pipeline state so the next HW draw re-binds it
-	void InvalidateHWStateCache() { m_hw_invariants_bound = false; }
+	void InvalidateHWStateCache()
+	{
+		m_hw_invariants_bound = false;
+		m_hw_uniforms_valid = false;
+	}
 	// GPU-side timestamp report into the per-frame timing slot
 	void WriteGPUTimestamp(u32 frame_index, u32 which);
 	// Harvest the start/end timestamps of a finished frame into m_accumulated_gpu_time.
@@ -167,6 +171,13 @@ private:
 	u32 m_hw_blend_key = 0;
 	u32 m_hw_colormask = 0;
 	u32 m_hw_depth_key = 0;
+	
+	// Skip redoing cb_vs/cb_ps/selector when they match the prior draw
+	bool m_hw_uniforms_valid = false;
+	bool m_hw_last_has_tex = false;
+	GSHWDrawConfig::VSConstantBuffer m_hw_last_vs{};
+	GSHWDrawConfig::PSConstantBuffer m_hw_last_ps{};
+	GSHWDrawConfig::PSSelector m_hw_last_pssel{};
 
 	// Post-processing fragment shaders
 	DkShader m_interlace_fsh{};
