@@ -43,7 +43,7 @@ DkImageFormat GSTextureDK::LookupFormat(Format format, bool& is_depth)
 	}
 }
 
-std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, DkQueue upload_queue, Type type, Format format,
+std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, GSDeviceDK* device_dk, Type type, Format format,
 	int width, int height, int levels)
 {
 	bool is_depth = false;
@@ -91,7 +91,7 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, DkQueue upload
 	}
 
 	auto tex = std::unique_ptr<GSTextureDK>(
-		new GSTextureDK(device, upload_queue, memblock, type, format, width, height, levels, dk_format, is_depth));
+		new GSTextureDK(device, device_dk, memblock, type, format, width, height, levels, dk_format, is_depth));
 
 	dkImageInitialize(&tex->m_image, &layout, memblock, 0);
 
@@ -102,10 +102,10 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, DkQueue upload
 	return tex;
 }
 
-GSTextureDK::GSTextureDK(DkDevice device, DkQueue upload_queue, DkMemBlock memblock, Type type, Format format,
+GSTextureDK::GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memblock, Type type, Format format,
 	int width, int height, int levels, DkImageFormat dk_format, bool is_depth)
 	: m_device(device)
-	, m_upload_queue(upload_queue)
+	, m_device_dk(device_dk)
 	, m_memblock(memblock)
 	, m_dk_format(dk_format)
 	, m_is_depth(is_depth)
@@ -147,53 +147,18 @@ bool GSTextureDK::Update(const GSVector4i& r, const void* data, int pitch, int l
 	// Compressed formats are uploaded in 4x4 blocks
 	const u32 num_rows = IsCompressedFormat() ? ((static_cast<u32>(height) + 3) / 4) : static_cast<u32>(height);
 	const u32 upload_pitch = CalcUploadPitch(static_cast<u32>(width));
-	const u32 upload_size = num_rows * upload_pitch;
-
-	DkMemBlockMaker memblock_maker;
-	dkMemBlockMakerDefaults(&memblock_maker, m_device, AlignUp(upload_size, DK_MEMBLOCK_ALIGNMENT));
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	DkMemBlock staging = dkMemBlockCreate(&memblock_maker);
-	if (!staging)
-		return false;
-
-	u8* dst = static_cast<u8*>(dkMemBlockGetCpuAddr(staging));
-	const u8* src = static_cast<const u8*>(data);
-	const u32 copy_bytes = std::min<u32>(upload_pitch, static_cast<u32>(pitch));
-	for (u32 y = 0; y < num_rows; ++y)
-		std::memcpy(dst + y * upload_pitch, src + y * static_cast<u32>(pitch), copy_bytes);
-
-	dkMemBlockMakerDefaults(&memblock_maker, m_device, DK_MEMBLOCK_ALIGNMENT);
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	DkMemBlock cmd_memblock = dkMemBlockCreate(&memblock_maker);
-	if (!cmd_memblock)
-	{
-		dkMemBlockDestroy(staging);
-		return false;
-	}
-
-	DkCmdBufMaker cmdbuf_maker;
-	dkCmdBufMakerDefaults(&cmdbuf_maker, m_device);
-	DkCmdBuf cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
-	dkCmdBufAddMemory(cmdbuf, cmd_memblock, 0, DK_MEMBLOCK_ALIGNMENT);
 
 	DkImageView view;
 	dkImageViewDefaults(&view, &m_image);
 	view.mipLevelOffset = static_cast<uint8_t>(std::max(0, layer));
 	view.mipLevelCount = 1;
 
-	const DkCopyBuf copy_src = {dkMemBlockGetGpuAddr(staging), 0, 0};
 	const DkImageRect copy_rect = {static_cast<u32>(r.x), static_cast<u32>(r.y), 0, static_cast<u32>(width),
 		static_cast<u32>(height), 1};
-	dkCmdBufCopyBufferToImage(cmdbuf, &copy_src, &view, &copy_rect, 0);
 
-	g_perfmon.Put(GSPerfMon::TextureUploads, 1);
-
-	dkQueueSubmitCommands(m_upload_queue, dkCmdBufFinishList(cmdbuf));
-	dkQueueWaitIdle(m_upload_queue);
-
-	dkCmdBufDestroy(cmdbuf);
-	dkMemBlockDestroy(cmd_memblock);
-	dkMemBlockDestroy(staging);
+	// Stage into the device's per-frame ring and record the copy into the frame command buffer
+	if (!m_device_dk->UploadToImage(view, copy_rect, data, static_cast<u32>(pitch), upload_pitch, num_rows))
+		return false;
 
 	m_state = State::Dirty;
 	return true;
@@ -233,46 +198,8 @@ void GSTextureDK::GenerateMipmap()
 	if (m_is_depth || m_mipmap_levels <= 1)
 		return;
 
-	DkMemBlockMaker memblock_maker;
-	dkMemBlockMakerDefaults(&memblock_maker, m_device, DK_MEMBLOCK_ALIGNMENT);
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	DkMemBlock cmd_memblock = dkMemBlockCreate(&memblock_maker);
-	if (!cmd_memblock)
-		return;
-
-	DkCmdBufMaker cmdbuf_maker;
-	dkCmdBufMakerDefaults(&cmdbuf_maker, m_device);
-	DkCmdBuf cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
-	dkCmdBufAddMemory(cmdbuf, cmd_memblock, 0, DK_MEMBLOCK_ALIGNMENT);
-
-	// Downsample each level from the previous with a linear filter
-	for (int level = 1; level < m_mipmap_levels; level++)
-	{
-		DkImageView src_view;
-		dkImageViewDefaults(&src_view, &m_image);
-		src_view.mipLevelOffset = static_cast<uint8_t>(level - 1);
-		src_view.mipLevelCount = 1;
-
-		DkImageView dst_view;
-		dkImageViewDefaults(&dst_view, &m_image);
-		dst_view.mipLevelOffset = static_cast<uint8_t>(level);
-		dst_view.mipLevelCount = 1;
-
-		const DkImageRect src_rect = {0, 0, 0, static_cast<u32>(std::max(1, m_size.x >> (level - 1))),
-			static_cast<u32>(std::max(1, m_size.y >> (level - 1))), 1};
-		const DkImageRect dst_rect = {0, 0, 0, static_cast<u32>(std::max(1, m_size.x >> level)),
-			static_cast<u32>(std::max(1, m_size.y >> level)), 1};
-
-		dkCmdBufBlitImage(cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect, DkBlitFlag_FilterLinear, 0);
-		// Make this level visible to the next sample
-		dkCmdBufBarrier(cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
-	}
-
-	dkQueueSubmitCommands(m_upload_queue, dkCmdBufFinishList(cmdbuf));
-	dkQueueWaitIdle(m_upload_queue);
-
-	dkCmdBufDestroy(cmdbuf);
-	dkMemBlockDestroy(cmd_memblock);
+	// Record the mip-chain downsample into the device's frame command buffer
+	m_device_dk->GenerateImageMipmaps(&m_image, m_size.x, m_size.y, m_mipmap_levels);
 }
 
 #ifdef PCSX2_DEVBUILD

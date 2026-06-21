@@ -28,6 +28,10 @@ namespace
 	constexpr u32 VERTEX_BUFFER_SIZE = 4 * 1024 * 1024;
 	constexpr u32 INDEX_BUFFER_SIZE = 2 * 1024 * 1024;
 	constexpr u32 UNIFORM_BUFFER_SIZE = 2 * 1024 * 1024;
+	// Holds a whole frame's texture uploads
+	constexpr u32 STAGING_BUFFER_SIZE = 16 * 1024 * 1024;
+	// Source base alignment for buffer to image copies
+	constexpr u32 STAGING_ALIGNMENT = 256;
 
 	// Each frame owns a 16-byte start and end timestamp
 	constexpr u32 TIMESTAMP_REPORT_SIZE = 16;
@@ -202,6 +206,12 @@ bool GSDeviceDK::CreateDeviceObjects()
 		ctx.uniform_memblock = dkMemBlockCreate(&memblock_maker);
 		if (!ctx.uniform_memblock)
 			return false;
+
+		dkMemBlockMakerDefaults(&memblock_maker, m_device, STAGING_BUFFER_SIZE);
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		ctx.staging_memblock = dkMemBlockCreate(&memblock_maker);
+		if (!ctx.staging_memblock)
+			return false;
 	}
 
 	// BeginFrameIfNeeded rotates frame aliases every other frame
@@ -211,6 +221,7 @@ bool GSDeviceDK::CreateDeviceObjects()
 	m_vertex_memblock = m_frames[0].vertex_memblock;
 	m_index_memblock = m_frames[0].index_memblock;
 	m_uniform_memblock = m_frames[0].uniform_memblock;
+	m_staging_memblock = m_frames[0].staging_memblock;
 
 	// Graphics queue
 	DkQueueMaker queue_maker;
@@ -332,12 +343,14 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	m_vertex_memblock = ctx.vertex_memblock;
 	m_index_memblock = ctx.index_memblock;
 	m_uniform_memblock = ctx.uniform_memblock;
+	m_staging_memblock = ctx.staging_memblock;
 
 	dkCmdBufClear(m_cmdbuf);
 	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
 	m_vertex_offset = 0;
 	m_index_offset = 0;
 	m_uniform_offset = 0;
+	m_staging_offset = 0;
 	m_next_image_slot = 0;
 	// Refresh command buffer
 	InvalidateHWStateCache();
@@ -685,6 +698,11 @@ void GSDeviceDK::DestroyDeviceObjects()
 			dkMemBlockDestroy(ctx.uniform_memblock);
 			ctx.uniform_memblock = nullptr;
 		}
+		if (ctx.staging_memblock)
+		{
+			dkMemBlockDestroy(ctx.staging_memblock);
+			ctx.staging_memblock = nullptr;
+		}
 		ctx.fence_pending = false;
 	}
 	m_cmdbuf = nullptr;
@@ -692,6 +710,7 @@ void GSDeviceDK::DestroyDeviceObjects()
 	m_vertex_memblock = nullptr;
 	m_index_memblock = nullptr;
 	m_uniform_memblock = nullptr;
+	m_staging_memblock = nullptr;
 
 	if (m_descriptor_memblock)
 	{
@@ -1017,6 +1036,77 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 	// Finish this list so EndPresent won't resubmit it
 	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
 	dkQueueWaitIdle(m_queue);
+}
+
+bool GSDeviceDK::UploadToImage(const DkImageView& view, const DkImageRect& rect, const void* data, u32 src_pitch,
+	u32 upload_pitch, u32 num_rows)
+{
+	const u32 upload_size = num_rows * upload_pitch;
+	if (upload_size == 0)
+		return false;
+	if (upload_size > STAGING_BUFFER_SIZE)
+	{
+		Console.Error("DK3D: texture upload of %u bytes exceeds the %u-byte staging ring.", upload_size,
+			STAGING_BUFFER_SIZE);
+		return false;
+	}
+
+	BeginFrameIfNeeded();
+	InvalidateHWStateCache();
+
+	// Reserve a slot in the staging ring
+	m_staging_offset = AlignUp(m_staging_offset, STAGING_ALIGNMENT);
+	if (m_staging_offset + upload_size > STAGING_BUFFER_SIZE)
+		m_staging_offset = 0;
+	u8* const dst = static_cast<u8*>(dkMemBlockGetCpuAddr(m_staging_memblock)) + m_staging_offset;
+	const DkGpuAddr src_addr = dkMemBlockGetGpuAddr(m_staging_memblock) + m_staging_offset;
+	m_staging_offset += upload_size;
+
+	const u8* const src = static_cast<const u8*>(data);
+	const u32 copy_bytes = std::min<u32>(upload_pitch, src_pitch);
+	for (u32 y = 0; y < num_rows; ++y)
+		std::memcpy(dst + y * upload_pitch, src + y * src_pitch, copy_bytes);
+
+	const DkCopyBuf copy_src = {src_addr, 0, 0};
+	dkCmdBufCopyBufferToImage(m_cmdbuf, &copy_src, &view, &rect, 0);
+	// Make the upload visible to any later sample/copy/blit in this frame
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+
+	g_perfmon.Put(GSPerfMon::TextureUploads, 1);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
+	return true;
+}
+
+void GSDeviceDK::GenerateImageMipmaps(DkImage* image, int width, int height, int levels)
+{
+	if (levels <= 1)
+		return;
+
+	BeginFrameIfNeeded();
+	InvalidateHWStateCache();
+
+	for (int level = 1; level < levels; level++)
+	{
+		DkImageView src_view;
+		dkImageViewDefaults(&src_view, image);
+		src_view.mipLevelOffset = static_cast<uint8_t>(level - 1);
+		src_view.mipLevelCount = 1;
+
+		DkImageView dst_view;
+		dkImageViewDefaults(&dst_view, image);
+		dst_view.mipLevelOffset = static_cast<uint8_t>(level);
+		dst_view.mipLevelCount = 1;
+
+		const DkImageRect src_rect = {0, 0, 0, static_cast<u32>(std::max(1, width >> (level - 1))),
+			static_cast<u32>(std::max(1, height >> (level - 1))), 1};
+		const DkImageRect dst_rect = {0, 0, 0, static_cast<u32>(std::max(1, width >> level)),
+			static_cast<u32>(std::max(1, height >> level)), 1};
+
+		dkCmdBufBlitImage(m_cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect, DkBlitFlag_FilterLinear, 0);
+
+		dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+	}
 }
 #endif
 
@@ -1472,7 +1562,7 @@ GSTexture* GSDeviceDK::CreateSurface(GSTexture::Type type, int width, int height
 #ifdef __SWITCH__
 	if (m_device)
 	{
-		std::unique_ptr<GSTextureDK> tex = GSTextureDK::Create(m_device, m_queue, type, format, width, height, levels);
+		std::unique_ptr<GSTextureDK> tex = GSTextureDK::Create(m_device, this, type, format, width, height, levels);
 		if (tex)
 			return tex.release();
 		Console.Error("DK3D: CreateSurface(%dx%d) failed. Falling back to null.", width, height);

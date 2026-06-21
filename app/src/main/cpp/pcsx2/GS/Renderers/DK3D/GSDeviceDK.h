@@ -47,6 +47,11 @@ public:
 
 #ifdef __SWITCH__
 	void ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMemBlock dst_block, u32 dst_offset);
+	// Record a buffer to image copy into the current frame command buffer
+	bool UploadToImage(const DkImageView& view, const DkImageRect& rect, const void* data, u32 src_pitch,
+		u32 upload_pitch, u32 num_rows);
+	// Record a mip-chain downsample into the current frame command buffer
+	void GenerateImageMipmaps(DkImage* image, int width, int height, int levels);
 #endif
 
 	void CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY) override;
@@ -133,6 +138,7 @@ private:
 		DkMemBlock vertex_memblock = nullptr;
 		DkMemBlock index_memblock = nullptr;
 		DkMemBlock uniform_memblock = nullptr;
+		DkMemBlock staging_memblock = nullptr;
 		DkFence fence{};
 		bool fence_pending = false;
 		bool timestamp_written = false;
@@ -185,11 +191,14 @@ private:
 	u32 m_index_offset = 0;
 	DkMemBlock m_uniform_memblock = nullptr;
 	u32 m_uniform_offset = 0;
+	// Texture upload staging ring
+	DkMemBlock m_staging_memblock = nullptr;
+	u32 m_staging_offset = 0;
 
 	DkImageView m_swapchain_view{};
 	bool m_frame_active = false;
 
-	// GPU-busy %.
+	// GPU-busy %
 	DkMemBlock m_timestamp_memblock = nullptr;
 	bool m_gpu_timing_enabled = false;
 	float m_accumulated_gpu_time = 0.0f;

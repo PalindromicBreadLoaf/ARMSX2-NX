@@ -10,13 +10,15 @@
 #include <deko3d.h>
 #include <memory>
 
+class GSDeviceDK;
+
 // Deko3D backend for GSTexture
 class GSTextureDK final : public GSTexture
 {
 public:
 	~GSTextureDK() override;
 
-	static std::unique_ptr<GSTextureDK> Create(DkDevice device, DkQueue upload_queue, Type type, Format format,
+	static std::unique_ptr<GSTextureDK> Create(DkDevice device, GSDeviceDK* device_dk, Type type, Format format,
 		int width, int height, int levels);
 
 	void* GetNativeHandle() const override;
@@ -38,11 +40,11 @@ public:
 	static DkImageFormat LookupFormat(Format format, bool& is_depth);
 
 private:
-	GSTextureDK(DkDevice device, DkQueue upload_queue, DkMemBlock memblock, Type type, Format format, int width,
+	GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memblock, Type type, Format format, int width,
 		int height, int levels, DkImageFormat dk_format, bool is_depth);
 
 	DkDevice m_device = nullptr;
-	DkQueue m_upload_queue = nullptr;
+	GSDeviceDK* m_device_dk = nullptr;
 	DkMemBlock m_memblock = nullptr;
 	DkImage m_image{};
 	DkImageDescriptor m_descriptor{};
