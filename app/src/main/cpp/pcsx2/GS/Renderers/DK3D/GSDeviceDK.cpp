@@ -223,10 +223,10 @@ bool GSDeviceDK::CreateDeviceObjects()
 	m_uniform_memblock = m_frames[0].uniform_memblock;
 	m_staging_memblock = m_frames[0].staging_memblock;
 
-	// Graphics queue
+	// Graphics and computre queue
 	DkQueueMaker queue_maker;
 	dkQueueMakerDefaults(&queue_maker, m_device);
-	queue_maker.flags = DkQueueFlags_Graphics;
+	queue_maker.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute;
 	m_queue = dkQueueCreate(&queue_maker);
 	if (!m_queue)
 		return false;
@@ -259,6 +259,8 @@ bool GSDeviceDK::CreateDeviceObjects()
 		Console.Warning("DK3D: No shaders available. Things will be broken.");
 	else
 		SetupSamplers();
+
+	m_features.cas_sharpening = m_cas_shader_ok;
 
 	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers, convert=%d, tfx=%d).", m_present_width,
 		m_present_height, NUM_FRAMEBUFFERS, m_convert_shaders_ok ? 1 : 0, m_tfx_shaders_ok ? 1 : 0);
@@ -660,6 +662,13 @@ bool GSDeviceDK::LoadShaders()
 		Console.WriteLn("DK3D: imgui shaders loaded.");
 	else
 		Console.Warning("DK3D: imgui shaders missing. No UI will be present.");
+
+	m_cas_shader_ok = load_one(m_cas_csh, "romfs:/shaders/cas_csh.dksh");
+
+	if (m_cas_shader_ok)
+		Console.WriteLn("DK3D: CAS shader loaded.");
+	else
+		Console.Warning("DK3D: CAS shader missing. Contrast adaptive sharpening is unavailable.");
 
 	return m_convert_shaders_ok;
 }
@@ -1691,5 +1700,64 @@ void GSDeviceDK::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float para
 bool GSDeviceDK::DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only,
 	const std::array<u32, NUM_CAS_CONSTANTS>& constants)
 {
-	return false;
+	if (!m_cas_shader_ok || !sTex || !dTex)
+		return false;
+
+	GSTextureDK* const sTexDK = static_cast<GSTextureDK*>(sTex);
+	GSTextureDK* const dTexDK = static_cast<GSTextureDK*>(dTex);
+
+	BeginFrameIfNeeded();
+	InvalidateHWStateCache();
+
+	// Make the source's prior writes visible
+	CommitClear(sTexDK);
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
+
+	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
+
+	// Source bound as a sampled texture
+	const u32 src_slot = m_next_image_slot;
+	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
+	const DkImageDescriptor src_descriptor = sTexDK->GetDescriptor();
+	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + src_slot * sizeof(DkImageDescriptor), &src_descriptor,
+		sizeof(src_descriptor));
+	const DkResHandle src_handle = dkMakeTextureHandle(src_slot, SAMPLER_POINT);
+	dkCmdBufBindTextures(m_cmdbuf, DkStage_Compute, 0, &src_handle, 1);
+
+	// Destination bound as a load/store image
+	const u32 dst_slot = m_next_image_slot;
+	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
+	DkImageView dst_view;
+	dTexDK->GetImageView(&dst_view);
+	DkImageDescriptor dst_descriptor;
+	dkImageDescriptorInitialize(&dst_descriptor, &dst_view, true, false);
+	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + dst_slot * sizeof(DkImageDescriptor), &dst_descriptor,
+		sizeof(dst_descriptor));
+	const DkResHandle dst_handle = dkMakeImageHandle(dst_slot);
+	dkCmdBufBindImages(m_cmdbuf, DkStage_Compute, 0, &dst_handle, 1);
+
+	// CAS constants
+	std::array<u32, NUM_CAS_CONSTANTS> ub = constants;
+	ub[10] = sharpen_only ? 1u : 0u;
+	ub[11] = 0;
+	const DkGpuAddr cb_addr = StreamUniform(ub.data(), sizeof(ub));
+	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Compute, 0, cb_addr, AlignUp(sizeof(ub), DK_UNIFORM_BUF_ALIGNMENT));
+
+	const DkShader* cas_shader = &m_cas_csh;
+	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_Compute, &cas_shader, 1);
+
+	static constexpr u32 threadGroupWorkRegionDim = 16;
+	const u32 dispatchX = (static_cast<u32>(dTexDK->GetWidth()) + (threadGroupWorkRegionDim - 1)) / threadGroupWorkRegionDim;
+	const u32 dispatchY = (static_cast<u32>(dTexDK->GetHeight()) + (threadGroupWorkRegionDim - 1)) / threadGroupWorkRegionDim;
+	dkCmdBufDispatchCompute(m_cmdbuf, dispatchX, dispatchY, 1);
+	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+
+	// Write to the present sample
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Primitives, DkInvalidateFlags_Image);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
+
+	dTexDK->SetState(GSTexture::State::Dirty);
+	return true;
 }

@@ -191,6 +191,10 @@ private:
 	DkShader m_imgui_fsh{};
 	bool m_imgui_shaders_ok = false;
 
+	// CAS compute shader
+	DkShader m_cas_csh{};
+	bool m_cas_shader_ok = false;
+
 	DkMemBlock m_descriptor_memblock = nullptr;
 	DkGpuAddr m_image_descriptor_set = 0;
 	DkGpuAddr m_sampler_descriptor_set = 0;
