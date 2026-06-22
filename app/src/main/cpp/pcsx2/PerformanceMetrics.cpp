@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#include <atomic>
 #include <chrono>
 #include <vector>
 
@@ -57,6 +58,19 @@ static float s_capture_thread_time = 0.0f;
 static PerformanceMetrics::FrameTimeHistory s_frame_time_history;
 static u32 s_frame_time_history_pos = 0;
 
+// EE-thread stall accounting
+static thread_local bool t_is_ee_thread = false;
+static std::atomic<u64> s_ee_stall_vu_ns_accumulator{0};
+static std::atomic<u64> s_ee_stall_gs_ns_accumulator{0};
+static std::atomic<u64> s_ee_stall_vsync_ns_accumulator{0};
+static std::atomic<u64> s_gs_acquire_wait_ns_accumulator{0};
+static std::atomic<u64> s_gs_gpu_wait_ns_accumulator{0};
+static float s_ee_stall_vu_time = 0.0f;
+static float s_ee_stall_gs_time = 0.0f;
+static float s_ee_stall_vsync_time = 0.0f;
+static float s_gs_acquire_wait_time = 0.0f;
+static float s_gs_gpu_wait_time = 0.0f;
+
 struct GSSWThreadStats
 {
 	Threading::ThreadHandle handle;
@@ -112,6 +126,17 @@ void PerformanceMetrics::Reset()
 
 	s_accumulated_gpu_time = 0.0f;
 	s_presents_since_last_update = 0;
+
+	s_ee_stall_vu_ns_accumulator.store(0, std::memory_order_relaxed);
+	s_ee_stall_gs_ns_accumulator.store(0, std::memory_order_relaxed);
+	s_ee_stall_vsync_ns_accumulator.store(0, std::memory_order_relaxed);
+	s_gs_acquire_wait_ns_accumulator.store(0, std::memory_order_relaxed);
+	s_gs_gpu_wait_ns_accumulator.store(0, std::memory_order_relaxed);
+	s_ee_stall_vu_time = 0.0f;
+	s_ee_stall_gs_time = 0.0f;
+	s_ee_stall_vsync_time = 0.0f;
+	s_gs_acquire_wait_time = 0.0f;
+	s_gs_gpu_wait_time = 0.0f;
 
 	s_last_update_time.Reset();
 	s_last_frame_time.Reset();
@@ -221,6 +246,13 @@ void PerformanceMetrics::Update(bool gs_register_write, bool fb_blit, bool is_sk
 		thread.time = static_cast<double>(delta) * time_divider;
 	}
 
+	const float stall_frames = static_cast<float>(std::max<u32>(s_frames_since_last_update, 1));
+	s_ee_stall_vu_time = static_cast<float>(s_ee_stall_vu_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
+	s_ee_stall_gs_time = static_cast<float>(s_ee_stall_gs_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
+	s_ee_stall_vsync_time = static_cast<float>(s_ee_stall_vsync_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
+	s_gs_acquire_wait_time = static_cast<float>(s_gs_acquire_wait_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
+	s_gs_gpu_wait_time = static_cast<float>(s_gs_gpu_wait_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
+
 	s_frames_since_last_update = 0;
 	s_unskipped_frames_since_last_update = 0;
 	s_presents_since_last_update = 0;
@@ -236,8 +268,70 @@ void PerformanceMetrics::OnGPUPresent(float gpu_time)
 
 void PerformanceMetrics::SetCPUThread(Threading::ThreadHandle thread)
 {
+	// SetCPUThread is invoked from the EE thread
+	if (thread)
+		MarkEEThread();
+
 	s_last_cpu_time = thread ? thread.GetCPUTime() : 0;
 	s_cpu_thread_handle = std::move(thread);
+}
+
+void PerformanceMetrics::MarkEEThread()
+{
+	t_is_ee_thread = true;
+}
+
+void PerformanceMetrics::AccumulateEEStallVU(u64 ns)
+{
+	if (t_is_ee_thread)
+		s_ee_stall_vu_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
+void PerformanceMetrics::AccumulateEEStallGS(u64 ns)
+{
+	if (t_is_ee_thread)
+		s_ee_stall_gs_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
+void PerformanceMetrics::AccumulateEEStallVsync(u64 ns)
+{
+	if (t_is_ee_thread)
+		s_ee_stall_vsync_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
+void PerformanceMetrics::AccumulateGSAcquireWait(u64 ns)
+{
+	s_gs_acquire_wait_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
+void PerformanceMetrics::AccumulateGSGpuWait(u64 ns)
+{
+	s_gs_gpu_wait_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
+float PerformanceMetrics::GetEEStallVUTime()
+{
+	return s_ee_stall_vu_time;
+}
+
+float PerformanceMetrics::GetEEStallGSTime()
+{
+	return s_ee_stall_gs_time;
+}
+
+float PerformanceMetrics::GetEEStallVsyncTime()
+{
+	return s_ee_stall_vsync_time;
+}
+
+float PerformanceMetrics::GetGSAcquireWaitTime()
+{
+	return s_gs_acquire_wait_time;
+}
+
+float PerformanceMetrics::GetGSGpuWaitTime()
+{
+	return s_gs_gpu_wait_time;
 }
 
 void PerformanceMetrics::SetGSSWThreadCount(u32 count)

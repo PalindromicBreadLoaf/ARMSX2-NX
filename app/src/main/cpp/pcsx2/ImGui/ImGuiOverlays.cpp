@@ -291,6 +291,25 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
 		}
 
+		if (GSConfig.OsdShowStallMeters)
+		{
+			text.clear();
+			text.append_format("EE wait VU: {:.1f} ms", PerformanceMetrics::GetEEStallVUTime());
+			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
+			text.clear();
+			text.append_format("EE wait GS: {:.1f} ms", PerformanceMetrics::GetEEStallGSTime());
+			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
+			text.clear();
+			text.append_format("EE wait vsync: {:.1f} ms", PerformanceMetrics::GetEEStallVsyncTime());
+			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
+			text.clear();
+			text.append_format("GS acq wait: {:.1f} ms", PerformanceMetrics::GetGSAcquireWaitTime());
+			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
+			text.clear();
+			text.append_format("GS gpu wait: {:.1f} ms", PerformanceMetrics::GetGSGpuWaitTime());
+			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
+		}
+
 		if (GSConfig.OsdShowIndicators)
 		{
 			const float target_speed = VMManager::GetTargetSpeed();

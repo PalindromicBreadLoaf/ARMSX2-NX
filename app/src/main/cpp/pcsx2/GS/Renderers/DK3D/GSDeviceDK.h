@@ -93,8 +93,8 @@ protected:
 
 #ifdef __SWITCH__
 private:
-	static constexpr unsigned NUM_FRAMEBUFFERS = 2;
-	static constexpr unsigned NUM_FRAMES_IN_FLIGHT = 2;
+	static constexpr unsigned NUM_FRAMEBUFFERS = 3;
+	static constexpr unsigned NUM_FRAMES_IN_FLIGHT = 3;
 	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 1024;
 	static constexpr unsigned SAMPLER_POINT = 0;
 	static constexpr unsigned SAMPLER_LINEAR = 4;

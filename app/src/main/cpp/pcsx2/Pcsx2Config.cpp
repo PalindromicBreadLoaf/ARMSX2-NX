@@ -741,6 +741,7 @@ Pcsx2Config::GSOptions::GSOptions()
 	OsdShowVPS = true;
 	OsdShowCPU = true;
 	OsdShowGPU = false;
+	OsdShowStallMeters = false;
 	OsdShowResolution = true;
 	OsdShowGSStats = false;
 	OsdShowIndicators = true;
@@ -809,6 +810,7 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 {
 	return (
 		OpEqu(bitset) &&
+		OpEqu(OsdShowStallMeters) &&
 
 		OpEqu(InterlaceMode) &&
 		OpEqu(LinearPresent) &&
@@ -959,6 +961,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(OsdShowVPS);
 	SettingsWrapBitBool(OsdShowCPU);
 	SettingsWrapBitBool(OsdShowGPU);
+	SettingsWrapBitBool(OsdShowStallMeters);
 	SettingsWrapBitBool(OsdShowResolution);
 	SettingsWrapBitBool(OsdShowGSStats);
 	SettingsWrapBitBool(OsdShowIndicators);

@@ -9,12 +9,14 @@
 
 #include "GS/Renderers/Common/GSVertex.h"
 #include "GS/GSPerfMon.h"
+#include "PerformanceMetrics.h"
 
 #include "imgui.h"
 
 #ifdef __SWITCH__
 #include "common/Console.h"
 #include "common/Horizon/Horizon.h" // nwindowGetDefault()
+#include "common/Timer.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -280,7 +282,7 @@ bool GSDeviceDK::CreateDeviceObjects()
 			return false;
 	}
 
-	// BeginFrameIfNeeded rotates frame aliases every other frame
+	// BeginFrameIfNeeded rotates frame aliases through NUM_FRAMES_IN_FLIGHT contexts
 	m_frame_index = 0;
 	m_cmdbuf = m_frames[0].cmdbuf;
 	m_cmdbuf_memblock = m_frames[0].cmdbuf_memblock;
@@ -400,7 +402,10 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	FrameContext& ctx = m_frames[m_frame_index];
 	if (ctx.fence_pending)
 	{
+		const Common::Timer::Value wait_start = Common::Timer::GetCurrentValue();
 		dkFenceWait(&ctx.fence, -1);
+		PerformanceMetrics::AccumulateGSGpuWait(
+			static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - wait_start)));
 		ctx.fence_pending = false;
 		// Frame is now complete
 		if (ctx.timestamp_written)
@@ -931,7 +936,10 @@ GSDevice::PresentResult GSDeviceDK::BeginPresent(bool frame_skip)
 	// DoMerge may already have opened the frame? Otherwise we start here.
 	BeginFrameIfNeeded();
 
+	const Common::Timer::Value acquire_start = Common::Timer::GetCurrentValue();
 	m_present_slot = dkQueueAcquireImage(m_queue, m_swapchain);
+	PerformanceMetrics::AccumulateGSAcquireWait(
+		static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - acquire_start)));
 	dkImageViewDefaults(&m_swapchain_view, &m_framebuffers[m_present_slot]);
 
 	// Clear letterbox/unwritten areas before PresentRect draws.

@@ -4,8 +4,11 @@
 #include "Common.h"
 #include "Gif_Unit.h"
 #include "MTVU.h"
+#include "PerformanceMetrics.h"
 #include "VMManager.h"
 #include "Vif_Dynarec.h"
+
+#include "common/Timer.h"
 
 #include <thread>
 
@@ -229,7 +232,10 @@ __ri void VU_Thread::WaitOnSize(s32 size)
 			// will be more aggressive, and only flush the minimal size.
 			// Performance will be smoother but it will consume extra CPU cycle
 			// on the EE thread (not an issue on 4 cores).
+			const Common::Timer::Value stall_start = Common::Timer::GetCurrentValue();
 			std::this_thread::yield();
+			PerformanceMetrics::AccumulateEEStallVU(
+				static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - stall_start)));
 		}
 	}
 }
@@ -435,7 +441,10 @@ bool VU_Thread::IsDone()
 void VU_Thread::WaitVU()
 {
 	MTVU_LOG("MTVU - WaitVU!");
+	const Common::Timer::Value stall_start = Common::Timer::GetCurrentValue();
 	semaEvent.WaitForEmpty();
+	PerformanceMetrics::AccumulateEEStallVU(
+		static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - stall_start)));
 }
 
 void VU_Thread::ExecuteVU(u32 vu_addr, u32 vif_top, u32 vif_itop, u32 fbrst)

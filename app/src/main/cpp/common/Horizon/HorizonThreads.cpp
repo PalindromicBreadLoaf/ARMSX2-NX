@@ -8,13 +8,23 @@
 
 #include "common/Threading.h"
 #include "common/Assertions.h"
+#include "common/Horizon/Horizon.h"
 
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>
 #include <unistd.h>
+
+namespace
+{
+	// Pin threads to cores
+	std::mutex s_thread_handle_map_mutex;
+	std::unordered_map<void*, Handle> s_thread_handle_map;
+} // namespace
 
 __forceinline void Threading::Timeslice()
 {
@@ -101,8 +111,36 @@ u64 Threading::ThreadHandle::GetCPUTime() const
 
 bool Threading::ThreadHandle::SetAffinity(u64 processor_mask) const
 {
-	// TODO: pin to the 3 app cores via svcSetThreadCoreMask
-	return false;
+	if (!m_native_handle)
+		return false;
+
+	// Check for allowed cores (should be 3 unless under applet mode)
+	u64 allowed_cores = 0;
+	if (R_FAILED(svcGetInfo(&allowed_cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || allowed_cores == 0)
+		return false;
+
+	// Zero mask for unpin
+	const u64 mask = (processor_mask != 0) ? (processor_mask & allowed_cores) : allowed_cores;
+	if (mask == 0)
+		return false;
+
+	const s32 preferred_core = __builtin_ctzll(mask);
+
+	Handle handle;
+	if ((void*)pthread_self() == m_native_handle)
+	{
+		handle = CUR_THREAD_HANDLE;
+	}
+	else
+	{
+		std::lock_guard<std::mutex> lock(s_thread_handle_map_mutex);
+		const auto it = s_thread_handle_map.find(m_native_handle);
+		if (it == s_thread_handle_map.end())
+			return false;
+		handle = it->second;
+	}
+
+	return R_SUCCEEDED(svcSetThreadCoreMask(handle, preferred_core, static_cast<u32>(mask)));
 }
 
 Threading::Thread::Thread() = default;
@@ -135,13 +173,25 @@ void Threading::Thread::SetStackSize(u32 size)
 void* Threading::Thread::ThreadProc(void* param)
 {
 	std::unique_ptr<EntryPoint> entry(static_cast<EntryPoint*>(param));
+
+	void* const key = (void*)pthread_self();
+	{
+		std::lock_guard<std::mutex> lock(s_thread_handle_map_mutex);
+		s_thread_handle_map[key] = threadGetCurHandle();
+	}
+
 	(*entry.get())();
+
+	{
+		std::lock_guard<std::mutex> lock(s_thread_handle_map_mutex);
+		s_thread_handle_map.erase(key);
+	}
 	return nullptr;
 }
 
 bool Threading::Thread::Start(EntryPoint func)
 {
-	pxAssertRel(!m_native_handle, "Can't start an already-started thread");
+	pxAssertRel(!m_native_handle, "Can't start an already started thread");
 
 	std::unique_ptr<EntryPoint> func_clone(std::make_unique<EntryPoint>(std::move(func)));
 

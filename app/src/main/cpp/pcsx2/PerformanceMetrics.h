@@ -58,6 +58,26 @@ namespace PerformanceMetrics
 	float GetGPUUsage();
 	float GetGPUAverageTime();
 
+	/// Marks the calling thread as the EE thread
+	void MarkEEThread();
+
+	/// Accumulates time the EE thread spent waiting on VU/GS threads.
+	void AccumulateEEStallVU(u64 ns);
+	void AccumulateEEStallGS(u64 ns);
+	void AccumulateEEStallVsync(u64 ns);
+
+	/// Same as above but for GS
+	void AccumulateGSAcquireWait(u64 ns);
+	void AccumulateGSGpuWait(u64 ns);
+
+	/// Average milliseconds per frame the EE thread spent blocked on VU / GS threads.
+	float GetEEStallVUTime();
+	float GetEEStallGSTime();
+	float GetEEStallVsyncTime();
+
+	/// Average milliseconds per frame the GS thread spent blocked on image acquisition / GPU fence.
+	float GetGSAcquireWaitTime();
+	float GetGSGpuWaitTime();
 
 	const FrameTimeHistory& GetFrameTimeHistory();
 	u32 GetFrameTimeHistoryPos();
