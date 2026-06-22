@@ -12,6 +12,7 @@
 
 #include <deko3d.h>
 #include <memory>
+#include <vector>
 #endif
 
 // deko3d hardware GS backend for the Nintendo Switch only.
@@ -55,6 +56,10 @@ public:
 		u32 upload_pitch, u32 num_rows);
 	// Record a mip-chain downsample into the current frame command buffer
 	void GenerateImageMipmaps(DkImage* image, int width, int height, int levels);
+
+	// Pool equivalent DkMemBlocks instead of redoing them every texture
+	DkMemBlock AcquireMemBlock(u32 size, u32 flags);
+	void ReleaseMemBlock(DkMemBlock block, u32 size, u32 flags);
 #endif
 
 	void CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY) override;
@@ -94,6 +99,8 @@ private:
 	static constexpr unsigned SAMPLER_POINT = 0;
 	static constexpr unsigned SAMPLER_LINEAR = 4;
 	static constexpr unsigned NUM_SAMPLERS = 8;
+	// Cap on retained free memblocks; small next to the 768 MiB texture-cache budget.
+	static constexpr u64 MEMBLOCK_POOL_MAX_BYTES = 64 * 1024 * 1024;
 
 	bool CreateDeviceObjects();
 	void DestroyDeviceObjects();
@@ -228,6 +235,17 @@ private:
 	// Texture upload staging ring
 	DkMemBlock m_staging_memblock = nullptr;
 	u32 m_staging_offset = 0;
+
+	// Free-list of destroyed texture/readback memblocks
+	struct PooledMemBlock
+	{
+		DkMemBlock block;
+		u32 size;
+		u32 flags;
+	};
+	std::vector<PooledMemBlock> m_memblock_pool;
+	u64 m_memblock_pool_bytes = 0;
+	void DrainMemBlockPool();
 
 	DkImageView m_swapchain_view{};
 	bool m_frame_active = false;

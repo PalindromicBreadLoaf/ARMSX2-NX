@@ -40,12 +40,14 @@ public:
 	static DkImageFormat LookupFormat(Format format, bool& is_depth);
 
 private:
-	GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memblock, Type type, Format format, int width,
-		int height, int levels, DkImageFormat dk_format, bool is_depth);
+	GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memblock, u32 block_size, u32 block_flags,
+		Type type, Format format, int width, int height, int levels, DkImageFormat dk_format, bool is_depth);
 
 	DkDevice m_device = nullptr;
 	GSDeviceDK* m_device_dk = nullptr;
 	DkMemBlock m_memblock = nullptr;
+	u32 m_block_size = 0;
+	u32 m_block_flags = 0;
 	DkImage m_image{};
 	DkImageDescriptor m_descriptor{};
 	DkImageFormat m_dk_format = DkImageFormat_None;
@@ -63,7 +65,7 @@ class GSDownloadTextureDK final : public GSDownloadTexture
 public:
 	~GSDownloadTextureDK() override;
 
-	static std::unique_ptr<GSDownloadTextureDK> Create(GSDeviceDK* device, DkDevice dk_device, u32 width, u32 height,
+	static std::unique_ptr<GSDownloadTextureDK> Create(GSDeviceDK* device, u32 width, u32 height,
 		GSTexture::Format format);
 
 	void CopyFromTexture(const GSVector4i& drc, GSTexture* stex, const GSVector4i& src, u32 src_level,
@@ -77,11 +79,12 @@ public:
 #endif
 
 private:
-	GSDownloadTextureDK(GSDeviceDK* device, DkMemBlock memblock, u32 buffer_size, u32 width, u32 height,
-		GSTexture::Format format);
+	GSDownloadTextureDK(GSDeviceDK* device, DkMemBlock memblock, u32 block_size, u32 buffer_size, u32 width,
+		u32 height, GSTexture::Format format);
 
 	GSDeviceDK* m_device = nullptr;
 	DkMemBlock m_memblock = nullptr;
+	u32 m_block_size = 0;
 	u32 m_buffer_size = 0;
 };
 #endif

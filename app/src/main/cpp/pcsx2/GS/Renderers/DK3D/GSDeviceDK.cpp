@@ -842,11 +842,56 @@ void GSDeviceDK::DestroyDeviceObjects()
 		dkMemBlockDestroy(m_fb_memblock);
 		m_fb_memblock = nullptr;
 	}
+	DrainMemBlockPool();
 	if (m_device)
 	{
 		dkDeviceDestroy(m_device);
 		m_device = nullptr;
 	}
+}
+
+DkMemBlock GSDeviceDK::AcquireMemBlock(u32 size, u32 flags)
+{
+	for (size_t i = 0; i < m_memblock_pool.size(); i++)
+	{
+		PooledMemBlock& pooled = m_memblock_pool[i];
+		if (pooled.size == size && pooled.flags == flags)
+		{
+			DkMemBlock block = pooled.block;
+			m_memblock_pool_bytes -= pooled.size;
+			pooled = m_memblock_pool.back();
+			m_memblock_pool.pop_back();
+			return block;
+		}
+	}
+
+	DkMemBlockMaker memblock_maker;
+	dkMemBlockMakerDefaults(&memblock_maker, m_device, size);
+	memblock_maker.flags = flags;
+	return dkMemBlockCreate(&memblock_maker);
+}
+
+void GSDeviceDK::ReleaseMemBlock(DkMemBlock block, u32 size, u32 flags)
+{
+	if (!block)
+		return;
+
+	if (m_memblock_pool_bytes + size > MEMBLOCK_POOL_MAX_BYTES)
+	{
+		dkMemBlockDestroy(block);
+		return;
+	}
+
+	m_memblock_pool.push_back({block, size, flags});
+	m_memblock_pool_bytes += size;
+}
+
+void GSDeviceDK::DrainMemBlockPool()
+{
+	for (const PooledMemBlock& pooled : m_memblock_pool)
+		dkMemBlockDestroy(pooled.block);
+	m_memblock_pool.clear();
+	m_memblock_pool_bytes = 0;
 }
 #endif
 
@@ -1100,7 +1145,7 @@ void GSDeviceDK::InsertDebugMessage(DebugMessageCategory category, const char* f
 std::unique_ptr<GSDownloadTexture> GSDeviceDK::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
 {
 #ifdef __SWITCH__
-	return GSDownloadTextureDK::Create(this, m_device, width, height, format);
+	return GSDownloadTextureDK::Create(this, width, height, format);
 #else
 	return nullptr;
 #endif

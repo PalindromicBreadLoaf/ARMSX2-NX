@@ -79,19 +79,17 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, GSDeviceDK* de
 	const u32 image_size = static_cast<u32>(dkImageLayoutGetSize(&layout));
 	const u32 image_align = dkImageLayoutGetAlignment(&layout);
 	const u32 block_size = AlignUp(AlignUp(image_size, image_align), DK_MEMBLOCK_ALIGNMENT);
+	constexpr u32 block_flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
 
-	DkMemBlockMaker memblock_maker;
-	dkMemBlockMakerDefaults(&memblock_maker, device, block_size);
-	memblock_maker.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
-	DkMemBlock memblock = dkMemBlockCreate(&memblock_maker);
+	DkMemBlock memblock = device_dk->AcquireMemBlock(block_size, block_flags);
 	if (!memblock)
 	{
 		Console.Error("DK3D: failed to allocate %u bytes for a %dx%d texture.", block_size, width, height);
 		return nullptr;
 	}
 
-	auto tex = std::unique_ptr<GSTextureDK>(
-		new GSTextureDK(device, device_dk, memblock, type, format, width, height, levels, dk_format, is_depth));
+	auto tex = std::unique_ptr<GSTextureDK>(new GSTextureDK(
+		device, device_dk, memblock, block_size, block_flags, type, format, width, height, levels, dk_format, is_depth));
 
 	dkImageInitialize(&tex->m_image, &layout, memblock, 0);
 
@@ -102,11 +100,13 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, GSDeviceDK* de
 	return tex;
 }
 
-GSTextureDK::GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memblock, Type type, Format format,
-	int width, int height, int levels, DkImageFormat dk_format, bool is_depth)
+GSTextureDK::GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memblock, u32 block_size, u32 block_flags,
+	Type type, Format format, int width, int height, int levels, DkImageFormat dk_format, bool is_depth)
 	: m_device(device)
 	, m_device_dk(device_dk)
 	, m_memblock(memblock)
+	, m_block_size(block_size)
+	, m_block_flags(block_flags)
 	, m_dk_format(dk_format)
 	, m_is_depth(is_depth)
 {
@@ -119,7 +119,11 @@ GSTextureDK::GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memb
 
 GSTextureDK::~GSTextureDK()
 {
-	if (m_memblock)
+	if (!m_memblock)
+		return;
+	if (m_device_dk)
+		m_device_dk->ReleaseMemBlock(m_memblock, m_block_size, m_block_flags);
+	else
 		dkMemBlockDestroy(m_memblock);
 }
 
@@ -208,11 +212,12 @@ void GSTextureDK::SetDebugName(std::string_view name)
 }
 #endif
 
-GSDownloadTextureDK::GSDownloadTextureDK(GSDeviceDK* device, DkMemBlock memblock, u32 buffer_size, u32 width,
-	u32 height, GSTexture::Format format)
+GSDownloadTextureDK::GSDownloadTextureDK(GSDeviceDK* device, DkMemBlock memblock, u32 block_size, u32 buffer_size,
+	u32 width, u32 height, GSTexture::Format format)
 	: GSDownloadTexture(width, height, format)
 	, m_device(device)
 	, m_memblock(memblock)
+	, m_block_size(block_size)
 	, m_buffer_size(buffer_size)
 {
 }
@@ -220,19 +225,19 @@ GSDownloadTextureDK::GSDownloadTextureDK(GSDeviceDK* device, DkMemBlock memblock
 GSDownloadTextureDK::~GSDownloadTextureDK()
 {
 	if (m_memblock)
-		dkMemBlockDestroy(m_memblock);
+		m_device->ReleaseMemBlock(m_memblock, m_block_size,
+			DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
 }
 
-std::unique_ptr<GSDownloadTextureDK> GSDownloadTextureDK::Create(GSDeviceDK* device, DkDevice dk_device, u32 width,
-	u32 height, GSTexture::Format format)
+std::unique_ptr<GSDownloadTextureDK> GSDownloadTextureDK::Create(GSDeviceDK* device, u32 width, u32 height,
+	GSTexture::Format format)
 {
 	const u32 buffer_size = GetBufferSize(width, height, format, 1);
+	const u32 block_size = AlignUp(buffer_size, DK_MEMBLOCK_ALIGNMENT);
 
-	DkMemBlockMaker memblock_maker;
-	dkMemBlockMakerDefaults(&memblock_maker, dk_device, AlignUp(buffer_size, DK_MEMBLOCK_ALIGNMENT));
 	// CPU reads immediately after the copy
-	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached;
-	DkMemBlock memblock = dkMemBlockCreate(&memblock_maker);
+	DkMemBlock memblock = device->AcquireMemBlock(block_size,
+		DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
 	if (!memblock)
 	{
 		Console.Error("DK3D: failed to allocate %u byte readback buffer.", buffer_size);
@@ -240,7 +245,7 @@ std::unique_ptr<GSDownloadTextureDK> GSDownloadTextureDK::Create(GSDeviceDK* dev
 	}
 
 	auto tex = std::unique_ptr<GSDownloadTextureDK>(
-		new GSDownloadTextureDK(device, memblock, buffer_size, width, height, format));
+		new GSDownloadTextureDK(device, memblock, block_size, buffer_size, width, height, format));
 	tex->m_map_pointer = static_cast<const u8*>(dkMemBlockGetCpuAddr(memblock));
 	return tex;
 }
