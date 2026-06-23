@@ -94,9 +94,10 @@ set_property(TARGET armsx2_romfs APPEND PROPERTY DKP_ASSET_FILES ${DK3D_DKSH_FIL
 nx_generate_nacp(OUTPUT armsx2.nacp
 	NAME "ARMSX2"
 	AUTHOR "ARMSX2 Team \& PalindromicBreadLoaf"
-	VERSION "0.1"
+	VERSION "1.0.0"
 )
 nx_create_nro(armsx2
+	OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/armsx2nx.nro"
 	NACP "${CMAKE_CURRENT_BINARY_DIR}/armsx2.nacp"
 	ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg"
 	ROMFS armsx2_romfs)
