@@ -29,25 +29,23 @@ Please note that a BIOS dump from a legitimately-owned PS2 console is required t
 ARMSX2-NX can be downloaded from [Github Releases](https://github.com/PalindromicBreadLoaf/ARMSX2-NX/releases).
 
 ## Building
+This assumes you have DevkitPro installed. Install it if you don't.
 
-ARMSX2-NX requires the following to be built:
-- DevkitPro
-  - switch-dev
-  - switch-zlib
-  - switch-bzip2
-  - switch-libpng
-  - switch-freetype
-  - switch-mesa
-  - switch-glad
-  - switch-sdl2
-- CMake
-
-Once installed, run:
 ```shell
+dkp-pacman -S switch-dev switch-libpng switch-libjpeg-turbo
+```
+
+Configure the native core with the Switch toolchain, then build the `.nro` target:
+
+```shell
+cmake -S app/src/main/cpp -B build/switch-core \
+      -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build build/switch-core --target armsx2_nro -j$(nproc)
 ```
 
-The output binary will be located in build/switch-core/switch-app/armsx2nx.nro
+The output binary will be located at `build/switch-core/switch-app/armsx2nx.nro`
 
 You will also need the resources from the releases page to properly display the fullscreen UI.
 
