@@ -1112,8 +1112,8 @@ void FullscreenUI::ReturnToMainWindow()
 
 bool FullscreenUI::LoadResources()
 {
-	s_fallback_disc_texture = LoadTexture("fullscreenui/media-cdrom.png");
-	s_fallback_exe_texture = LoadTexture("fullscreenui/applications-system.png");
+	s_fallback_disc_texture = LoadSvgTexture("fullscreenui/media-cdrom.svg", LayoutScale(275.0f, 275.0f), SvgScaling::Fit);
+	s_fallback_exe_texture = LoadSvgTexture("fullscreenui/applications-system.svg", LayoutScale(275.0f, 275.0f), SvgScaling::Fit);
 
 	return LoadSvgResources();
 }
@@ -1462,27 +1462,27 @@ void FullscreenUI::DrawLandingWindow()
 	{
 		ResetFocusHere();
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/game-list.png"), FSUI_CSTR("Game List"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/media-cdrom.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Game List"),
 				FSUI_CSTR("Launch a game from images scanned from your game directories.")))
 		{
 			SwitchToGameList();
 		}
 
 		if (HorizontalMenuItem(
-				GetCachedTexture("fullscreenui/media-cdrom.png"), FSUI_CSTR("Start Game"),
+				GetCachedSvgTexture("fullscreenui/start-game.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Start Game"),
 				FSUI_CSTR("Launch a game from a file, disc, or starts the console without any disc inserted.")))
 		{
 			s_current_main_window = MainWindowType::StartGame;
 			QueueResetFocus(FocusResetType::WindowChanged);
 		}
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/applications-system.png"), FSUI_CSTR("Settings"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/applications-system.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Settings"),
 				FSUI_CSTR("Changes settings for the application.")))
 		{
 			SwitchToSettings();
 		}
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/exit.png"), FSUI_CSTR("Exit"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/exit.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Exit"),
 				FSUI_CSTR("Return to desktop mode, or exit the application.")) ||
 			(!AreAnyDialogsOpen() && WantsToCloseMenu()))
 		{
@@ -1541,26 +1541,26 @@ void FullscreenUI::DrawStartGameWindow()
 	{
 		ResetFocusHere();
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/start-file.png"), FSUI_CSTR("Start File"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/start-file.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Start File"),
 				FSUI_CSTR("Launch a game by selecting a file/disc image.")))
 		{
 			DoStartFile();
 		}
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/drive-cdrom.png"), FSUI_CSTR("Start Disc"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/drive-cdrom.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Start Disc"),
 				FSUI_CSTR("Start a game from a disc in your PC's DVD drive.")))
 		{
 			DoStartDisc();
 		}
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/start-bios.png"), FSUI_CSTR("Start BIOS"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/start-bios.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Start BIOS"),
 				FSUI_CSTR("Start the console without any disc inserted.")))
 		{
 			DoStartBIOS();
 		}
 
 		// https://www.iconpacks.net/free-icon/arrow-back-3783.html
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/back-icon.png"), FSUI_CSTR("Back"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/back-icon.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Back"),
 				FSUI_CSTR("Return to the previous menu.")) ||
 			(!AreAnyDialogsOpen() && WantsToCloseMenu()))
 		{
@@ -1612,7 +1612,7 @@ void FullscreenUI::DrawExitWindow()
 		ResetFocusHere();
 
 		// https://www.iconpacks.net/free-icon/arrow-back-3783.html
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/back-icon.png"), FSUI_CSTR("Back"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/back-icon.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Back"),
 				FSUI_CSTR("Return to the previous menu.")) ||
 			WantsToCloseMenu())
 		{
@@ -1620,7 +1620,7 @@ void FullscreenUI::DrawExitWindow()
 			QueueResetFocus(FocusResetType::WindowChanged);
 		}
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/exit.png"), FSUI_CSTR("Exit PCSX2"),
+		if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/exit.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Exit PCSX2"),
 				FSUI_CSTR("Completely exits the application, returning you to your desktop.")))
 		{
 			DoRequestExit();
@@ -1628,7 +1628,7 @@ void FullscreenUI::DrawExitWindow()
 
 		if (!Host::InNoGUIMode())
 		{
-			if (HorizontalMenuItem(GetCachedTexture("fullscreenui/desktop-mode.png"), FSUI_CSTR("Desktop Mode"),
+			if (HorizontalMenuItem(GetCachedSvgTexture("fullscreenui/desktop-mode.svg", LayoutScale(150.0f, 150.0f), SvgScaling::Fit), FSUI_CSTR("Desktop Mode"),
 				FSUI_CSTR("Exits Big Picture mode, returning to the desktop interface.")))
 			{
 				DoDesktopMode();
@@ -3923,6 +3923,9 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 #ifdef __APPLE__
 		FSUI_NSTR("Metal"),
 #endif
+#ifdef __SWITCH__
+		FSUI_NSTR("Deko3D"),
+#endif
 		FSUI_NSTR("Software"),
 		FSUI_NSTR("Null"),
 	};
@@ -3940,6 +3943,9 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 #endif
 #ifdef __APPLE__
 		"17", //GSRendererType::Metal,
+#endif
+#ifdef __SWITCH__
+		"18", //GSRendererType::DK3D,
 #endif
 		"13", //GSRendererType::SW,
 		"11", //GSRendererType::Null
@@ -7972,6 +7978,7 @@ TRANSLATE_NOOP("FullscreenUI", "Direct3D 12");
 TRANSLATE_NOOP("FullscreenUI", "OpenGL");
 TRANSLATE_NOOP("FullscreenUI", "Vulkan");
 TRANSLATE_NOOP("FullscreenUI", "Metal");
+TRANSLATE_NOOP("FullscreenUI", "Deko3D");
 TRANSLATE_NOOP("FullscreenUI", "Software");
 TRANSLATE_NOOP("FullscreenUI", "Null");
 TRANSLATE_NOOP("FullscreenUI", "Off");
