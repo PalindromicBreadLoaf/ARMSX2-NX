@@ -11,7 +11,6 @@ body:
         ## Important: Read First
 
         Please do not make support requests on GitHub. Our issue tracker is for tracking bugs and feature requests only.
-        If you have a support request or are unsure about the nature of your issue please contact us on [discord](https://discord.gg/KwAChKDctz).
 
         Do not create issues involving software piracy of BIOS or ISO files, our rules specifically prohibit this and your issue will be closed.
 
@@ -34,7 +33,7 @@ body:
   - type: input
     id: emu-ver
     attributes:
-      label: ARMSX2 Version
+      label: ARMSX2-NX Version
       description: Please ensure you are on the latest version before making an issue.
       placeholder: e.g. v1.0.4
     validations:
@@ -45,9 +44,8 @@ body:
     attributes:
       label: Renderer (Graphics Backend)
       options:
-        - Vulkan
-        - OpenGL
         - Software
+        - Deko3D
     validations:
       required: true
 
@@ -55,7 +53,7 @@ body:
     id: device
     attributes:
       label: Device Model
-      placeholder: e.g. Google Pixel 4
+      placeholder: Nintendo Switch Lite
     validations:
       required: true
 
@@ -63,7 +61,7 @@ body:
     id: os-ver
     attributes:
       label: OS Version
-      placeholder: e.g. Android 12
+      placeholder: 21.0.0|AMS 1.10.0|S
     validations:
       required: false
 
