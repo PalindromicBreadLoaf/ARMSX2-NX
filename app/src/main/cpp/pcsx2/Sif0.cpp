@@ -41,6 +41,10 @@ static __fi bool WriteFifoToEE()
 
 	// Clearing handled by vtlb memory protection and manual blocks.
 	//Cpu->Clear(sif0ch.madr, readSize*4);
+#ifdef __SWITCH__
+	// Horizon has no working page write-protection or fault handler, so invalidate blocks explicitly
+	Cpu->Clear(sif0ch.madr, readSize * 4);
+#endif
 
 	sif0ch.madr += readSize << 4;
 	sif0.ee.cycles += readSize;	// fixme : BIAS is factored in above
