@@ -550,7 +550,12 @@ void Pad::SetControllerState(u32 controller, u32 bind, float value)
 	if (controller >= NUM_CONTROLLER_PORTS)
 		return;
 
-	s_controllers[controller]->Set(bind, value);
+	// Stop controller input before shutdown otherwise things get unhappy
+	PadBase* const pad = s_controllers[controller].get();
+	if (!pad)
+		return;
+
+	pad->Set(bind, value);
 }
 
 bool Pad::Freeze(StateWrapper& sw)

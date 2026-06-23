@@ -290,7 +290,7 @@ int main(int argc, char** argv)
 			const bool fsui_active = FullscreenUI::HasActiveWindow();
 			if (fsui_active)
 				FeedNav(held, changed);
-			else
+			else if (VMManager::HasValidVM())
 				FeedGamePad(pad, held);
 
 			const bool menu_combo = (held & MENU_COMBO) == MENU_COMBO;
