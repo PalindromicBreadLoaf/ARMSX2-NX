@@ -203,7 +203,7 @@ static void mVUGenerateWaitMTVU(mV)
         armAsm->Push(a64::xzr, a64::XRegister(i));
     }
     //
-    for (i = 0; i < static_cast<int>(iREGCNT_XMM); ++i)
+    for (i = 0; i < mVUTotalXmmSpan; ++i)
     {
         if (!armIsCallerSavedXmm(i))
             continue;
@@ -218,7 +218,7 @@ static void mVUGenerateWaitMTVU(mV)
     armAsm->Pop(a64::lr, a64::xzr);
     ////
 
-    for (i = static_cast<int>(iREGCNT_XMM - 1); i >= 0; --i)
+    for (i = mVUTotalXmmSpan - 1; i >= 0; --i)
     {
         if (!armIsCallerSavedXmm(i))
             continue;

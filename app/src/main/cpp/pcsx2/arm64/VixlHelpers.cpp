@@ -365,9 +365,7 @@ bool armIsCallerSaved(int id)
 bool armIsCallerSavedXmm(int id)
 {
 #if defined(__ANDROID__) || defined(__SWITCH__)
-    // vector registers callee saved => d8 ~ d15
-    // d9,d10,d11,d12,d13,d14,d15
-    return (id < 9);
+    return (id < 9) || (id >= 16);
 #else
     #ifdef _WIN32
     // XMM6 through XMM15 are saved. Upper 128 bits is always volatile.

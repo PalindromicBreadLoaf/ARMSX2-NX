@@ -269,7 +269,7 @@ __fi void mVUbackupRegs(microVU& mVU, bool toMemory = false, bool onlyNeeded = f
 
         ////
 
-        e = iREGCNT_XMM;
+        e = mVUTotalXmmSpan;
         for (i = 0; i < e; ++i)
         {
             if (!armIsCallerSavedXmm(i))
@@ -294,7 +294,7 @@ __fi void mVUrestoreRegs(microVU& mVU, bool fromMemory = false, bool onlyNeeded 
 {
     if (fromMemory)
     {
-        int i, e = iREGCNT_XMM - 1;
+        int i, e = mVUTotalXmmSpan - 1;
         for (i = e; i >= 0; --i)
         {
             if (!armIsCallerSavedXmm(i))

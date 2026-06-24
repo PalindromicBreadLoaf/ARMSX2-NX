@@ -226,10 +226,14 @@ struct microMapGPR
 class microRegAlloc
 {
 protected:
-	static const int xmmTotal = iREGCNT_XMM - 1; // PQ register is reserved
+	// The allocator uses host vector regs q0..q14 and q16..q28. q15 holds PQ and q29/q30/q31 are reserved codegen
+	// In COP2 allocation is delegated to the EE recompiler
+	static constexpr int xmmTotalMax = 32; // physical vector register slots
 	static const int gprTotal = iREGCNT_GPR;
 
-	std::array<microMapXMM, xmmTotal> xmmMap;
+	int xmmTotal = iREGCNT_XMM - 1; // active allocatable span
+
+	std::array<microMapXMM, xmmTotalMax> xmmMap;
 	std::array<microMapGPR, gprTotal> gprMap;
 
 	int         counter; // Current allocation count
@@ -278,6 +282,8 @@ protected:
         int i;
 		for (i = startIdx; i < xmmTotal; ++i)
 		{
+			if (i == xmmPQ.GetCode()) // q15 is reserved for PQ
+				continue;
 			if (!xmmMap[i].isNeeded)
 			{
 				int x = findFreeRegRec(i + 1);
@@ -299,6 +305,8 @@ protected:
         int i;
 		for (i = 0; i < xmmTotal; ++i)
 		{
+			if (i == xmmPQ.GetCode())
+				continue;
 			if (!xmmMap[i].isNeeded && (xmmMap[i].VFreg < 0))
 			{
 				return i; // Reg is not needed and was a temp reg
@@ -379,12 +387,14 @@ public:
 		regAllocCOP2 = false;
 
         int i;
-		for (i = 0; i < xmmTotal; ++i)
+		// Clear every physical slot
+		for (i = 0; i < xmmTotalMax; ++i)
 			clearReg(i);
 		for (i = 0; i < gprTotal; ++i)
 			clearGPR(i);
 
 		counter = 0;
+		xmmTotal = cop2mode ? (iREGCNT_XMM - 1) : mVUTotalXmmSpan;
 		regAllocCOP2 = cop2mode;
 		pxmmregs = cop2mode ? xmmregs : nullptr;
 
@@ -442,6 +452,8 @@ public:
 
 		for (i = 0; i < xmmTotal; ++i)
 		{
+			if (i == xmmPQ.GetCode())
+				continue;
 			if (!xmmMap[i].isNeeded && (xmmMap[i].VFreg < 0))
 				count++;
 		}

@@ -98,6 +98,9 @@ static const char branchSTR[16][8] = {
 #define xmmT7  a64::q6 // Used for regAlloc
 #define xmmPQ  a64::q15 // Holds the Value and Backup Values of P and Q regs
 
+// microVU AArch64 register budget
+static constexpr int mVUTotalXmmSpan = 29;
+
 #define gprT1  a64::w0 // eax - Temp Reg
 #define gprT2  a64::w1 // ecx - Temp Reg
 #define gprT1q a64::x0 // eax - Temp Reg
