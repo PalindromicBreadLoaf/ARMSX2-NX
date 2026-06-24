@@ -159,6 +159,7 @@ namespace
 			s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
 			s_settings_interface->SetBoolValue("InputSources", "SDL", false);
 			s_settings_interface->SetBoolValue("Logging", "EnableSystemConsole", true);
+			s_settings_interface->SetBoolValue("Logging", "EnableFileLogging", false);
 			s_settings_interface->SetBoolValue("Logging", "EnableVerbose", false);
 			s_settings_interface->Save();
 		}
@@ -200,7 +201,7 @@ int main(int argc, char** argv)
 
 	Log::SetTimestampsEnabled(true);
 	Log::SetConsoleOutputLevel(LOGLEVEL_INFO);
-	if (!Log::SetFileOutputLevel(LOGLEVEL_DEV, LOG_PATH))
+	if (!Log::SetFileOutputLevel(LOGLEVEL_WARNING, LOG_PATH))
 		std::fprintf(stderr, "WARNING: could not open SD log file %s\n", LOG_PATH);
 
 	INFO_LOG("================ ARMSX2-NX ================");
