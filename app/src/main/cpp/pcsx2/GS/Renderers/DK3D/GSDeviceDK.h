@@ -186,13 +186,24 @@ private:
 	DkShader m_primid_init_fsh{}; // PrimID prefill
 	bool m_date_shaders_ok = false;
 
-	// Hardware tfx
+	// The fragment shader is specialised at build time from tfx_fsh.glsl
+	// SelectTfxVariant picks the cheapest one a draw can use.
+	enum TfxVariant : u32
+	{
+		TfxVariantUber = 0,   // full runtime-selected shader
+		TfxVariantOpaque,     // no RT read / channel / depth / shuffle / dither
+		TfxVariantFast,       // opaque + single-tap point sampling
+		NumTfxVariants,
+	};
+	static u32 SelectTfxVariant(const GSHWDrawConfig& config);
+
 	DkShader m_tfx_vsh{};
-	DkShader m_tfx_fsh{};
+	DkShader m_tfx_fsh[NumTfxVariants]{};
 	bool m_tfx_shaders_ok = false;
 
 	// Skip re-emitting binds that match the previous HW draw
 	bool m_hw_invariants_bound = false;
+	u32 m_hw_tfx_variant = TfxVariantUber;
 	u32 m_hw_blend_key = 0;
 	u32 m_hw_colormask = 0;
 	u32 m_hw_depth_key = 0;

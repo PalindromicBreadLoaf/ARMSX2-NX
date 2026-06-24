@@ -26,7 +26,7 @@
 namespace
 {
 	constexpr u32 CMDBUF_SIZE = 8 * 1024 * 1024;
-	constexpr u32 CODE_MEMSIZE = 128 * 1024;
+	constexpr u32 CODE_MEMSIZE = 256 * 1024;
 	constexpr u32 VERTEX_BUFFER_SIZE = 4 * 1024 * 1024;
 	constexpr u32 INDEX_BUFFER_SIZE = 2 * 1024 * 1024;
 	constexpr u32 UNIFORM_BUFFER_SIZE = 2 * 1024 * 1024;
@@ -730,7 +730,9 @@ bool GSDeviceDK::LoadShaders()
 		Console.Warning("DK3D: DATE setup shaders missing. Using slower COPY shader instead.");
 
 	m_tfx_shaders_ok = load_one(m_tfx_vsh, "romfs:/shaders/tfx_vsh.dksh") &&
-					   load_one(m_tfx_fsh, "romfs:/shaders/tfx_fsh.dksh");
+					   load_one(m_tfx_fsh[TfxVariantUber], "romfs:/shaders/tfx_fsh.dksh") &&
+					   load_one(m_tfx_fsh[TfxVariantOpaque], "romfs:/shaders/tfx_fsh_opaque.dksh") &&
+					   load_one(m_tfx_fsh[TfxVariantFast], "romfs:/shaders/tfx_fsh_fast.dksh");
 
 	if (m_tfx_shaders_ok)
 		Console.WriteLn("DK3D: tfx shaders loaded.");
@@ -1427,6 +1429,39 @@ void GSDeviceDK::FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32
 #endif
 }
 
+// Pick the cheapest tfx fragment variant a draw can use.
+u32 GSDeviceDK::SelectTfxVariant(const GSHWDrawConfig& config)
+{
+#ifdef __SWITCH__
+	if (config.require_one_barrier || config.require_full_barrier ||
+		config.blend_multi_pass.enable || config.alpha_second_pass.enable)
+		return TfxVariantUber;
+
+	const GSHWDrawConfig::PSSelector& ps = config.ps;
+	if (ps.IsFeedbackLoop())
+		return TfxVariantUber;
+
+	// shader-side blend, fbmask, tex-is-fb, DATE all read the target.
+	if (ps.blend_a || ps.blend_b || ps.blend_d || ps.blend_hw || ps.a_masked ||
+		ps.tex_is_fb || ps.fbmask || ps.date != 0)
+		return TfxVariantUber;
+
+	// channel fetch, depth reinterpret, shuffle, dither.
+	if (ps.channel != 0 || ps.channel_fb || ps.depth_fmt != 0 || ps.urban_chaos_hle ||
+		ps.tales_of_abyss_hle || ps.shuffle || ps.dither)
+		return TfxVariantUber;
+
+	// single point tap, no palette/AEM/region/LOD/fancy wrap.
+	const bool simple_sample = (ps.pal_fmt == 0 && ps.ltf == 0 && ps.aem_fmt == 0 &&
+		ps.region_rect == 0 && ps.adjs == 0 && ps.adjt == 0 && ps.automatic_lod == 0 &&
+		ps.manual_lod == 0 && ps.wms < 2 && ps.wmt < 2);
+
+	return simple_sample ? TfxVariantFast : TfxVariantOpaque;
+#else
+	return TfxVariantUber;
+#endif
+}
+
 void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 {
 #ifdef __SWITCH__
@@ -1513,7 +1548,11 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	};
 	static const DkVtxBufferState tfx_buffer_state = {sizeof(GSVertex), 0};
 
-	const bool force_state = !m_hw_invariants_bound;
+	// Route to the cheapest specialised fragment shader this draw can use.
+	const u32 tfx_variant = SelectTfxVariant(config);
+
+	// A variant switch needs the shaders re-bound
+	const bool force_state = !m_hw_invariants_bound || m_hw_tfx_variant != tfx_variant;
 	if (force_state)
 	{
 		DkRasterizerState rasterizer_state;
@@ -1521,7 +1560,7 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		rasterizer_state.cullMode = DkFace_None;
 		dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
 
-		const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh};
+		const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh[tfx_variant]};
 		dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
 		dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
@@ -1531,6 +1570,7 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		dkCmdBufBindVtxBufferState(m_cmdbuf, &tfx_buffer_state, 1);
 
 		m_hw_invariants_bound = true;
+		m_hw_tfx_variant = tfx_variant;
 	}
 
 	// Per-draw state is only re-bound when it differs from the previous draw.
@@ -1931,7 +1971,8 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	}
 	dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
 
-	const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh};
+	// The PrimID prepass needs the ubershader sadly
+	const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh[TfxVariantUber]};
 	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);

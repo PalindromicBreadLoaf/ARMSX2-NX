@@ -46,6 +46,31 @@ function(dk3d_add_shader NAME STAGE)
 	set(DK3D_DKSH_FILES ${DK3D_DKSH_FILES} "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh" PARENT_SCOPE)
 endfunction()
 
+# Generate specialised shaders for cheaper draws over the ubershader
+function(dk3d_add_tfx_variant OUT_NAME DEFINE)
+	set(GEN "${CMAKE_CURRENT_BINARY_DIR}/${OUT_NAME}.gen.glsl")
+	add_custom_command(
+		OUTPUT "${GEN}"
+		COMMAND "${CMAKE_COMMAND}"
+			-DIN=${DK3D_SHADER_SRC_DIR}/tfx_fsh.glsl
+			-DDEF=${DEFINE}
+			-DOUT=${GEN}
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepend_define.cmake"
+		DEPENDS "${DK3D_SHADER_SRC_DIR}/tfx_fsh.glsl"
+			"${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepend_define.cmake"
+		COMMENT "gen tfx variant ${OUT_NAME} (${DEFINE})"
+		VERBATIM
+	)
+	add_custom_command(
+		OUTPUT "${DK3D_ROMFS_SHADER_DIR}/${OUT_NAME}.dksh"
+		COMMAND "${UAM_EXE}" -s frag -o "${DK3D_ROMFS_SHADER_DIR}/${OUT_NAME}.dksh" "${GEN}"
+		DEPENDS "${GEN}"
+		COMMENT "uam frag: ${OUT_NAME}.dksh"
+		VERBATIM
+	)
+	set(DK3D_DKSH_FILES ${DK3D_DKSH_FILES} "${DK3D_ROMFS_SHADER_DIR}/${OUT_NAME}.dksh" PARENT_SCOPE)
+endfunction()
+
 dk3d_add_shader(convert_vsh vert)
 dk3d_add_shader(texture_fsh frag)
 dk3d_add_shader(convert_fsh frag)
@@ -57,6 +82,9 @@ dk3d_add_shader(date_fsh frag)
 dk3d_add_shader(primid_init_fsh frag)
 dk3d_add_shader(tfx_vsh vert)
 dk3d_add_shader(tfx_fsh frag)
+# Specialised tfx fragment variants
+dk3d_add_tfx_variant(tfx_fsh_opaque TFX_VARIANT_OPAQUE)
+dk3d_add_tfx_variant(tfx_fsh_fast TFX_VARIANT_FAST)
 dk3d_add_shader(interlace_fsh frag)
 dk3d_add_shader(shadeboost_fsh frag)
 dk3d_add_shader(fxaa_fsh frag)

@@ -30,59 +30,162 @@ layout(std140, binding = 1) uniform cb1
 
 layout(std140, binding = 0) uniform cbSel
 {
-	uint sel_fst;
-	uint sel_tme;
-	uint sel_tfx;
-	uint sel_tcc;
-	uint sel_atst;
-	uint sel_afail;
-	uint sel_fog;
-	uint sel_aem;
-	uint sel_aem_fmt;
-	uint sel_pal_fmt;
-	uint sel_ltf;
-	uint sel_wms;
-	uint sel_wmt;
-	uint sel_dst_fmt;
-	uint sel_fba;
-	uint sel_iip;
-	uint sel_region_rect;
-	uint sel_adjs;
-	uint sel_adjt;
-	uint sel_tcoffsethack;
-	uint sel_blend_a;
-	uint sel_blend_b;
-	uint sel_blend_c;
-	uint sel_blend_d;
-	uint sel_blend_mix;
-	uint sel_blend_hw;
-	uint sel_pabe;
-	uint sel_fixed_one_a;
-	uint sel_a_masked;
-	uint sel_colclip;
-	uint sel_colclip_hw;
-	uint sel_rta_correction;
-	uint sel_dither;
-	uint sel_dither_adjust;
-	uint sel_round_inv;
-	uint sel_tex_is_fb;
-	uint sel_channel;
-	uint sel_shuffle;
-	uint sel_shuffle_same;
-	uint sel_read16src;
-	uint sel_process_ba;
-	uint sel_process_rg;
-	uint sel_shuffle_across;
-	uint sel_write_rg;
-	uint sel_fbmask;
-	uint sel_scanmsk;
-	uint sel_date;
-	uint sel_depth_fmt;
-	uint sel_urban_chaos;
-	uint sel_tales;
-	uint sel_automatic_lod;
-	uint sel_manual_lod;
+	uint ub_sel_fst;
+	uint ub_sel_tme;
+	uint ub_sel_tfx;
+	uint ub_sel_tcc;
+	uint ub_sel_atst;
+	uint ub_sel_afail;
+	uint ub_sel_fog;
+	uint ub_sel_aem;
+	uint ub_sel_aem_fmt;
+	uint ub_sel_pal_fmt;
+	uint ub_sel_ltf;
+	uint ub_sel_wms;
+	uint ub_sel_wmt;
+	uint ub_sel_dst_fmt;
+	uint ub_sel_fba;
+	uint ub_sel_iip;
+	uint ub_sel_region_rect;
+	uint ub_sel_adjs;
+	uint ub_sel_adjt;
+	uint ub_sel_tcoffsethack;
+	uint ub_sel_blend_a;
+	uint ub_sel_blend_b;
+	uint ub_sel_blend_c;
+	uint ub_sel_blend_d;
+	uint ub_sel_blend_mix;
+	uint ub_sel_blend_hw;
+	uint ub_sel_pabe;
+	uint ub_sel_fixed_one_a;
+	uint ub_sel_a_masked;
+	uint ub_sel_colclip;
+	uint ub_sel_colclip_hw;
+	uint ub_sel_rta_correction;
+	uint ub_sel_dither;
+	uint ub_sel_dither_adjust;
+	uint ub_sel_round_inv;
+	uint ub_sel_tex_is_fb;
+	uint ub_sel_channel;
+	uint ub_sel_shuffle;
+	uint ub_sel_shuffle_same;
+	uint ub_sel_read16src;
+	uint ub_sel_process_ba;
+	uint ub_sel_process_rg;
+	uint ub_sel_shuffle_across;
+	uint ub_sel_write_rg;
+	uint ub_sel_fbmask;
+	uint ub_sel_scanmsk;
+	uint ub_sel_date;
+	uint ub_sel_depth_fmt;
+	uint ub_sel_urban_chaos;
+	uint ub_sel_tales;
+	uint ub_sel_automatic_lod;
+	uint ub_sel_manual_lod;
 };
+
+// Variants are generated from this source by prepending one TFX_VARIANT_* define (see switch/app/CMakeLists.txt)
+#if defined(TFX_VARIANT_FAST)
+	#define FOLD_RT_READ
+	#define FOLD_SPECIAL
+	#define FOLD_SIMPLE_SAMPLE
+#elif defined(TFX_VARIANT_OPAQUE)
+	#define FOLD_RT_READ
+	#define FOLD_SPECIAL
+#endif
+
+// Render-target reads (software blend, fbmask, tex-is-fb, in-shader DATE)
+#ifdef FOLD_RT_READ
+	const uint sel_blend_a = 0u;
+	const uint sel_blend_b = 0u;
+	const uint sel_blend_d = 0u;
+	const uint sel_blend_hw = 0u;
+	const uint sel_a_masked = 0u;
+	const uint sel_tex_is_fb = 0u;
+	const uint sel_fbmask = 0u;
+	const uint sel_date = 0u;
+#else
+	#define sel_blend_a ub_sel_blend_a
+	#define sel_blend_b ub_sel_blend_b
+	#define sel_blend_d ub_sel_blend_d
+	#define sel_blend_hw ub_sel_blend_hw
+	#define sel_a_masked ub_sel_a_masked
+	#define sel_tex_is_fb ub_sel_tex_is_fb
+	#define sel_fbmask ub_sel_fbmask
+	#define sel_date ub_sel_date
+#endif
+
+// Special texture fetch/per-pixel effects (channel, depth reinterpret, shuffle, dither)
+#ifdef FOLD_SPECIAL
+	const uint sel_channel = 0u;
+	const uint sel_depth_fmt = 0u;
+	const uint sel_urban_chaos = 0u;
+	const uint sel_tales = 0u;
+	const uint sel_shuffle = 0u;
+	const uint sel_dither = 0u;
+#else
+	#define sel_channel ub_sel_channel
+	#define sel_depth_fmt ub_sel_depth_fmt
+	#define sel_urban_chaos ub_sel_urban_chaos
+	#define sel_tales ub_sel_tales
+	#define sel_shuffle ub_sel_shuffle
+	#define sel_dither ub_sel_dither
+#endif
+
+// Sampling complexity (palette, bilinear 4-tap, AEM, region/adjust, LOD, fancy wrap)
+#ifdef FOLD_SIMPLE_SAMPLE
+	const uint sel_pal_fmt = 0u;
+	const uint sel_ltf = 0u;
+	const uint sel_aem_fmt = 0u;
+	const uint sel_region_rect = 0u;
+	const uint sel_adjs = 0u;
+	const uint sel_adjt = 0u;
+	const uint sel_automatic_lod = 0u;
+	const uint sel_manual_lod = 0u;
+	#define WRAP_IS_SIMPLE true
+#else
+	#define sel_pal_fmt ub_sel_pal_fmt
+	#define sel_ltf ub_sel_ltf
+	#define sel_aem_fmt ub_sel_aem_fmt
+	#define sel_region_rect ub_sel_region_rect
+	#define sel_adjs ub_sel_adjs
+	#define sel_adjt ub_sel_adjt
+	#define sel_automatic_lod ub_sel_automatic_lod
+	#define sel_manual_lod ub_sel_manual_lod
+	#define WRAP_IS_SIMPLE (sel_wms < 2u && sel_wmt < 2u)
+#endif
+
+// Always variable selectors
+#define sel_fst ub_sel_fst
+#define sel_tme ub_sel_tme
+#define sel_tfx ub_sel_tfx
+#define sel_tcc ub_sel_tcc
+#define sel_atst ub_sel_atst
+#define sel_afail ub_sel_afail
+#define sel_fog ub_sel_fog
+#define sel_aem ub_sel_aem
+#define sel_wms ub_sel_wms
+#define sel_wmt ub_sel_wmt
+#define sel_dst_fmt ub_sel_dst_fmt
+#define sel_fba ub_sel_fba
+#define sel_iip ub_sel_iip
+#define sel_tcoffsethack ub_sel_tcoffsethack
+#define sel_blend_c ub_sel_blend_c
+#define sel_blend_mix ub_sel_blend_mix
+#define sel_pabe ub_sel_pabe
+#define sel_fixed_one_a ub_sel_fixed_one_a
+#define sel_colclip ub_sel_colclip
+#define sel_colclip_hw ub_sel_colclip_hw
+#define sel_rta_correction ub_sel_rta_correction
+#define sel_dither_adjust ub_sel_dither_adjust
+#define sel_round_inv ub_sel_round_inv
+#define sel_shuffle_same ub_sel_shuffle_same
+#define sel_read16src ub_sel_read16src
+#define sel_process_ba ub_sel_process_ba
+#define sel_process_rg ub_sel_process_rg
+#define sel_shuffle_across ub_sel_shuffle_across
+#define sel_write_rg ub_sel_write_rg
+#define sel_scanmsk ub_sel_scanmsk
 
 layout(binding = 2) uniform sampler2D Texture;
 layout(binding = 3) uniform sampler2D Palette;
@@ -389,7 +492,7 @@ vec4 sample_color(vec2 st)
 
 	// Hardware-filtered single tap for the upstream fast path.
 	bool fast_path = (sel_ltf == 0u && sel_aem_fmt == FMT_32 && sel_pal_fmt == 0u &&
-		sel_region_rect == 0u && sel_wms < 2u && sel_wmt < 2u);
+		sel_region_rect == 0u && WRAP_IS_SIMPLE);
 
 	if (fast_path)
 	{
