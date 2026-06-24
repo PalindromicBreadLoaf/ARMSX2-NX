@@ -51,6 +51,21 @@ static bool eeCpuExecuting = false;
 static bool eeRecExitRequested = false;
 static bool g_resetEeScalingStats = false;
 
+#ifdef __SWITCH__
+bool eeRecFastmemLiteOK = true;
+
+// Called by the TLB code when it remaps a page that the inline RAM fast path assumes is identity-mapped
+void eeRecNotifyFastmemLiteUnsafe()
+{
+	if (!eeRecFastmemLiteOK)
+		return;
+
+	eeRecFastmemLiteOK = false;
+	eeRecNeedsReset = true;
+	eeRecExitRequested = true;
+}
+#endif
+
 #define PC_GETBLOCK(x) PC_GETBLOCK_(x, recLUT)
 
 u32 maxrecmem = 0;
@@ -499,6 +514,13 @@ static const void* _DynGen_EnterRecompiledCode()
 //        xMOV(RFASTMEMBASE, ptrNative[&vtlb_private::vtlbdata.fastmem_base]);
         armAsm->Ldr(RFASTMEMBASE, PTR_CPU(vtlbdata.fastmem_base));
     }
+
+#ifdef __SWITCH__
+    // Fastmem is disabled on Switch due to fault recover missing
+	// This allows for a "FastmemLite" that get some of the fastmem performance back
+    armMoveAddressToReg(RXVIXLSCRATCH, &eeMem);
+    armAsm->Ldr(RFASTMEMBASE, a64::MemOperand(RXVIXLSCRATCH));
+#endif
 
 //	xJMP(DispatcherReg);
     armEmitJmp(DispatcherReg);

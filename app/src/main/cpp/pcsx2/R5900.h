@@ -216,6 +216,10 @@ extern R5900cpu jitA64Cpu;
 #ifdef __SWITCH__
 // Only clear self-modified code blocks
 bool eeRecPageHasCode(u32 addr, u32 size);
+
+// EE dynamic load/store codegen emits a direct RAM access for kuseg [0,32MB) / kseg0 [0x80000000,+32MB),
+extern bool eeRecFastmemLiteOK;
+extern void eeRecNotifyFastmemLiteUnsafe();
 #endif
 
 enum EE_intProcessStatus

@@ -429,6 +429,25 @@ void vtlb_DynGenDispatchers()
     armStartBlock();
 }
 
+#ifdef __SWITCH__
+// fastmem-lite
+// Fastmem is disabled on Switch since HOS has no way to recover from thread faults.
+// However, any writes directly to the main 32MB of RAM can be assigned direct values
+// to get some of the perfance that was lost back.
+// Writes need no SMC special case for this since Switch already has manual integrity checks
+// for any self-modifying code
+static constexpr u32 FML_SEG_MASK = 0x7E000000u;
+static constexpr u32 FML_RAM_MASK = 0x01FFFFFFu; // 32 MB - 1
+
+// Emits the range test
+static void DynGen_FastmemLiteCheck(int addr_reg, a64::Label* slow)
+{
+	armAsm->Tst(a64::WRegister(addr_reg), FML_SEG_MASK);
+	armAsm->B(slow, a64::Condition::ne);
+	armAsm->And(RWVIXLSCRATCH, a64::WRegister(addr_reg), FML_RAM_MASK);
+}
+#endif
+
 //////////////////////////////////////////////////////////////////////////////////////////
 //                            Dynarec Load Implementations
 // ------------------------------------------------------------------------
@@ -443,6 +462,54 @@ int vtlb_DynGenReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg, vtlb_Rea
     if (!CHECK_FASTMEM || vtlb_IsFaultingPC(pc))
     {
         iFlushCall(FLUSH_FULLVTLB);
+
+#ifdef __SWITCH__
+        if (eeRecFastmemLiteOK)
+        {
+            // Allocate the destination up-front
+            if (!xmm)
+                x86_dest_reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(EAX), EAX.GetCode());
+            else
+            {
+                pxAssert(bits == 32);
+                x86_dest_reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
+            }
+
+            a64::Label slow, done;
+            DynGen_FastmemLiteCheck(addr_reg, &slow);
+
+            const auto fmop = a64::MemOperand(RFASTMEMBASE, RXVIXLSCRATCH);
+            if (!xmm)
+            {
+                const auto rd = a64::XRegister(x86_dest_reg);
+                switch (bits)
+                {
+                    case 8:  sign ? armAsm->Ldrsb(rd, fmop) : armAsm->Ldrb(rd.W(), fmop); break;
+                    case 16: sign ? armAsm->Ldrsh(rd, fmop) : armAsm->Ldrh(rd.W(), fmop); break;
+                    case 32: sign ? armAsm->Ldrsw(rd, fmop) : armAsm->Ldr(rd.W(), fmop);  break;
+                    case 64: armAsm->Ldr(rd, fmop); break;
+                    jNO_DEFAULT
+                }
+            }
+            else
+            {
+                armAsm->Ldr(a64::QRegister(x86_dest_reg).S(), fmop);
+            }
+            armAsm->B(&done);
+
+            // full vmap lookup
+            armBind(&slow);
+            DynGen_PrepRegs(addr_reg, -1, bits, xmm);
+            DynGen_HandlerTest([bits, sign]() { DynGen_DirectRead(bits, sign); }, 0, bits, sign && bits < 64);
+            if (!xmm)
+                armAsm->Mov(a64::XRegister(x86_dest_reg), RAX);
+            else
+                armAsm->Fmov(a64::QRegister(x86_dest_reg).S(), EAX);
+
+            armBind(&done);
+            return x86_dest_reg;
+        }
+#endif
 
         DynGen_PrepRegs(addr_reg, -1, bits, xmm);
         DynGen_HandlerTest([bits, sign]() { DynGen_DirectRead(bits, sign); }, 0, bits, sign && bits < 64);
@@ -682,11 +749,33 @@ int vtlb_DynGenReadQuad(u32 bits, int addr_reg, vtlb_ReadRegAllocCallback dest_r
 	{
 		iFlushCall(FLUSH_FULLVTLB);
 
+		// Quad reads take the address in ECX/RCX (see the fastmem path below).
+		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0); // Handler returns in xmm0
+
+#ifdef __SWITCH__
+		if (eeRecFastmemLiteOK)
+		{
+			a64::Label slow, done;
+			DynGen_FastmemLiteCheck(ECX.GetCode(), &slow);
+			if (reg >= 0)
+				armAsm->Ldr(a64::QRegister(reg).Q(), a64::MemOperand(RFASTMEMBASE, RXVIXLSCRATCH));
+			armAsm->B(&done);
+
+			armBind(&slow);
+			DynGen_PrepRegs(ECX.GetCode(), -1, bits, true);
+			DynGen_HandlerTest([bits]() {DynGen_DirectRead(bits, false); },  0, bits);
+			if (reg >= 0)
+				armAsm->Mov(a64::QRegister(reg), xmm0);
+
+			armBind(&done);
+			return reg;
+		}
+#endif
+
 //		DynGen_PrepRegs(arg1regd.GetId(), -1, bits, true);
         DynGen_PrepRegs(ECX.GetCode(), -1, bits, true);
 		DynGen_HandlerTest([bits]() {DynGen_DirectRead(bits, false); },  0, bits);
 
-		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0); // Handler returns in xmm0
 		if (reg >= 0) {
 //            xMOVAPS(xRegisterSSE(reg), xmm0);
             armAsm->Mov(a64::QRegister(reg), xmm0);
@@ -820,6 +909,43 @@ void vtlb_DynGenWrite(u32 sz, bool xmm, int addr_reg, int value_reg)
 	if (!CHECK_FASTMEM || vtlb_IsFaultingPC(pc))
 	{
 		iFlushCall(FLUSH_FULLVTLB);
+
+#ifdef __SWITCH__
+		if (eeRecFastmemLiteOK)
+		{
+			a64::Label slow, done;
+			DynGen_FastmemLiteCheck(addr_reg, &slow);
+
+			const auto fmop = a64::MemOperand(RFASTMEMBASE, RXVIXLSCRATCH);
+			if (!xmm)
+			{
+				const auto rs = a64::XRegister(value_reg);
+				switch (sz)
+				{
+					case 8:  armAsm->Strb(rs.W(), fmop); break;
+					case 16: armAsm->Strh(rs.W(), fmop); break;
+					case 32: armAsm->Str(rs.W(), fmop);  break;
+					case 64: armAsm->Str(rs, fmop); break;
+					jNO_DEFAULT
+				}
+			}
+			else
+			{
+				pxAssert(sz == 32 || sz == 128);
+				const auto rq = a64::QRegister(value_reg);
+				if (sz == 32) armAsm->Str(rq.S(), fmop);
+				else          armAsm->Str(rq.Q(), fmop);
+			}
+			armAsm->B(&done);
+
+			armBind(&slow);
+			DynGen_PrepRegs(addr_reg, value_reg, sz, xmm);
+			DynGen_HandlerTest([sz]() { DynGen_DirectWrite(sz); }, 1, sz);
+
+			armBind(&done);
+			return;
+		}
+#endif
 
 		DynGen_PrepRegs(addr_reg, value_reg, sz, xmm);
 		DynGen_HandlerTest([sz]() { DynGen_DirectWrite(sz); }, 1, sz);

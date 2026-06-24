@@ -1096,6 +1096,11 @@ void memReset()
 
 	pxAssume( eeMem );
 
+#ifdef __SWITCH__
+	// Re-arm the EE RAM fast path
+	eeRecFastmemLiteOK = true;
+#endif
+
 #ifdef ENABLECACHE
 	memset(pCache,0,sizeof(_cacheS)*64);
 #endif

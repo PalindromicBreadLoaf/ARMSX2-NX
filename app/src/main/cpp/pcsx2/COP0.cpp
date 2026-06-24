@@ -4,6 +4,15 @@
 #include "Common.h"
 #include "COP0.h"
 
+#ifdef __SWITCH__
+// Games should never use the TLB on this section, but if they do, fall back to regular TLB everywhere.
+static __fi void eeFmlCheckTlbPage(u32 vaddr)
+{
+	if ((vaddr & 0x7E000000u) == 0)
+		eeRecNotifyFastmemLiteUnsafe();
+}
+#endif
+
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
 // Currently the different modes are not implemented.
 // Given this function is called so much, it's commented out for now. (rama)
@@ -243,6 +252,9 @@ void MapTLB(const tlbs& t, int i)
 			Console.Warning("COP0: Mapping Scratchpad to non-default address 0x%08X", t.VPN2());
 
 		vtlb_VMapBuffer(t.VPN2(), eeMem->Scratch, Ps2MemSize::Scratch);
+#ifdef __SWITCH__
+		eeFmlCheckTlbPage(t.VPN2());
+#endif
 	}
 	else
 	{
@@ -258,6 +270,9 @@ void MapTLB(const tlbs& t, int i)
 				{ //match
 					memSetPageAddr(addr << 12, t.PFN0() + ((addr - saddr) << 12));
 					Cpu->Clear(addr << 12, 0x400);
+#ifdef __SWITCH__
+					eeFmlCheckTlbPage(addr << 12);
+#endif
 				}
 			}
 		}
@@ -274,6 +289,9 @@ void MapTLB(const tlbs& t, int i)
 				{ //match
 					memSetPageAddr(addr << 12, t.PFN1() + ((addr - saddr) << 12));
 					Cpu->Clear(addr << 12, 0x400);
+#ifdef __SWITCH__
+					eeFmlCheckTlbPage(addr << 12);
+#endif
 				}
 			}
 		}
@@ -298,6 +316,9 @@ void UnmapTLB(const tlbs& t, int i)
 	if (t.isSPR())
 	{
 		vtlb_VMapUnmap(t.VPN2(), 0x4000);
+#ifdef __SWITCH__
+		eeFmlCheckTlbPage(t.VPN2());
+#endif
 		return;
 	}
 
@@ -313,6 +334,9 @@ void UnmapTLB(const tlbs& t, int i)
 			{ //match
 				memClearPageAddr(addr << 12);
 				Cpu->Clear(addr << 12, 0x400);
+#ifdef __SWITCH__
+				eeFmlCheckTlbPage(addr << 12);
+#endif
 			}
 		}
 	}
@@ -329,6 +353,9 @@ void UnmapTLB(const tlbs& t, int i)
 			{ //match
 				memClearPageAddr(addr << 12);
 				Cpu->Clear(addr << 12, 0x400);
+#ifdef __SWITCH__
+				eeFmlCheckTlbPage(addr << 12);
+#endif
 			}
 		}
 	}
