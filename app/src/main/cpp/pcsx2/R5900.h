@@ -213,6 +213,11 @@ extern R5900cpu recCpu;
 extern R5900cpu jitA64Cpu;
 #endif
 
+#ifdef __SWITCH__
+// Only clear self-modified code blocks
+bool eeRecPageHasCode(u32 addr, u32 size);
+#endif
+
 enum EE_intProcessStatus
 {
 	INT_NOT_RUNNING = 0,

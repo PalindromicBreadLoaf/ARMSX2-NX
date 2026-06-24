@@ -19,6 +19,7 @@
 #include "common/AlignedMalloc.h"
 #include "common/FastJmp.h"
 #include "common/HeapArray.h"
+#include "common/HostSys.h"
 #include "common/Perf.h"
 #include "x86/microVU_Misc.h"
 
@@ -630,6 +631,64 @@ static void recReserve()
 alignas(16) static u16 manual_page[Ps2MemSize::TotalRam >> 12];
 alignas(16) static u8 manual_counter[Ps2MemSize::TotalRam >> 12];
 
+#ifdef __SWITCH__
+// Mark code owned by EE so we can just clear that
+alignas(16) static u8 ee_page_has_code[Ps2MemSize::TotalRam >> 12];
+
+// SMC-churn diagnostics
+static u64 s_smc_clear_calls = 0;    // recClear() reached the block search
+static u64 s_smc_clear_hits = 0;     // and invalidated at least one block
+static u64 s_smc_block_discards = 0; // manual integrity check failures
+static u64 s_smc_rec_resets = 0;     // full recompiler resets
+
+static void eeReportSwitchSMC()
+{
+	static u64 last_ticks = 0;
+	static u64 last_calls = 0, last_hits = 0, last_discards = 0, last_resets = 0;
+
+	const u64 now = GetCPUTicks();
+	if (last_ticks == 0)
+	{
+		last_ticks = now;
+		return;
+	}
+	if ((now - last_ticks) < GetTickFrequency())
+		return;
+
+	Console.WriteLn("[EE SMC] clears=%llu (hits=%llu) discards=%llu resets=%llu / sec",
+		(unsigned long long)(s_smc_clear_calls - last_calls),
+		(unsigned long long)(s_smc_clear_hits - last_hits),
+		(unsigned long long)(s_smc_block_discards - last_discards),
+		(unsigned long long)(s_smc_rec_resets - last_resets));
+
+	last_ticks = now;
+	last_calls = s_smc_clear_calls;
+	last_hits = s_smc_clear_hits;
+	last_discards = s_smc_block_discards;
+	last_resets = s_smc_rec_resets;
+}
+
+bool eeRecPageHasCode(u32 addr, u32 size)
+{
+	if (size == 0)
+		return false;
+
+	const u32 first = (addr & (Ps2MemSize::TotalRam - 1)) >> 12;
+	const u32 last = ((addr + size - 1) & (Ps2MemSize::TotalRam - 1)) >> 12;
+	const u32 maxpage = (Ps2MemSize::ExposedRam >> 12) - 1;
+
+	if (last < first || last > maxpage)
+		return true;
+
+	for (u32 p = first; p <= last; p++)
+	{
+		if (ee_page_has_code[p])
+			return true;
+	}
+	return false;
+}
+#endif
+
 ////////////////////////////////////////////////////
 static void recResetRaw()
 {
@@ -671,6 +730,11 @@ static void recResetRaw()
 
 	memset(manual_page, 0, sizeof(manual_page));
 	memset(manual_counter, 0, sizeof(manual_counter));
+
+#ifdef __SWITCH__
+	memset(ee_page_has_code, 0, sizeof(ee_page_has_code));
+	s_smc_rec_resets++;
+#endif
 }
 
 void recShutdown()
@@ -803,6 +867,11 @@ void recClear(u32 addr, u32 size)
 	if ((addr) >= maxrecmem || !(recLUT[(addr) >> 16] + (addr & ~0xFFFFUL)))
 		return;
 
+#ifdef __SWITCH__
+	s_smc_clear_calls++;
+	eeReportSwitchSMC();
+#endif
+
 	addr = HWADDR(addr);
 
     u32 addr_size = addr + (size << 2); // // size * 4
@@ -810,6 +879,10 @@ void recClear(u32 addr, u32 size)
 
 	if (blockidx == -1)
 		return;
+
+#ifdef __SWITCH__
+	s_smc_clear_hits++;
+#endif
 
 	u32 lowerextent = 0xFFFFFFFF, upperextent = 0, ceiling = 0xFFFFFFFF; // 0xFFFFFFFF == -1
 
@@ -856,6 +929,7 @@ void recClear(u32 addr, u32 size)
 
 	upperextent = std::min(upperextent, ceiling);
 
+#ifdef PCSX2_DEVBUILD
 	for (int i = 0; (pexblock = recBlocks[i]); ++i)
 	{
 		if (s_pCurBlock == PC_GETBLOCK(pexblock->startpc))
@@ -867,6 +941,7 @@ void recClear(u32 addr, u32 size)
 			pxFail("[EE] Impossible block clearing failure");
 		}
 	}
+#endif
 
 	if (upperextent > lowerextent)
 		ClearRecLUT(PC_GETBLOCK(lowerextent), upperextent - lowerextent);
@@ -2127,6 +2202,9 @@ void dyna_block_discard(u32 start, u32 sz)
 #ifdef PCSX2_DEVBUILD
 	eeRecPerfLog.Write(Color_StrongGray, "Clearing Manual Block @ 0x%08X  [size=%d]", start, sz * 4);
 #endif
+#ifdef __SWITCH__
+	s_smc_block_discards++;
+#endif
 	recClear(start, sz);
 }
 
@@ -2884,6 +2962,11 @@ StartRecomp:
 		}
 
 		memcpy(&recRAMCopy[HWADDR(startpc) >> 2], PSM(startpc), pc - startpc); // HWADDR(startpc) / 4
+
+#ifdef __SWITCH__
+		for (u32 p = HWADDR(startpc) >> 12; p <= ((HWADDR(pc) - 1) >> 12); p++)
+			ee_page_has_code[p] = 1;
+#endif
 	}
 
 	s_pCurBlock->SetFnptr((uptr)recPtr);

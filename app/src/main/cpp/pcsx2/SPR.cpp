@@ -145,7 +145,8 @@ int  _SPR0chain()
 		// Clear VU mem also!
 		TestClearVUs(spr0ch.madr, partialqwc, true);
 #ifdef __SWITCH__
-		Cpu->Clear(spr0ch.madr, partialqwc * 4);
+		if (eeRecPageHasCode(spr0ch.madr, partialqwc * 4))
+			Cpu->Clear(spr0ch.madr, partialqwc * 4);
 #endif
 
 		spr0ch.madr += partialqwc << 4;
@@ -211,7 +212,8 @@ void _SPR0interleave()
 				memcpy_from_spr((u8*)pMem, spr0ch.sadr, spr0ch.qwc*16);
 #ifdef __SWITCH__
 				// Horizon: no page write-protection; explicitly invalidate overwritten EE code.
-				Cpu->Clear(spr0ch.madr, spr0ch.qwc * 4);
+				if (eeRecPageHasCode(spr0ch.madr, spr0ch.qwc * 4))
+					Cpu->Clear(spr0ch.madr, spr0ch.qwc * 4);
 #endif
 				break;
  		}
