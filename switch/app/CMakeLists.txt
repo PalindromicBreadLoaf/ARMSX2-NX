@@ -7,9 +7,14 @@ add_executable(armsx2
 
 target_include_directories(armsx2 PRIVATE ${CMAKE_SOURCE_DIR})
 
+set(ARMSX2_CORE_LINK_TARGETS PCSX2)
+if(TARGET PCSX2_LTO)
+	list(APPEND ARMSX2_CORE_LINK_TARGETS PCSX2_LTO)
+endif()
+
 target_link_libraries(armsx2 PRIVATE
 	-Wl,--start-group
-	PCSX2
+	${ARMSX2_CORE_LINK_TARGETS}
 	PCSX2_FLAGS
 	-Wl,--end-group
 	# Must precede the toolchain's -lnx

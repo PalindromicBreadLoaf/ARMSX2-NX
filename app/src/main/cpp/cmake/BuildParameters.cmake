@@ -8,7 +8,11 @@ include(GNUInstallDirs)
 #-------------------------------------------------------------------------------
 option(ENABLE_TESTS "Enables building the unit tests" ON)
 option(ENABLE_GSRUNNER "Enables building the GSRunner by default.  It can still be built with `make pcsx2-gsrunner` otherwise." OFF)
-option(LTO_PCSX2_CORE "Enable LTO/IPO/LTCG on the subset of pcsx2 that benefits most from it but not anything else")
+set(DEFAULT_LTO_PCSX2_CORE OFF)
+if(HORIZON)
+	set(DEFAULT_LTO_PCSX2_CORE ON)
+endif()
+option(LTO_PCSX2_CORE "Enable LTO/IPO/LTCG on the subset of pcsx2 that benefits most from it but not anything else" ${DEFAULT_LTO_PCSX2_CORE})
 option(USE_VTUNE "Plug VTUNE to profile GS JIT.")
 option(PACKAGE_MODE "Use this option to ease packaging of PCSX2 (developer/distribution option)")
 
@@ -55,7 +59,11 @@ option(USE_ASAN "Enable address sanitizer")
 # Ensure that the value set by the User is correct to avoid some bad behavior later
 #-------------------------------------------------------------------------------
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug|Devel|MinSizeRel|RelWithDebInfo|Release")
-	set(CMAKE_BUILD_TYPE Devel)
+	if(HORIZON)
+		set(CMAKE_BUILD_TYPE Release)
+	else()
+		set(CMAKE_BUILD_TYPE Devel)
+	endif()
 	message(STATUS "BuildType set to ${CMAKE_BUILD_TYPE} by default")
 endif()
 # Add Devel build type
@@ -128,7 +136,10 @@ elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM
 #	add_compile_options("-march=armv8.4-a" "-mcpu=apple-m1")
 
 	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-	add_definitions("-march=armv8-a+crc")
+	add_compile_options("-march=armv8-a+crc")
+	if(HORIZON)
+		add_compile_options("-mtune=cortex-a57")
+	endif()
 
 	# If we're running on Linux, we need to detect the page/cache line size.
 	# It could be a virtual machine with 4K pages, or 16K with Asahi.
