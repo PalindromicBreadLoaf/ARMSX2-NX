@@ -60,7 +60,8 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, GSDeviceDK* de
 	{
 		case Type::RenderTarget:
 		case Type::DepthStencil:
-			layout_maker.flags = DkImageFlags_UsageRender;
+			// Enable hardware compression for texture/copy.
+			layout_maker.flags = DkImageFlags_UsageRender | DkImageFlags_HwCompression;
 			break;
 		case Type::RWTexture:
 			layout_maker.flags = DkImageFlags_UsageLoadStore;
