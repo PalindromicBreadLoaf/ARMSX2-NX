@@ -84,6 +84,7 @@ dk3d_add_shader(tfx_vsh vert)
 dk3d_add_shader(tfx_fsh frag)
 # Specialised tfx fragment variants
 dk3d_add_tfx_variant(tfx_fsh_opaque TFX_VARIANT_OPAQUE)
+dk3d_add_tfx_variant(tfx_fsh_palette TFX_VARIANT_PALETTE)
 dk3d_add_tfx_variant(tfx_fsh_fast TFX_VARIANT_FAST)
 dk3d_add_shader(interlace_fsh frag)
 dk3d_add_shader(shadeboost_fsh frag)

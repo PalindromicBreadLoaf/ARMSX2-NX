@@ -136,6 +136,7 @@ private:
 	{
 		m_hw_invariants_bound = false;
 		m_hw_uniforms_valid = false;
+		m_hw_tex_valid = false;
 	}
 	// Issue a deko3d barrier and stop image generation if the image cache was marked
 	void IssueBarrier(DkBarrier mode, u32 invalidate_flags);
@@ -194,7 +195,8 @@ private:
 	{
 		TfxVariantUber = 0,   // full runtime-selected shader
 		TfxVariantOpaque,     // no RT read / channel / depth / shuffle / dither
-		TfxVariantFast,       // opaque + single-tap point sampling
+		TfxVariantPalette,    // opaque + single-tap palette point sampling
+		TfxVariantFast,       // opaque + single-tap point sampling, no palette
 		NumTfxVariants,
 	};
 	static u32 SelectTfxVariant(const GSHWDrawConfig& config);
@@ -216,6 +218,12 @@ private:
 	GSHWDrawConfig::VSConstantBuffer m_hw_last_vs{};
 	GSHWDrawConfig::PSConstantBuffer m_hw_last_ps{};
 	GSHWDrawConfig::PSSelector m_hw_last_pssel{};
+
+	// Skip re-pushing/binding the tfx source when a run of draws reuses them
+	bool m_hw_tex_valid = false;
+	const GSTextureDK* m_hw_last_tex = nullptr;
+	const GSTextureDK* m_hw_last_pal = nullptr;
+	u32 m_hw_last_sampler = 0;
 
 	// Post-processing fragment shaders
 	DkShader m_interlace_fsh{};

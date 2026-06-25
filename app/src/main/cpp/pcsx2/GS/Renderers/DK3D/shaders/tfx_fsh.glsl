@@ -89,6 +89,12 @@ layout(std140, binding = 0) uniform cbSel
 	#define FOLD_RT_READ
 	#define FOLD_SPECIAL
 	#define FOLD_SIMPLE_SAMPLE
+#elif defined(TFX_VARIANT_PALETTE)
+	// Same as FAST but keeps the palette lookup dynamic
+	#define FOLD_RT_READ
+	#define FOLD_SPECIAL
+	#define FOLD_SIMPLE_SAMPLE
+	#define FOLD_KEEP_PALETTE
 #elif defined(TFX_VARIANT_OPAQUE)
 	#define FOLD_RT_READ
 	#define FOLD_SPECIAL
@@ -134,7 +140,11 @@ layout(std140, binding = 0) uniform cbSel
 
 // Sampling complexity (palette, bilinear 4-tap, AEM, region/adjust, LOD, fancy wrap)
 #ifdef FOLD_SIMPLE_SAMPLE
-	const uint sel_pal_fmt = 0u;
+	#ifdef FOLD_KEEP_PALETTE
+		#define sel_pal_fmt ub_sel_pal_fmt
+	#else
+		const uint sel_pal_fmt = 0u;
+	#endif
 	const uint sel_ltf = 0u;
 	const uint sel_aem_fmt = 0u;
 	const uint sel_region_rect = 0u;

@@ -498,6 +498,10 @@ u32 GSDeviceDK::PushImage(const GSTextureDK* tex)
 {
 	const u32 slot = m_next_image_slot;
 	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
+	// On wrap a previously cached tex/pal slot is about to be overwritten before it could be reused
+	// Drop the bind cache to force a fresh push next draw.
+	if (m_next_image_slot == 0)
+		m_hw_tex_valid = false;
 	const DkImageDescriptor descriptor = tex->GetDescriptor();
 	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + slot * sizeof(DkImageDescriptor), &descriptor,
 		sizeof(descriptor));
@@ -747,6 +751,7 @@ bool GSDeviceDK::LoadShaders()
 	m_tfx_shaders_ok = load_one(m_tfx_vsh, "romfs:/shaders/tfx_vsh.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantUber], "romfs:/shaders/tfx_fsh.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantOpaque], "romfs:/shaders/tfx_fsh_opaque.dksh") &&
+					   load_one(m_tfx_fsh[TfxVariantPalette], "romfs:/shaders/tfx_fsh_palette.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantFast], "romfs:/shaders/tfx_fsh_fast.dksh");
 
 	if (m_tfx_shaders_ok)
@@ -1473,12 +1478,13 @@ u32 GSDeviceDK::SelectTfxVariant(const GSHWDrawConfig& config)
 		ps.tales_of_abyss_hle || ps.shuffle || ps.dither)
 		return TfxVariantUber;
 
-	// single point tap, no palette/AEM/region/LOD/fancy wrap.
-	const bool simple_sample = (ps.pal_fmt == 0 && ps.ltf == 0 && ps.aem_fmt == 0 &&
+	const bool simple_sample = (ps.ltf == 0 && ps.aem_fmt == 0 &&
 		ps.region_rect == 0 && ps.adjs == 0 && ps.adjt == 0 && ps.automatic_lod == 0 &&
 		ps.manual_lod == 0 && ps.wms < 2 && ps.wmt < 2);
 
-	return simple_sample ? TfxVariantFast : TfxVariantOpaque;
+	if (simple_sample)
+		return (ps.pal_fmt == 0) ? TfxVariantFast : TfxVariantPalette;
+	return TfxVariantOpaque;
 #else
 	return TfxVariantUber;
 #endif
@@ -1683,10 +1689,19 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 
 	const u32 sampler_slot = (config.sampler.biln ? SAMPLER_LINEAR : SAMPLER_POINT) |
 							 (config.sampler.tau ? 2u : 0u) | (config.sampler.tav ? 1u : 0u);
-	DkResHandle handles[2];
-	handles[0] = tex ? dkMakeTextureHandle(PushImage(tex), sampler_slot) : dkMakeTextureHandle(0, SAMPLER_POINT);
-	handles[1] = pal ? dkMakeTextureHandle(PushImage(pal), SAMPLER_POINT) : dkMakeTextureHandle(0, SAMPLER_POINT);
-	dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 2, handles, 2);
+	// Reuse the prior draw's tex/pal binding when nothing changed
+	if (!m_hw_tex_valid || m_hw_last_tex != tex || m_hw_last_pal != pal || m_hw_last_sampler != sampler_slot)
+	{
+		DkResHandle handles[2];
+		handles[0] = tex ? dkMakeTextureHandle(PushImage(tex), sampler_slot) : dkMakeTextureHandle(0, SAMPLER_POINT);
+		handles[1] = pal ? dkMakeTextureHandle(PushImage(pal), SAMPLER_POINT) : dkMakeTextureHandle(0, SAMPLER_POINT);
+		dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 2, handles, 2);
+
+		m_hw_last_tex = tex;
+		m_hw_last_pal = pal;
+		m_hw_last_sampler = sampler_slot;
+		m_hw_tex_valid = true;
+	}
 
 	// Bind RT as RtSampler when shader-side blending/fbmask/DATE needs Cd/Ad.
 	const bool needs_rt_tex = config.require_one_barrier || config.require_full_barrier;
