@@ -35,9 +35,10 @@ namespace
 	// Source base alignment for buffer to image copies
 	constexpr u32 STAGING_ALIGNMENT = 256;
 
-	// Each frame owns a 16-byte start and end timestamp for le debugging
+	// Each frame owns a start and end counter report
 	constexpr u32 TIMESTAMP_REPORT_SIZE = 16;
 	constexpr u32 TIMESTAMP_FRAME_STRIDE = 2 * TIMESTAMP_REPORT_SIZE;
+	constexpr u32 TIMESTAMP_VALUE_OFFSET = 8;
 
 	struct ConvertVertex
 	{
@@ -394,8 +395,8 @@ void GSDeviceDK::ReadGPUTimestamps(u32 frame_index)
 					 frame_index * TIMESTAMP_FRAME_STRIDE;
 
 	u64 start, end;
-	std::memcpy(&start, base, sizeof(start));
-	std::memcpy(&end, base + TIMESTAMP_REPORT_SIZE, sizeof(end));
+	std::memcpy(&start, base + TIMESTAMP_VALUE_OFFSET, sizeof(start));
+	std::memcpy(&end, base + TIMESTAMP_REPORT_SIZE + TIMESTAMP_VALUE_OFFSET, sizeof(end));
 	if (end > start)
 		m_accumulated_gpu_time += static_cast<float>(static_cast<double>(dkTimestampToNs(end - start)) / 1000000.0);
 }
