@@ -15,6 +15,16 @@ namespace PerformanceMetrics
 		DISPFBBlit
 	};
 
+	enum class Limiter
+	{
+		Unknown,
+		EE,
+		VU,
+		GSThread,
+		GPU,
+		FrameLimited
+	};
+
 	static constexpr u32 NUM_FRAME_TIME_SAMPLES = 150;
 	using FrameTimeHistory = std::array<float, NUM_FRAME_TIME_SAMPLES>;
 
@@ -69,15 +79,25 @@ namespace PerformanceMetrics
 	/// Same as above but for GS
 	void AccumulateGSAcquireWait(u64 ns);
 	void AccumulateGSGpuWait(u64 ns);
+	/// Time the GS thread spent idle waiting for the EE thread
+	void AccumulateGSWorkWait(u64 ns);
 
 	/// Average milliseconds per frame the EE thread spent blocked on VU / GS threads.
 	float GetEEStallVUTime();
 	float GetEEStallGSTime();
 	float GetEEStallVsyncTime();
 
-	/// Average milliseconds per frame the GS thread spent blocked on image acquisition / GPU fence.
+	/// Average milliseconds per frame the GS thread spent blocked on image acquisition / GPU fence / idle.
 	float GetGSAcquireWaitTime();
 	float GetGSGpuWaitTime();
+	float GetGSWorkWaitTime();
+
+	/// The synthesized per-frame limiter verdict and the busy fraction of each pipeline stage.
+	Limiter GetLimiter();
+	const char* GetLimiterName();
+	float GetEEBusyPercent();
+	float GetGSBusyPercent();
+	float GetGPUBusyPercent();
 
 	const FrameTimeHistory& GetFrameTimeHistory();
 	u32 GetFrameTimeHistoryPos();

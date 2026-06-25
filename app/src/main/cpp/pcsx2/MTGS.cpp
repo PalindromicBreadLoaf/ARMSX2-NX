@@ -335,7 +335,10 @@ void MTGS::MainLoop()
 		else
 		{
 			mtvu_lock.unlock();
+			const Common::Timer::Value idle_start = Common::Timer::GetCurrentValue();
 			s_sem_event.WaitForWork();
+			PerformanceMetrics::AccumulateGSWorkWait(
+				static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - idle_start)));
 			mtvu_lock.lock();
 		}
 

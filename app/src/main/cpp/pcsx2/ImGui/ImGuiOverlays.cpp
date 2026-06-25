@@ -294,19 +294,19 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 		if (GSConfig.OsdShowStallMeters)
 		{
 			text.clear();
-			text.append_format("EE wait VU: {:.1f} ms", PerformanceMetrics::GetEEStallVUTime());
+			text.append_format("Limiter: {}", PerformanceMetrics::GetLimiterName());
+			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 140, 255));
+			text.clear();
+			text.append_format("EE busy {:.0f}%  GS busy {:.0f}%  GPU {:.0f}%", PerformanceMetrics::GetEEBusyPercent(),
+				PerformanceMetrics::GetGSBusyPercent(), PerformanceMetrics::GetGPUBusyPercent());
 			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
 			text.clear();
-			text.append_format("EE wait GS: {:.1f} ms", PerformanceMetrics::GetEEStallGSTime());
+			text.append_format("EE wait VU/GS/vs: {:.1f}/{:.1f}/{:.1f} ms", PerformanceMetrics::GetEEStallVUTime(),
+				PerformanceMetrics::GetEEStallGSTime(), PerformanceMetrics::GetEEStallVsyncTime());
 			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
 			text.clear();
-			text.append_format("EE wait vsync: {:.1f} ms", PerformanceMetrics::GetEEStallVsyncTime());
-			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
-			text.clear();
-			text.append_format("GS acq wait: {:.1f} ms", PerformanceMetrics::GetGSAcquireWaitTime());
-			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
-			text.clear();
-			text.append_format("GS gpu wait: {:.1f} ms", PerformanceMetrics::GetGSGpuWaitTime());
+			text.append_format("GS wait work/acq/gpu: {:.1f}/{:.1f}/{:.1f} ms", PerformanceMetrics::GetGSWorkWaitTime(),
+				PerformanceMetrics::GetGSAcquireWaitTime(), PerformanceMetrics::GetGSGpuWaitTime());
 			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
 		}
 

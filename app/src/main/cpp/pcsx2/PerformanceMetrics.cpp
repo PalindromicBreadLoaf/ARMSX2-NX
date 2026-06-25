@@ -65,11 +65,19 @@ static std::atomic<u64> s_ee_stall_gs_ns_accumulator{0};
 static std::atomic<u64> s_ee_stall_vsync_ns_accumulator{0};
 static std::atomic<u64> s_gs_acquire_wait_ns_accumulator{0};
 static std::atomic<u64> s_gs_gpu_wait_ns_accumulator{0};
+static std::atomic<u64> s_gs_work_wait_ns_accumulator{0};
 static float s_ee_stall_vu_time = 0.0f;
 static float s_ee_stall_gs_time = 0.0f;
 static float s_ee_stall_vsync_time = 0.0f;
 static float s_gs_acquire_wait_time = 0.0f;
 static float s_gs_gpu_wait_time = 0.0f;
+static float s_gs_work_wait_time = 0.0f;
+
+// Synthesized limiter verdict and per-stage busy fractions
+static PerformanceMetrics::Limiter s_limiter = PerformanceMetrics::Limiter::Unknown;
+static float s_ee_busy_pct = 0.0f;
+static float s_gs_busy_pct = 0.0f;
+static float s_gpu_busy_pct = 0.0f;
 
 struct GSSWThreadStats
 {
@@ -108,6 +116,11 @@ void PerformanceMetrics::Clear()
 	s_average_gpu_time = 0.0f;
 	s_gpu_usage = 0.0f;
 
+	s_limiter = Limiter::Unknown;
+	s_ee_busy_pct = 0.0f;
+	s_gs_busy_pct = 0.0f;
+	s_gpu_busy_pct = 0.0f;
+
 	s_frame_number = 0;
 
 	s_frame_time_history.fill(0.0f);
@@ -132,11 +145,13 @@ void PerformanceMetrics::Reset()
 	s_ee_stall_vsync_ns_accumulator.store(0, std::memory_order_relaxed);
 	s_gs_acquire_wait_ns_accumulator.store(0, std::memory_order_relaxed);
 	s_gs_gpu_wait_ns_accumulator.store(0, std::memory_order_relaxed);
+	s_gs_work_wait_ns_accumulator.store(0, std::memory_order_relaxed);
 	s_ee_stall_vu_time = 0.0f;
 	s_ee_stall_gs_time = 0.0f;
 	s_ee_stall_vsync_time = 0.0f;
 	s_gs_acquire_wait_time = 0.0f;
 	s_gs_gpu_wait_time = 0.0f;
+	s_gs_work_wait_time = 0.0f;
 
 	s_last_update_time.Reset();
 	s_last_frame_time.Reset();
@@ -252,6 +267,39 @@ void PerformanceMetrics::Update(bool gs_register_write, bool fb_blit, bool is_sk
 	s_ee_stall_vsync_time = static_cast<float>(s_ee_stall_vsync_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
 	s_gs_acquire_wait_time = static_cast<float>(s_gs_acquire_wait_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
 	s_gs_gpu_wait_time = static_cast<float>(s_gs_gpu_wait_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
+	s_gs_work_wait_time = static_cast<float>(s_gs_work_wait_ns_accumulator.exchange(0, std::memory_order_relaxed)) / 1.0e6f / stall_frames;
+
+	// In principle the EE -> (VU) -> GS-thread -> GPU pipeline the bottleneck is the stage nobody is waiting on
+	// At least I think...
+	const float ft = s_average_frame_time;
+	const float framerate = VMManager::GetFrameRate();
+	if (ft > 0.05f && framerate > 0.0f)
+	{
+		const float ee_block = s_ee_stall_vu_time + s_ee_stall_gs_time + s_ee_stall_vsync_time;
+		const float gs_block = s_gs_work_wait_time + s_gs_acquire_wait_time + s_gs_gpu_wait_time;
+		s_ee_busy_pct = 100.0f * std::max(0.0f, ft - ee_block) / ft;
+		s_gs_busy_pct = 100.0f * std::max(0.0f, ft - gs_block) / ft;
+		s_gpu_busy_pct = std::min(100.0f, 100.0f * s_average_gpu_time / ft);
+
+		const float ee_downstream = s_ee_stall_gs_time + s_ee_stall_vsync_time;
+		const float gs_gpu_block = s_gs_gpu_wait_time + s_gs_acquire_wait_time;
+		const float gs_cpu_busy = std::max(0.0f, ft - gs_block);
+		const float speed = (s_fps / framerate) * 100.0f;
+
+		if (speed >= 95.0f)
+			s_limiter = Limiter::FrameLimited;
+		else if ((ee_downstream + s_ee_stall_vu_time) < 0.2f * ft)
+			s_limiter = Limiter::EE;
+		else if (ee_downstream >= s_ee_stall_vu_time)
+			s_limiter = (gs_gpu_block >= gs_cpu_busy) ? Limiter::GPU : Limiter::GSThread;
+		else
+			s_limiter = Limiter::VU;
+	}
+	else
+	{
+		s_limiter = Limiter::Unknown;
+		s_ee_busy_pct = s_gs_busy_pct = s_gpu_busy_pct = 0.0f;
+	}
 
 	s_frames_since_last_update = 0;
 	s_unskipped_frames_since_last_update = 0;
@@ -309,6 +357,11 @@ void PerformanceMetrics::AccumulateGSGpuWait(u64 ns)
 	s_gs_gpu_wait_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
 }
 
+void PerformanceMetrics::AccumulateGSWorkWait(u64 ns)
+{
+	s_gs_work_wait_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
 float PerformanceMetrics::GetEEStallVUTime()
 {
 	return s_ee_stall_vu_time;
@@ -332,6 +385,44 @@ float PerformanceMetrics::GetGSAcquireWaitTime()
 float PerformanceMetrics::GetGSGpuWaitTime()
 {
 	return s_gs_gpu_wait_time;
+}
+
+float PerformanceMetrics::GetGSWorkWaitTime()
+{
+	return s_gs_work_wait_time;
+}
+
+PerformanceMetrics::Limiter PerformanceMetrics::GetLimiter()
+{
+	return s_limiter;
+}
+
+const char* PerformanceMetrics::GetLimiterName()
+{
+	switch (s_limiter)
+	{
+		case Limiter::EE: return "EE";
+		case Limiter::VU: return "VU";
+		case Limiter::GSThread: return "GS thread";
+		case Limiter::GPU: return "GPU";
+		case Limiter::FrameLimited: return "Full speed";
+		default: return "?";
+	}
+}
+
+float PerformanceMetrics::GetEEBusyPercent()
+{
+	return s_ee_busy_pct;
+}
+
+float PerformanceMetrics::GetGSBusyPercent()
+{
+	return s_gs_busy_pct;
+}
+
+float PerformanceMetrics::GetGPUBusyPercent()
+{
+	return s_gpu_busy_pct;
 }
 
 void PerformanceMetrics::SetGSSWThreadCount(u32 count)

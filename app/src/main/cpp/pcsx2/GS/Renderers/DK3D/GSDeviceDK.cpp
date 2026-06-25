@@ -1222,7 +1222,10 @@ void GSDeviceDK::FlushReadback()
 	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
 	dkQueueSignalFence(m_queue, &m_readback_fence, false);
 	dkQueueFlush(m_queue);
+	const Common::Timer::Value wait_start = Common::Timer::GetCurrentValue();
 	dkFenceWait(&m_readback_fence, -1);
+	PerformanceMetrics::AccumulateGSGpuWait(
+		static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - wait_start)));
 }
 
 bool GSDeviceDK::UploadToImage(GSTextureDK* dst_tex, const DkImageView& view, const DkImageRect& rect, const void* data,
