@@ -137,6 +137,8 @@ private:
 		m_hw_invariants_bound = false;
 		m_hw_uniforms_valid = false;
 	}
+	// Issue a deko3d barrier and stop image generation if the image cache was marked
+	void IssueBarrier(DkBarrier mode, u32 invalidate_flags);
 	// GPU-side timestamp report into the per-frame timing slot
 	void WriteGPUTimestamp(u32 frame_index, u32 which);
 	// Harvest the start/end timestamps of a finished frame into m_accumulated_gpu_time.
@@ -260,6 +262,9 @@ private:
 
 	DkImageView m_swapchain_view{};
 	bool m_frame_active = false;
+
+	// Bumped by every image-invalidating barrier.
+	u64 m_gpu_write_gen = 1;
 
 	DkFence m_readback_fence{};
 	bool m_readback_pending = false;

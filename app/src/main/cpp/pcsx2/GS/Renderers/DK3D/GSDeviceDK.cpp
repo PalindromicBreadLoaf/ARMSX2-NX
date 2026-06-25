@@ -370,6 +370,13 @@ bool GSDeviceDK::SetupSamplers()
 	return true;
 }
 
+void GSDeviceDK::IssueBarrier(DkBarrier mode, u32 invalidate_flags)
+{
+	dkCmdBufBarrier(m_cmdbuf, mode, invalidate_flags);
+	if (invalidate_flags & DkInvalidateFlags_Image)
+		m_gpu_write_gen++;
+}
+
 void GSDeviceDK::WriteGPUTimestamp(u32 frame_index, u32 which)
 {
 	if (!m_timestamp_memblock)
@@ -514,6 +521,8 @@ void GSDeviceDK::CommitClear(GSTextureDK* tex)
 	GSVector4::store<false>(cc, tex->GetUNormClearColor());
 	dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, cc[0], cc[1], cc[2], cc[3]);
 	tex->SetState(GSTexture::State::Dirty);
+	// Ssampling tex now needs a flushing barrier.
+	tex->SetWriteGen(m_gpu_write_gen);
 }
 
 void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex,
@@ -533,10 +542,13 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 
 	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
 
-	// Resolve pending clears and flush prior target writes before sampling.
+	// Flush only when sTex was written this generation
 	CommitClear(sTex);
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
-	g_perfmon.Put(GSPerfMon::Barriers, 1);
+	if (sTex->GetWriteGen() == m_gpu_write_gen)
+	{
+		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+	}
 
 	const bool is_present = (dTex == nullptr);
 	const GSVector2i ds = is_present ? GSVector2i(m_present_width, m_present_height) : dTex->GetSize();
@@ -654,7 +666,10 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 
 	if (!is_present)
+	{
 		dTex->SetState(GSTexture::State::Dirty);
+		dTex->SetWriteGen(m_gpu_write_gen);
+	}
 }
 
 bool GSDeviceDK::LoadShaders()
@@ -1173,7 +1188,7 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 	CommitClear(src);
 
 	// Flush and invalidate caches
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
+	IssueBarrier(DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	DkImageView src_view;
@@ -1237,7 +1252,7 @@ bool GSDeviceDK::UploadToImage(const DkImageView& view, const DkImageRect& rect,
 	const DkCopyBuf copy_src = {src_addr, 0, 0};
 	dkCmdBufCopyBufferToImage(m_cmdbuf, &copy_src, &view, &rect, 0);
 	// Make the upload visible to any later sample/copy/blit in this frame
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 
 	g_perfmon.Put(GSPerfMon::TextureUploads, 1);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
@@ -1271,7 +1286,7 @@ void GSDeviceDK::GenerateImageMipmaps(DkImage* image, int width, int height, int
 
 		dkCmdBufBlitImage(m_cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect, DkBlitFlag_FilterLinear, 0);
 
-		dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 		g_perfmon.Put(GSPerfMon::Barriers, 1);
 	}
 }
@@ -1303,6 +1318,7 @@ void GSDeviceDK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r,
 	dkCmdBufCopyImage(m_cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect, 0);
 
 	dst->SetState(GSTexture::State::Dirty);
+	dst->SetWriteGen(m_gpu_write_gen);
 #endif
 }
 
@@ -1483,11 +1499,16 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 
 	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
 
-	// Resolve any pending clears on the source texture and flush
+	// Resolve any pending clears on the source texture and flush prior target writes
+	// only when this draw samples a texture written in the still-open generation
 	if (tex)
 		CommitClear(tex);
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
-	g_perfmon.Put(GSPerfMon::Barriers, 1);
+	if ((tex && tex->GetWriteGen() == m_gpu_write_gen) ||
+		(pal && pal->GetWriteGen() == m_gpu_write_gen))
+	{
+		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+	}
 
 	// Destination-alpha setup
 	GSTextureDK* date_image = nullptr;
@@ -1759,6 +1780,11 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	if (config.blend_multi_pass.enable || config.alpha_second_pass.enable)
 		m_hw_uniforms_valid = false;
 
+	// Mark the targets written this generation
+	rt->SetWriteGen(m_gpu_write_gen);
+	if (has_ds)
+		ds->SetWriteGen(m_gpu_write_gen);
+
 	// The PrimID tracking image was only needed here
 	if (date_image)
 		Recycle(date_image);
@@ -1778,7 +1804,7 @@ void GSDeviceDK::SetupDATE(GSTextureDK* rt, GSTextureDK* ds, SetDATM datm, const
 
 	// Make the RT's prior writes visible
 	CommitClear(rt);
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	// Bind the depth-stencil as the only target (no colour)
@@ -1875,7 +1901,7 @@ void GSDeviceDK::SetupDATE(GSTextureDK* rt, GSTextureDK* ds, SetDATM datm, const
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 
 	// Order the stencil writes before the main draw's test.
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 }
 
@@ -2033,7 +2059,7 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 
 	// Order the prepass writes before the main draw samples the image.
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	// The main draw (and its alpha second pass) run as DATE 3.
@@ -2054,7 +2080,7 @@ void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive,
 			for (u32 n = 0, p = 0; n < draw_list_size; n++)
 			{
 				const u32 count = static_cast<u32>((*config.drawlist)[n]) * indices_per_prim;
-				dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+				IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 				dkCmdBufDrawIndexed(m_cmdbuf, primitive, count, 1, p, 0, 0);
 				p += count;
 			}
@@ -2068,7 +2094,7 @@ void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive,
 		u32 prims = 0;
 		for (u32 p = 0; p < config.nindices; p += indices_per_prim)
 		{
-			dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+			IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 			dkCmdBufDrawIndexed(m_cmdbuf, primitive, indices_per_prim, 1, p, 0, 0);
 			prims++;
 		}
@@ -2080,7 +2106,7 @@ void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive,
 	// A single barrier before the whole draw suffices.
 	if (one_barrier)
 	{
-		dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 		g_perfmon.Put(GSPerfMon::Barriers, 1);
 	}
 
@@ -2255,7 +2281,7 @@ bool GSDeviceDK::DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only,
 
 	// Make the source's prior writes visible
 	CommitClear(sTexDK);
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+	IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
@@ -2298,8 +2324,11 @@ bool GSDeviceDK::DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only,
 	dkCmdBufDispatchCompute(m_cmdbuf, dispatchX, dispatchY, 1);
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 
+	// Stamp before the flushing barrier below
+	dTexDK->SetWriteGen(m_gpu_write_gen);
+
 	// Write to the present sample
-	dkCmdBufBarrier(m_cmdbuf, DkBarrier_Primitives, DkInvalidateFlags_Image);
+	IssueBarrier(DkBarrier_Primitives, DkInvalidateFlags_Image);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
 	dTexDK->SetState(GSTexture::State::Dirty);

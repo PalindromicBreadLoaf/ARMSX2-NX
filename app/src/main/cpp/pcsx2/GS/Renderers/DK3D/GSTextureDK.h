@@ -37,6 +37,10 @@ public:
 	__fi bool IsDepth() const { return m_is_depth; }
 	void GetImageView(DkImageView* view) const;
 
+	// Barrier generation at which this texture was last written as a render/compute target
+	__fi u64 GetWriteGen() const { return m_write_gen; }
+	__fi void SetWriteGen(u64 gen) { m_write_gen = gen; }
+
 	static DkImageFormat LookupFormat(Format format, bool& is_depth);
 
 private:
@@ -52,6 +56,7 @@ private:
 	DkImageDescriptor m_descriptor{};
 	DkImageFormat m_dk_format = DkImageFormat_None;
 	bool m_is_depth = false;
+	u64 m_write_gen = 0;
 
 	std::unique_ptr<u8[]> m_map_buffer;
 	GSVector4i m_map_area = GSVector4i::zero();
