@@ -2095,6 +2095,8 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 
 void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier)
 {
+	// This is in-theory safe
+	// I really hope it works and doesn't break things
 	if (full_barrier)
 	{
 		// drawlist groups non-overlapping sprite runs
@@ -2105,7 +2107,7 @@ void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive,
 			for (u32 n = 0, p = 0; n < draw_list_size; n++)
 			{
 				const u32 count = static_cast<u32>((*config.drawlist)[n]) * indices_per_prim;
-				IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+				IssueBarrier(DkBarrier_Tiles, DkInvalidateFlags_Image);
 				dkCmdBufDrawIndexed(m_cmdbuf, primitive, count, 1, p, 0, 0);
 				p += count;
 			}
@@ -2119,7 +2121,7 @@ void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive,
 		u32 prims = 0;
 		for (u32 p = 0; p < config.nindices; p += indices_per_prim)
 		{
-			IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+			IssueBarrier(DkBarrier_Tiles, DkInvalidateFlags_Image);
 			dkCmdBufDrawIndexed(m_cmdbuf, primitive, indices_per_prim, 1, p, 0, 0);
 			prims++;
 		}
@@ -2131,7 +2133,7 @@ void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive,
 	// A single barrier before the whole draw suffices.
 	if (one_barrier)
 	{
-		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+		IssueBarrier(DkBarrier_Tiles, DkInvalidateFlags_Image);
 		g_perfmon.Put(GSPerfMon::Barriers, 1);
 	}
 
