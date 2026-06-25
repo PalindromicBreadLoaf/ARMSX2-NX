@@ -69,6 +69,36 @@ u64 Threading::GetThreadCpuTime()
 	return get_thread_time();
 }
 
+// Per-thread CPU time
+static u64 get_thread_cpu_time_us(void* native_handle)
+{
+	if (!native_handle)
+		return 0;
+
+	Handle handle;
+	if ((void*)pthread_self() == native_handle)
+	{
+		handle = CUR_THREAD_HANDLE;
+	}
+	else
+	{
+		std::lock_guard<std::mutex> lock(s_thread_handle_map_mutex);
+		const auto it = s_thread_handle_map.find(native_handle);
+		if (it == s_thread_handle_map.end())
+			return 0;
+		handle = it->second;
+	}
+
+	u64 ticks = 0;
+	// InfoType_ThreadTickCount is 13.0.0+
+	// I don't even know if this runs sub-13.0.0, but it's a one line thing.
+	if (R_FAILED(svcGetInfo(&ticks, InfoType_ThreadTickCount, handle, TickCountInfo_Total)) &&
+		R_FAILED(svcGetInfo(&ticks, InfoType_ThreadTickCountDeprecated, handle, TickCountInfo_Total)))
+		return 0;
+
+	return armTicksToNs(ticks) / 1000;
+}
+
 Threading::ThreadHandle::ThreadHandle() = default;
 
 Threading::ThreadHandle::ThreadHandle(const ThreadHandle& handle)
@@ -88,6 +118,11 @@ Threading::ThreadHandle Threading::ThreadHandle::GetForCallingThread()
 {
 	ThreadHandle ret;
 	ret.m_native_handle = (void*)pthread_self();
+	// Register the calling thread so GetCPUTime() can later resolve its handle
+	{
+		std::lock_guard<std::mutex> lock(s_thread_handle_map_mutex);
+		s_thread_handle_map[ret.m_native_handle] = threadGetCurHandle();
+	}
 	return ret;
 }
 
@@ -106,7 +141,7 @@ Threading::ThreadHandle& Threading::ThreadHandle::operator=(const ThreadHandle& 
 
 u64 Threading::ThreadHandle::GetCPUTime() const
 {
-	return m_native_handle ? get_thread_time((uptr)m_native_handle) : 0;
+	return get_thread_cpu_time_us(m_native_handle);
 }
 
 bool Threading::ThreadHandle::SetAffinity(u64 processor_mask) const
