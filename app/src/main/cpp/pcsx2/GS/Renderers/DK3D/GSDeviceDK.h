@@ -52,10 +52,10 @@ public:
 	// Submit the pending readback copy and wait only on it
 	void FlushReadback();
 	// Record a buffer to image copy into the current frame command buffer
-	bool UploadToImage(const DkImageView& view, const DkImageRect& rect, const void* data, u32 src_pitch,
-		u32 upload_pitch, u32 num_rows);
+	bool UploadToImage(GSTextureDK* dst, const DkImageView& view, const DkImageRect& rect, const void* data,
+		u32 src_pitch, u32 upload_pitch, u32 num_rows);
 	// Record a mip-chain downsample into the current frame command buffer
-	void GenerateImageMipmaps(DkImage* image, int width, int height, int levels);
+	void GenerateImageMipmaps(GSTextureDK* tex, DkImage* image, int width, int height, int levels);
 
 	// Pool equivalent DkMemBlocks instead of redoing them every texture
 	DkMemBlock AcquireMemBlock(u32 size, u32 flags);

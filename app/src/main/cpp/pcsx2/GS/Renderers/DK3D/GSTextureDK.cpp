@@ -162,7 +162,7 @@ bool GSTextureDK::Update(const GSVector4i& r, const void* data, int pitch, int l
 		static_cast<u32>(height), 1};
 
 	// Stage into the device's per-frame ring and record the copy into the frame command buffer
-	if (!m_device_dk->UploadToImage(view, copy_rect, data, static_cast<u32>(pitch), upload_pitch, num_rows))
+	if (!m_device_dk->UploadToImage(this, view, copy_rect, data, static_cast<u32>(pitch), upload_pitch, num_rows))
 		return false;
 
 	m_state = State::Dirty;
@@ -204,7 +204,7 @@ void GSTextureDK::GenerateMipmap()
 		return;
 
 	// Record the mip-chain downsample into the device's frame command buffer
-	m_device_dk->GenerateImageMipmaps(&m_image, m_size.x, m_size.y, m_mipmap_levels);
+	m_device_dk->GenerateImageMipmaps(this, &m_image, m_size.x, m_size.y, m_mipmap_levels);
 }
 
 #ifdef PCSX2_DEVBUILD

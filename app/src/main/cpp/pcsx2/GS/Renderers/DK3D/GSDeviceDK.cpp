@@ -1220,8 +1220,8 @@ void GSDeviceDK::FlushReadback()
 	dkFenceWait(&m_readback_fence, -1);
 }
 
-bool GSDeviceDK::UploadToImage(const DkImageView& view, const DkImageRect& rect, const void* data, u32 src_pitch,
-	u32 upload_pitch, u32 num_rows)
+bool GSDeviceDK::UploadToImage(GSTextureDK* dst_tex, const DkImageView& view, const DkImageRect& rect, const void* data,
+	u32 src_pitch, u32 upload_pitch, u32 num_rows)
 {
 	const u32 upload_size = num_rows * upload_pitch;
 	if (upload_size == 0)
@@ -1251,21 +1251,27 @@ bool GSDeviceDK::UploadToImage(const DkImageView& view, const DkImageRect& rect,
 
 	const DkCopyBuf copy_src = {src_addr, 0, 0};
 	dkCmdBufCopyBufferToImage(m_cmdbuf, &copy_src, &view, &rect, 0);
-	// Make the upload visible to any later sample/copy/blit in this frame
-	IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+	// Don't drain the pipeline per upload
+	if (dst_tex)
+		dst_tex->SetWriteGen(m_gpu_write_gen);
 
 	g_perfmon.Put(GSPerfMon::TextureUploads, 1);
-	g_perfmon.Put(GSPerfMon::Barriers, 1);
 	return true;
 }
 
-void GSDeviceDK::GenerateImageMipmaps(DkImage* image, int width, int height, int levels)
+void GSDeviceDK::GenerateImageMipmaps(GSTextureDK* tex, DkImage* image, int width, int height, int levels)
 {
 	if (levels <= 1)
 		return;
 
 	BeginFrameIfNeeded();
 	InvalidateHWStateCache();
+
+	if (tex && tex->GetWriteGen() == m_gpu_write_gen)
+	{
+		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+	}
 
 	for (int level = 1; level < levels; level++)
 	{
