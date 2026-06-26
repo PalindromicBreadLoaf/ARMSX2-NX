@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <cstdio>
 #include <memory>
 #include <string>
 #include <sys/stat.h>
@@ -34,7 +33,8 @@ namespace
 {
 	constexpr const char* ARMSX2_ROOT = "sdmc:/switch/armsx2";
 	constexpr const char* GAMES_DIR = "sdmc:/switch/armsx2/games";
-	constexpr const char* LOG_PATH = "sdmc:/switch/armsx2/armsx2.log";
+	constexpr const char* LOGS_DIR = "sdmc:/switch/armsx2/logs";
+	constexpr const char* LOG_PATH = "sdmc:/switch/armsx2/logs/emulog.txt";
 
 	constexpr u64 INPUT_POLL_NS = 16'000'000ULL;
 	// CPU-thread idle tick while no VM is running
@@ -159,7 +159,7 @@ namespace
 			s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
 			s_settings_interface->SetBoolValue("InputSources", "SDL", false);
 			s_settings_interface->SetBoolValue("Logging", "EnableSystemConsole", true);
-			s_settings_interface->SetBoolValue("Logging", "EnableFileLogging", false);
+			s_settings_interface->SetBoolValue("Logging", "EnableFileLogging", true);
 			s_settings_interface->SetBoolValue("Logging", "EnableVerbose", false);
 			s_settings_interface->Save();
 		}
@@ -198,11 +198,11 @@ int main(int argc, char** argv)
 	mkdir("sdmc:/switch", 0777);
 	mkdir(ARMSX2_ROOT, 0777);
 	mkdir(GAMES_DIR, 0777);
+	mkdir(LOGS_DIR, 0777);
 
 	Log::SetTimestampsEnabled(true);
 	Log::SetConsoleOutputLevel(LOGLEVEL_INFO);
-	if (!Log::SetFileOutputLevel(LOGLEVEL_WARNING, LOG_PATH))
-		std::fprintf(stderr, "WARNING: could not open SD log file %s\n", LOG_PATH);
+	VMManager::Internal::SetFileLogPath(LOG_PATH);
 
 	INFO_LOG("================ ARMSX2-NX ================");
 	INFO_LOG("Logging to {}", LOG_PATH);
