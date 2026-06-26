@@ -98,6 +98,16 @@ layout(std140, binding = 0) uniform cbSel
 #elif defined(TFX_VARIANT_OPAQUE)
 	#define FOLD_RT_READ
 	#define FOLD_SPECIAL
+#elif defined(TFX_VARIANT_FEEDBACK)
+	// Keeps the RT-read path (sw blend / fbmask / tex-is-fb / DATE) dynamic
+	#define FOLD_SPECIAL
+#elif defined(TFX_VARIANT_FEEDBACK_PALETTE)
+	#define FOLD_SPECIAL
+	#define FOLD_SIMPLE_SAMPLE
+	#define FOLD_KEEP_PALETTE
+#elif defined(TFX_VARIANT_FEEDBACK_FAST)
+	#define FOLD_SPECIAL
+	#define FOLD_SIMPLE_SAMPLE
 #endif
 
 // Render-target reads (software blend, fbmask, tex-is-fb, in-shader DATE)

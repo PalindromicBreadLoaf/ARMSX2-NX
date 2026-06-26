@@ -193,10 +193,13 @@ private:
 	// SelectTfxVariant picks the cheapest one a draw can use.
 	enum TfxVariant : u32
 	{
-		TfxVariantUber = 0,   // full runtime-selected shader
-		TfxVariantOpaque,     // no RT read / channel / depth / shuffle / dither
-		TfxVariantPalette,    // opaque + single-tap palette point sampling
-		TfxVariantFast,       // opaque + single-tap point sampling, no palette
+		TfxVariantUber = 0,     // full runtime-selected shader
+		TfxVariantOpaque,       // no RT read / channel / depth / shuffle / dither
+		TfxVariantPalette,      // opaque with single tap palette point sampling
+		TfxVariantFast,         // opaque with single tap point sampling, no palette
+		TfxVariantFeedback,     // keeps RT read but folds channel/depth/shuffle/dither
+		TfxVariantFeedbackPalette, // feedback with single-tap palette point sampling
+		TfxVariantFeedbackFast, // feedback with single-tap point sampling, no palette
 		NumTfxVariants,
 	};
 	static u32 SelectTfxVariant(const GSHWDrawConfig& config);

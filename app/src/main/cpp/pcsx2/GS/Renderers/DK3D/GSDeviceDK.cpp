@@ -753,7 +753,10 @@ bool GSDeviceDK::LoadShaders()
 					   load_one(m_tfx_fsh[TfxVariantUber], "romfs:/shaders/tfx_fsh.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantOpaque], "romfs:/shaders/tfx_fsh_opaque.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantPalette], "romfs:/shaders/tfx_fsh_palette.dksh") &&
-					   load_one(m_tfx_fsh[TfxVariantFast], "romfs:/shaders/tfx_fsh_fast.dksh");
+					   load_one(m_tfx_fsh[TfxVariantFast], "romfs:/shaders/tfx_fsh_fast.dksh") &&
+					   load_one(m_tfx_fsh[TfxVariantFeedback], "romfs:/shaders/tfx_fsh_feedback.dksh") &&
+					   load_one(m_tfx_fsh[TfxVariantFeedbackPalette], "romfs:/shaders/tfx_fsh_feedback_palette.dksh") &&
+					   load_one(m_tfx_fsh[TfxVariantFeedbackFast], "romfs:/shaders/tfx_fsh_feedback_fast.dksh");
 
 	if (m_tfx_shaders_ok)
 		Console.WriteLn("DK3D: tfx shaders loaded.");
@@ -1464,11 +1467,31 @@ void GSDeviceDK::FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32
 u32 GSDeviceDK::SelectTfxVariant(const GSHWDrawConfig& config)
 {
 #ifdef __SWITCH__
-	if (config.require_one_barrier || config.require_full_barrier ||
-		config.blend_multi_pass.enable || config.alpha_second_pass.enable)
+	const GSHWDrawConfig::PSSelector& ps = config.ps;
+
+	// Heavy per-pixel effects the specialised variants fold out entirely
+	const bool special = (ps.channel != 0 || ps.channel_fb || ps.depth_fmt != 0 ||
+		ps.urban_chaos_hle || ps.tales_of_abyss_hle || ps.shuffle || ps.dither);
+
+	const bool extra_pass = config.blend_multi_pass.enable || config.alpha_second_pass.enable;
+
+	const bool simple_sample = (ps.ltf == 0 && ps.aem_fmt == 0 &&
+		ps.region_rect == 0 && ps.adjs == 0 && ps.adjt == 0 && ps.automatic_lod == 0 &&
+		ps.manual_lod == 0 && ps.wms < 2 && ps.wmt < 2);
+
+	// Feedback draws bind RtSampler, so they can use the feedback variants
+	if (config.require_one_barrier || config.require_full_barrier)
+	{
+		if (special || extra_pass)
+			return TfxVariantUber;
+		if (simple_sample)
+			return (ps.pal_fmt == 0) ? TfxVariantFeedbackFast : TfxVariantFeedbackPalette;
+		return TfxVariantFeedback;
+	}
+
+	if (extra_pass)
 		return TfxVariantUber;
 
-	const GSHWDrawConfig::PSSelector& ps = config.ps;
 	if (ps.IsFeedbackLoop())
 		return TfxVariantUber;
 
@@ -1477,14 +1500,8 @@ u32 GSDeviceDK::SelectTfxVariant(const GSHWDrawConfig& config)
 		ps.tex_is_fb || ps.fbmask || ps.date != 0)
 		return TfxVariantUber;
 
-	// channel fetch, depth reinterpret, shuffle, dither.
-	if (ps.channel != 0 || ps.channel_fb || ps.depth_fmt != 0 || ps.urban_chaos_hle ||
-		ps.tales_of_abyss_hle || ps.shuffle || ps.dither)
+	if (special)
 		return TfxVariantUber;
-
-	const bool simple_sample = (ps.ltf == 0 && ps.aem_fmt == 0 &&
-		ps.region_rect == 0 && ps.adjs == 0 && ps.adjt == 0 && ps.automatic_lod == 0 &&
-		ps.manual_lod == 0 && ps.wms < 2 && ps.wmt < 2);
 
 	if (simple_sample)
 		return (ps.pal_fmt == 0) ? TfxVariantFast : TfxVariantPalette;
@@ -2095,8 +2112,6 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 
 void GSDeviceDK::SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier)
 {
-	// This is in-theory safe
-	// I really hope it works and doesn't break things
 	if (full_barrier)
 	{
 		// drawlist groups non-overlapping sprite runs
