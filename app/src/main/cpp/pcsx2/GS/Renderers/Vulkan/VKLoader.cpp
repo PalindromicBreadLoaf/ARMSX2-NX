@@ -34,6 +34,10 @@ extern "C" {
 #undef VULKAN_MODULE_ENTRY_POINT
 }
 
+#ifdef __SWITCH__
+extern "C" PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
+#endif
+
 void Vulkan::ResetVulkanLibraryFunctionPointers()
 {
 #define VULKAN_MODULE_ENTRY_POINT(name, required) name = nullptr;
@@ -49,11 +53,42 @@ static DynamicLibrary s_vulkan_library;
 
 bool Vulkan::IsVulkanLibraryLoaded()
 {
+#ifdef __SWITCH__
+	return vkGetInstanceProcAddr != nullptr;
+#else
 	return s_vulkan_library.IsOpen();
+#endif
 }
 
 bool Vulkan::LoadVulkanLibrary(Error* error)
 {
+#ifdef __SWITCH__
+	// Set required NXVK environment variables.
+	setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+	setenv("MESA_SHADER_CACHE_DISABLE", "1", 1);
+
+	vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(&vk_icdGetInstanceProcAddr);
+
+	bool required_functions_missing = false;
+#define VULKAN_MODULE_ENTRY_POINT(name, required) \
+	if (PFN_vkVoidFunction pfn = vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, #name)) \
+		name = reinterpret_cast<PFN_##name>(pfn); \
+	if (!name && required) \
+	{ \
+		ERROR_LOG("Vulkan: Failed to load required module function {}", #name); \
+		required_functions_missing = true; \
+	}
+#include "VKEntryPoints.inl"
+#undef VULKAN_MODULE_ENTRY_POINT
+
+	if (required_functions_missing)
+	{
+		ResetVulkanLibraryFunctionPointers();
+		return false;
+	}
+
+	return true;
+#else
 	pxAssertRel(!s_vulkan_library.IsOpen(), "Vulkan module is not loaded.");
 
 	// Check for custom driver path from config
@@ -225,12 +260,15 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 	}
 
 	return true;
+#endif
 }
 
 void Vulkan::UnloadVulkanLibrary()
 {
 	ResetVulkanLibraryFunctionPointers();
+#ifndef __SWITCH__
 	s_vulkan_library.Close();
+#endif
 }
 
 bool Vulkan::LoadVulkanInstanceFunctions(VkInstance instance)

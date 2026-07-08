@@ -146,6 +146,29 @@ VkSurfaceKHR VKSwapChain::CreateVulkanSurface(VkInstance instance, VkPhysicalDev
     }
 #endif
 
+#if defined(VK_USE_PLATFORM_VI_NN)
+	if (wi->type == WindowInfo::Type::VI)
+	{
+		// libnx NWindow* from nwindowGetDefault().
+		VkViSurfaceCreateInfoNN surface_create_info = {
+			VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN,
+			nullptr,
+			0,
+			wi->window_handle
+		};
+
+		VkSurfaceKHR surface;
+		VkResult res = vkCreateViSurfaceNN(instance, &surface_create_info, nullptr, &surface);
+		if (res != VK_SUCCESS)
+		{
+			LOG_VULKAN_ERROR(res, "vkCreateViSurfaceNN failed: ");
+			return VK_NULL_HANDLE;
+		}
+
+		return surface;
+	}
+#endif
+
 	return VK_NULL_HANDLE;
 }
 
@@ -347,8 +370,13 @@ bool VKSwapChain::CreateSwapChain()
 
 	// Select number of images in swap chain, we prefer one buffer in the background to work on in triple-buffered mode.
 	// maxImageCount can be zero, in which case there isn't an upper limit on the number of buffers.
-	u32 image_count = std::clamp<u32>(
-		(m_present_mode == VK_PRESENT_MODE_MAILBOX_KHR) ? 3 : 2, surface_capabilities.minImageCount,
+#ifdef __SWITCH__
+	// NVK prefers triple-buffered scanout.
+	const u32 desired_image_count = 3;
+#else
+	const u32 desired_image_count = (m_present_mode == VK_PRESENT_MODE_MAILBOX_KHR) ? 3 : 2;
+#endif
+	u32 image_count = std::clamp<u32>(desired_image_count, surface_capabilities.minImageCount,
 		(surface_capabilities.maxImageCount == 0) ? std::numeric_limits<u32>::max() : surface_capabilities.maxImageCount);
 	DEV_LOG("Creating a swap chain with {} images in present mode {}", image_count, PresentModeToString(m_present_mode));
 

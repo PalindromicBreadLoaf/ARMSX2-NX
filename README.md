@@ -35,6 +35,12 @@ This assumes you have DevkitPro installed. Install it if you don't.
 dkp-pacman -S switch-dev switch-libpng switch-libjpeg-turbo
 ```
 
+Initialize the submodules after cloning:
+
+```shell
+git submodule update --init --recursive
+```
+
 Configure the native core with the Switch toolchain, then build the `.nro` target:
 
 ```shell
@@ -46,6 +52,9 @@ cmake --build build/switch-core --target armsx2_nro -j$(nproc)
 ```
 
 The output binary will be located at `build/switch-core/switch-app/armsx2nx.nro`
+
+The Vulkan/NXVK backend is optional. If wanted, enable `DUSE_VULKAN=ON`.
+Build `app/src/main/cpp/3rdparty/nxvk` first using its documentation at `switch/README.md`
 
 You will also need the resources from the releases page to properly display the fullscreen UI.
 

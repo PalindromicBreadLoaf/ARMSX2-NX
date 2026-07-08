@@ -30,6 +30,11 @@ class Error;
 #define VK_USE_PLATFORM_ANDROID_KHR
 #endif
 
+#if defined(__SWITCH__)
+// Switch uses VK_NN_vi_surface.
+#define VK_USE_PLATFORM_VI_NN
+#endif
+
 #include "vulkan/vulkan.h"
 
 #if defined(X11_API)
