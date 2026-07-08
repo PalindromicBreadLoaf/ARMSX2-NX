@@ -214,7 +214,13 @@ int main(int argc, char** argv)
 
 	EmuFolders::AppRoot = ARMSX2_ROOT;
 	EmuFolders::DataRoot = ARMSX2_ROOT;
-	EmuFolders::SetResourcesDirectory();
+	// Resources are baked into the romfs.
+	// Fall back to the SD if the romfs failed to mount.
+	if (have_romfs)
+		EmuFolders::Resources = "romfs:/resources";
+	else
+		EmuFolders::SetResourcesDirectory();
+	INFO_LOG("Resources directory: {}", EmuFolders::Resources);
 	SetupSettings();
 
 	INFO_LOG("BIOS directory: {}", EmuFolders::Bios);
