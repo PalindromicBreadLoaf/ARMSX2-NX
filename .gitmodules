@@ -1,0 +1,3 @@
+[submodule "3rdparty/nxvk"]
+	path = 3rdparty/nxvk
+	url = https://github.com/PalindromicBreadLoaf/nxvk.git

@@ -1,7 +1,10 @@
 # All flags, libraries, etc, that are shared between PCSX2 compilation files
 add_library(PCSX2_FLAGS INTERFACE)
 
-if(DISABLE_ADVANCE_SIMD OR LTO_PCSX2_CORE)
+if(HORIZON)
+	# Switch links PCSX2 statically into the .nro.
+	add_library(PCSX2)
+elseif(DISABLE_ADVANCE_SIMD OR LTO_PCSX2_CORE)
 	# Fixes issues with some compiler + linker combinations
 	add_library(PCSX2 OBJECT)
 else()
@@ -864,6 +867,25 @@ set(pcsx2InputHeaders
 	Input/SDLInputSource.h
 )
 
+if(HORIZON)
+	# No SDL/cubeb-SDL/oboe/pcap on Switch.
+	list(REMOVE_ITEM pcsx2HostSources Host/SDLAudioStream.cpp)
+	list(APPEND pcsx2HostSources Host/HorizonAudioStream.cpp)
+	list(REMOVE_ITEM pcsx2InputSources Input/SDLInputSource.cpp)
+	list(REMOVE_ITEM pcsx2InputHeaders Input/SDLInputSource.h)
+	list(REMOVE_ITEM pcsx2USBSources USB/usb-pad/usb-pad-sdl-ff.cpp)
+	list(REMOVE_ITEM pcsx2USBHeaders USB/usb-pad/usb-pad-sdl-ff.h)
+	list(REMOVE_ITEM pcsx2DEV9Sources DEV9/pcap_io.cpp)
+	# Headless Null device.
+	list(APPEND pcsx2GSSources GS/Renderers/Null/GSDeviceNull.cpp)
+	list(APPEND pcsx2GSHeaders GS/Renderers/Null/GSDeviceNull.h)
+	# Deko3d includes
+	list(APPEND pcsx2GSSources GS/Renderers/DK3D/GSDeviceDK.cpp)
+	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/GSDeviceDK.h)
+	list(APPEND pcsx2GSSources GS/Renderers/DK3D/GSTextureDK.cpp)
+	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/GSTextureDK.h)
+endif()
+
 if(APPLE)
 	list(APPEND pcsx2GSSources
 		GS/Renderers/Metal/GSDeviceMTL.mm
@@ -910,6 +932,13 @@ set(pcsx2OSXSources
 set(pcsx2FreeBSDSources
 	CDVD/Darwin/DriveUtility.cpp
 	CDVD/Darwin/IOCtlSrc.cpp
+	)
+
+# Switch has no optical drive
+# TODO: Support external optical drives?
+set(pcsx2HorizonSources
+	CDVD/Horizon/DriveUtility.cpp
+	CDVD/Horizon/IOCtlSrc.cpp
 	)
 
 # Linux headers
@@ -1124,6 +1153,11 @@ if(LINUX)
 	target_link_libraries(PCSX2_FLAGS INTERFACE
 		PkgConfig::LIBUDEV
 	)
+elseif(HORIZON)
+	target_sources(PCSX2 PRIVATE
+		${pcsx2HorizonSources}
+		${pcsx2LinuxHeaders}
+	)
 endif()
 
 if(WIN32)
@@ -1155,11 +1189,9 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	cpuinfo
 	cubeb
 	rcheevos
-	discord-rpc
 	simpleini
 	freesurround
 	Freetype::Freetype
-	SDL3::SDL3
 	ZLIB::ZLIB
 	LZ4::LZ4
 	SoundTouch::SoundTouch
@@ -1172,6 +1204,14 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	plutosvg::plutosvg
 	${LIBC_LIBRARIES}
 )
+
+# SDL and Discord are desktop-only.
+if(NOT HORIZON)
+	target_link_libraries(PCSX2_FLAGS INTERFACE
+		SDL3::SDL3
+		discord-rpc
+	)
+endif()
 
 if(WIN32)
 	target_link_libraries(PCSX2_FLAGS INTERFACE
@@ -1196,7 +1236,7 @@ if(WIN32)
 		dwmapi.lib
 		OneCore.lib
 	)
-else()
+elseif(NOT HORIZON)
 	target_link_libraries(PCSX2_FLAGS INTERFACE
 		PCAP::PCAP
 	)

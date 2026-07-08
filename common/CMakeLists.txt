@@ -157,6 +157,15 @@ elseif(APPLE)
 		"-framework Foundation"
 		"-framework IOKit"
 	)
+elseif(HORIZON)
+	target_sources(common PRIVATE
+		Horizon/HorizonHostSys.cpp
+		Horizon/HorizonThreads.cpp
+		Horizon/HorizonMisc.cpp
+		Horizon/HorizonNet.cpp
+		Horizon/HorizonCompat.cpp
+	)
+	target_include_directories(common PUBLIC Horizon/compat)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp
@@ -189,8 +198,9 @@ if (USE_GCC AND CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 	set_source_files_properties(FastJmp.cpp PROPERTIES COMPILE_FLAGS -fno-lto)
 endif()
 
-if(NOT WIN32)
+if(NOT WIN32 AND NOT HORIZON)
 	# libcurl-based HTTPDownloader
+	# TODO: Figure out Horizon networking
 	target_sources(common PRIVATE
 		HTTPDownloaderCurl.cpp
 		HTTPDownloaderCurl.h

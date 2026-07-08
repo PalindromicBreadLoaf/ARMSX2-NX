@@ -48,7 +48,12 @@ add_subdirectory(common)
 # make pcsx2
 add_subdirectory(pcsx2)
 
-if(ENABLE_QT_UI)
+# ARMSX2-NX entry point.
+if(HORIZON)
+	add_subdirectory(switch/app ${CMAKE_BINARY_DIR}/switch-app)
+endif()
+
+if(ENABLE_QT_UI AND NOT HORIZON)
 	add_subdirectory(pcsx2-qt)
 endif()
 
@@ -58,16 +63,18 @@ if (WIN32)
 endif()
 
 # tests
-if(ENABLE_TESTS)
+if(ENABLE_TESTS AND NOT HORIZON)
 	add_subdirectory(3rdparty/googletest)
 	add_subdirectory(tests/ctest)
 endif()
 
 # gsrunner
-if(ENABLE_GSRUNNER)
-	add_subdirectory(pcsx2-gsrunner)
-else()
-	add_subdirectory(pcsx2-gsrunner EXCLUDE_FROM_ALL)
+if(NOT HORIZON)
+	if(ENABLE_GSRUNNER)
+		add_subdirectory(pcsx2-gsrunner)
+	else()
+		add_subdirectory(pcsx2-gsrunner EXCLUDE_FROM_ALL)
+	endif()
 endif()
 
 #-------------------------------------------------------------------------------

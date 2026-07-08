@@ -14,14 +14,27 @@ set(CMAKE_FIND_FRAMEWORK NEVER)
 find_package(PNG 1.6.40 REQUIRED)
 find_package(JPEG REQUIRED) # No version because flatpak uses libjpeg-turbo.
 find_package(ZLIB REQUIRED) # v1.3, but Mac uses the SDK version.
-find_package(Zstd 1.5.5 REQUIRED)
-find_package(LZ4 REQUIRED)
-find_package(WebP REQUIRED) # v1.3.2, spews an error on Linux because no pkg-config.
-find_package(SDL3 3.2.6 REQUIRED)
 find_package(Freetype 2.10 REQUIRED) # 2.10 is the first with COLRv0 support, which we need for rendering emoji
-find_package(plutovg 1.1.0 REQUIRED)
-find_package(plutosvg 0.0.7 REQUIRED)
-find_package(ryml REQUIRED)
+if(HORIZON)
+	# devkitPro portlibs supplies zlib/png/jpeg/freetype2.
+	# bundle the 3rdparty copies.
+	# SDL3 is not built at all on Switch.
+	add_subdirectory(3rdparty/zstd EXCLUDE_FROM_ALL)
+	add_subdirectory(3rdparty/lz4 EXCLUDE_FROM_ALL)
+	add_subdirectory(3rdparty/libwebp EXCLUDE_FROM_ALL)
+	add_library(WebP::libwebp ALIAS webp)
+	add_subdirectory(3rdparty/rapidyaml EXCLUDE_FROM_ALL)
+	add_library(ryml::ryml ALIAS pcsx2-rapidyaml)
+	add_subdirectory(3rdparty/plutosvg1 EXCLUDE_FROM_ALL)
+else()
+	find_package(Zstd 1.5.5 REQUIRED)
+	find_package(LZ4 REQUIRED)
+	find_package(WebP REQUIRED) # v1.3.2, spews an error on Linux because no pkg-config.
+	find_package(SDL3 3.2.6 REQUIRED)
+	find_package(plutovg 1.1.0 REQUIRED)
+	find_package(plutosvg 0.0.7 REQUIRED)
+	find_package(ryml REQUIRED)
+endif()
 
 if(USE_VULKAN)
 	find_package(Shaderc REQUIRED)
@@ -34,6 +47,9 @@ if (WIN32)
 	add_subdirectory(3rdparty/winwil EXCLUDE_FROM_ALL)
 	set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
 	find_package(Vtune)
+elseif(HORIZON)
+	# No CURL/PCAP/X11/dbus on Switch.
+	set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
 else()
 	find_package(CURL REQUIRED)
 	find_package(PCAP REQUIRED)
@@ -92,7 +108,9 @@ disable_compiler_warnings_for_target(cpuinfo)
 add_subdirectory(3rdparty/libzip EXCLUDE_FROM_ALL)
 add_subdirectory(3rdparty/rcheevos EXCLUDE_FROM_ALL)
 add_subdirectory(3rdparty/rapidjson EXCLUDE_FROM_ALL)
-add_subdirectory(3rdparty/discord-rpc EXCLUDE_FROM_ALL)
+if(NOT HORIZON)
+	add_subdirectory(3rdparty/discord-rpc EXCLUDE_FROM_ALL)
+endif()
 add_subdirectory(3rdparty/freesurround EXCLUDE_FROM_ALL)
 
 if(USE_OPENGL)

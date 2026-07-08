@@ -6,10 +6,20 @@ include(GNUInstallDirs)
 #-------------------------------------------------------------------------------
 # Misc option
 #-------------------------------------------------------------------------------
-option(ENABLE_TESTS "Enables building the unit tests" ON)
-option(ENABLE_QT_UI "Enables building the PCSX2 Qt interface." ON)
+# Switch builds only the emulator core and the libnx executable.
+if(HORIZON)
+	set(DEFAULT_ENABLE_TESTS OFF)
+	set(DEFAULT_ENABLE_QT_UI OFF)
+	set(DEFAULT_LTO_PCSX2_CORE ON)
+else()
+	set(DEFAULT_ENABLE_TESTS ON)
+	set(DEFAULT_ENABLE_QT_UI ON)
+	set(DEFAULT_LTO_PCSX2_CORE OFF)
+endif()
+option(ENABLE_TESTS "Enables building the unit tests" ${DEFAULT_ENABLE_TESTS})
+option(ENABLE_QT_UI "Enables building the PCSX2 Qt interface." ${DEFAULT_ENABLE_QT_UI})
 option(ENABLE_GSRUNNER "Enables building the GSRunner by default.  It can still be built with `make pcsx2-gsrunner` otherwise." OFF)
-option(LTO_PCSX2_CORE "Enable LTO/IPO/LTCG on the subset of pcsx2 that benefits most from it but not anything else")
+option(LTO_PCSX2_CORE "Enable LTO/IPO/LTCG on the subset of pcsx2 that benefits most from it but not anything else" ${DEFAULT_LTO_PCSX2_CORE})
 option(USE_VTUNE "Plug VTUNE to profile GS JIT.")
 option(PACKAGE_MODE "Use this option to ease packaging of PCSX2 (developer/distribution option)")
 option(BUNDLE_EMOJI_FONT "Bundles Noto Color Emoji for systems whose system emoji font isn't usable by freetype" ON)
@@ -18,7 +28,8 @@ option(POSITION_INDEPENDENT_CODE "Generate position-independent code. It is reco
 #-------------------------------------------------------------------------------
 # Graphical option
 #-------------------------------------------------------------------------------
-if(NOT APPLE)
+# No OpenGL on Switch (yet)
+if(NOT APPLE AND NOT HORIZON)
 	option(USE_OPENGL "Enable OpenGL GS renderer" ON)
 endif()
 option(USE_VULKAN "Enable Vulkan GS renderer" ON)
@@ -53,7 +64,11 @@ option(USE_ASAN "Enable address sanitizer")
 # Ensure that the value set by the User is correct to avoid some bad behavior later
 #-------------------------------------------------------------------------------
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug|Devel|MinSizeRel|RelWithDebInfo|Release")
-	set(CMAKE_BUILD_TYPE Devel)
+	if(HORIZON)
+		set(CMAKE_BUILD_TYPE Release)
+	else()
+		set(CMAKE_BUILD_TYPE Devel)
+	endif()
 	message(STATUS "BuildType set to ${CMAKE_BUILD_TYPE} by default")
 endif()
 # Add Devel build type
@@ -78,7 +93,19 @@ mark_as_advanced(CMAKE_C_FLAGS_DEVEL CMAKE_CXX_FLAGS_DEVEL CMAKE_LINKER_FLAGS_DE
 #-------------------------------------------------------------------------------
 # Select the architecture
 #-------------------------------------------------------------------------------
-if("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "amd64" OR
+if(HORIZON)
+	message(STATUS "Building for Nintendo Switc.")
+	set(ARCH_ARM64 TRUE)
+	list(APPEND PCSX2_DEFS _M_ARM64=1)
+	# Tegra X1 (ARMv8.0-A).
+	add_compile_options("-march=armv8-a+crc" "-mtune=cortex-a57")
+	list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x1000)
+	list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
+	list(APPEND PCSX2_DEFS __SWITCH__=1)
+	list(APPEND PCSX2_DEFS __LINUX_ERRNO_EXTENSIONS__=1)
+	# GCC is much stricter than Clang.
+	add_compile_options(-flax-vector-conversions)
+elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "amd64" OR
    "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "AMD64" OR "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "x86_64")
 	# Multi-ISA only exists on x86.
 	option(DISABLE_ADVANCE_SIMD "Disable advance use of SIMD (SSE2+ & AVX)" OFF)

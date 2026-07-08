@@ -9,12 +9,21 @@ function(detect_operating_system)
 		set(LINUX TRUE)
 	endif()
 
+	# The devkitPro Switch toolchain sets CMAKE_SYSTEM_NAME to NintendoSwitch.
+	# HORIZON is the master switch for the Switch port throughout the CMake files.
+	if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+		set(HORIZON TRUE PARENT_SCOPE)
+		set(HORIZON TRUE)
+	endif()
+
 	if(WIN32)
 		message(STATUS "Building for Windows.")
 	elseif(APPLE AND NOT IOS)
 		message(STATUS "Building for MacOS.")
 	elseif(LINUX)
 		message(STATUS "Building for Linux.")
+	elseif(HORIZON)
+		message(STATUS "Building for Horizon.")
 	elseif(BSD)
 		message(STATUS "Building for *BSD.")
 	else()
