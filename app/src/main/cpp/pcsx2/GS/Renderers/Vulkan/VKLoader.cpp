@@ -36,6 +36,18 @@ extern "C" {
 
 #ifdef __SWITCH__
 extern "C" PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
+
+// On Switch we talk to the bare NVK ICD directly, with no Vulkan loader in between.
+// To get around some early checks, create module functions then patch them in later once
+// the ICD contract has been established.
+static bool IsLoaderOnlyModuleFunction(const char* name)
+{
+	return std::strcmp(name, "vkEnumerateInstanceLayerProperties") == 0;
+}
+static bool IsInstanceDispatchModuleFunction(const char* name)
+{
+	return std::strcmp(name, "vkDestroyInstance") == 0;
+}
 #endif
 
 void Vulkan::ResetVulkanLibraryFunctionPointers()
@@ -73,7 +85,7 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 #define VULKAN_MODULE_ENTRY_POINT(name, required) \
 	if (PFN_vkVoidFunction pfn = vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, #name)) \
 		name = reinterpret_cast<PFN_##name>(pfn); \
-	if (!name && required) \
+	if (!name && required && !IsLoaderOnlyModuleFunction(#name) && !IsInstanceDispatchModuleFunction(#name)) \
 	{ \
 		ERROR_LOG("Vulkan: Failed to load required module function {}", #name); \
 		required_functions_missing = true; \
@@ -287,6 +299,23 @@ bool Vulkan::LoadVulkanInstanceFunctions(VkInstance instance)
 	LoadFunction(reinterpret_cast<PFN_vkVoidFunction*>(&name), #name, required);
 #include "VKEntryPoints.inl"
 #undef VULKAN_INSTANCE_ENTRY_POINT
+
+#ifdef __SWITCH__
+	// Resolve the module entry points that the bare ICD couldn't hand out before an instance existed
+#define VULKAN_MODULE_ENTRY_POINT(name, required) \
+	if (!name) \
+	{ \
+		if (PFN_vkVoidFunction pfn = vkGetInstanceProcAddr(instance, #name)) \
+			name = reinterpret_cast<PFN_##name>(pfn); \
+		if (!name && required && !IsLoaderOnlyModuleFunction(#name)) \
+		{ \
+			std::fprintf(stderr, "Vulkan: Failed to load required module function %s\n", #name); \
+			required_functions_missing = true; \
+		} \
+	}
+#include "VKEntryPoints.inl"
+#undef VULKAN_MODULE_ENTRY_POINT
+#endif
 
 	return !required_functions_missing;
 }
