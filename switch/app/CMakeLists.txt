@@ -186,29 +186,37 @@ list(APPEND DK3D_DKSH_FILES "${DK3D_ROMFS_SHADER_DIR}/cas_csh.dksh")
 
 add_custom_target(armsx2_shaders DEPENDS ${DK3D_DKSH_FILES})
 
-# Bundle the runtime resources into the romfs
+# Bundle the runtime resources into the romfs.
 set(ARMSX2_RESOURCES_SRC "${CMAKE_SOURCE_DIR}/../assets/resources")
-set(ARMSX2_RESOURCES_STAMP "${CMAKE_CURRENT_BINARY_DIR}/resources.stamp")
+set(ARMSX2_RESOURCES_DST "${DK3D_ROMFS_DIR}/resources")
 file(GLOB_RECURSE ARMSX2_RESOURCE_FILES CONFIGURE_DEPENDS "${ARMSX2_RESOURCES_SRC}/*")
-add_custom_command(
-	OUTPUT "${ARMSX2_RESOURCES_STAMP}"
-	COMMAND "${CMAKE_COMMAND}" -E copy_directory "${ARMSX2_RESOURCES_SRC}" "${DK3D_ROMFS_DIR}/resources"
-	COMMAND "${CMAKE_COMMAND}" -E touch "${ARMSX2_RESOURCES_STAMP}"
-	DEPENDS ${ARMSX2_RESOURCE_FILES}
-	COMMENT "Bundling resources into romfs"
-	VERBATIM
-)
-add_custom_target(armsx2_resources DEPENDS "${ARMSX2_RESOURCES_STAMP}")
+
+set(ARMSX2_STAGED_RESOURCES "")
+foreach(_src IN LISTS ARMSX2_RESOURCE_FILES)
+	file(RELATIVE_PATH _rel "${ARMSX2_RESOURCES_SRC}" "${_src}")
+	set(_dst "${ARMSX2_RESOURCES_DST}/${_rel}")
+	get_filename_component(_dstdir "${_dst}" DIRECTORY)
+	add_custom_command(
+		OUTPUT "${_dst}"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "${_dstdir}"
+		COMMAND "${CMAKE_COMMAND}" -E copy "${_src}" "${_dst}"
+		DEPENDS "${_src}"
+		VERBATIM
+	)
+	list(APPEND ARMSX2_STAGED_RESOURCES "${_dst}")
+endforeach()
+add_custom_target(armsx2_resources DEPENDS ${ARMSX2_STAGED_RESOURCES})
 
 dkp_add_asset_target(armsx2_romfs "${DK3D_ROMFS_DIR}")
 add_dependencies(armsx2_romfs armsx2_shaders armsx2_resources)
-set_property(TARGET armsx2_romfs APPEND PROPERTY DKP_ASSET_FILES ${DK3D_DKSH_FILES})
+set_property(TARGET armsx2_romfs APPEND PROPERTY DKP_ASSET_FILES
+	${DK3D_DKSH_FILES} ${ARMSX2_STAGED_RESOURCES})
 
 # Package an .nro
 nx_generate_nacp(OUTPUT armsx2.nacp
 	NAME "ARMSX2"
 	AUTHOR "ARMSX2 Team \& PalindromicBreadLoaf"
-	VERSION "1.2.0"
+	VERSION "2.0.0"
 )
 nx_create_nro(armsx2
 	OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/armsx2nx.nro"
