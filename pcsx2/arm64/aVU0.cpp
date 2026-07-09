@@ -1841,8 +1841,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 	u8* const data_base = s_code_write;
 	_VURegsNum* const uregs_data = reinterpret_cast<_VURegsNum*>(data_base);
 	_VURegsNum* const lregs_data = uregs_data + numPairs;
+	
+	_VURegsNum* const uregs_data_w = reinterpret_cast<_VURegsNum*>(HostSys::JitGetWritablePointer(data_base));
+	_VURegsNum* const lregs_data_w = uregs_data_w + numPairs;
 
-	std::memset(data_base, 0, data_size);
+	std::memset(uregs_data_w, 0, data_size);
 
 	{
 		u32 pc = startPC;
@@ -1852,12 +1855,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 			const u32 lower = *reinterpret_cast<const u32*>(VU0.Micro + pc);
 
 			VU0.code = upper;
-			VU0regs_UPPER_OPCODE[upper & 0x3f](&uregs_data[i]);
+			VU0regs_UPPER_OPCODE[upper & 0x3f](&uregs_data_w[i]);
 
 			if (!((upper >> 31) & 1))
 			{
 				VU0.code = lower;
-				VU0regs_LOWER_OPCODE[lower >> 25](&lregs_data[i]);
+				VU0regs_LOWER_OPCODE[lower >> 25](&lregs_data_w[i]);
 			}
 
 			pc = (pc + 8) & (VU0_PROGSIZE - 1);

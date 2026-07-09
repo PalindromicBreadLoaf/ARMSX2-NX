@@ -1089,6 +1089,39 @@ set(pcsx2arm64Headers
 	arm64/AsmHelpers.h
 )
 
+set(pcsx2arm64RecSources
+	arm64/aR5900.cpp
+	arm64/aR5900Arith.cpp
+	arm64/aR5900Backprop.cpp
+	arm64/aR5900Branch.cpp
+	arm64/aR5900COP0.cpp
+	arm64/aR5900COP2.cpp
+	arm64/aR5900FPU.cpp
+	arm64/aR5900LoadStore.cpp
+	arm64/aR5900Misc.cpp
+	arm64/aR5900MMI.cpp
+	arm64/aR5900MultDiv.cpp
+	arm64/aR5900Trap.cpp
+	arm64/aR3000A.cpp
+	arm64/aR3000Atables.cpp
+	arm64/aVU0.cpp
+	arm64/aVU.cpp
+	arm64/aVTLB.cpp
+	arm64/aDMAC.cpp
+	)
+
+set(pcsx2arm64RecHeaders
+	arm64/aR3000A.h
+	arm64/aDMAC.h
+	arm64/aVU.h
+	arm64/aVU0.h
+	arm64/aVU_IR.h
+	arm64/arm64Emitter.h
+	arm64/InterpFlags.h
+	arm64/TraceBlocks.h
+	arm64/Vif_UnpackNEON.h
+)
+
 # These ones benefit a lot from LTO
 set(pcsx2LTOSources
 	${pcsx2Sources}
@@ -1106,6 +1139,9 @@ if(ARCH_X86)
 	target_link_libraries(PCSX2_FLAGS INTERFACE zydis)
 elseif(ARCH_ARM64)
 	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers})
+	if(HORIZON)
+		list(APPEND pcsx2LTOSources ${pcsx2arm64RecSources} ${pcsx2arm64RecHeaders})
+	endif()
 	target_link_libraries(PCSX2_FLAGS INTERFACE vixl)
 endif()
 

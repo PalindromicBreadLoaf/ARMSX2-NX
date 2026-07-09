@@ -5270,11 +5270,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	_VURegsNum* const uregs_data = reinterpret_cast<_VURegsNum*>(data_base);
 	_VURegsNum* const lregs_data = uregs_data + numPairs;
 
+	// Horizon forbids RWX
+	_VURegsNum* const uregs_data_w = reinterpret_cast<_VURegsNum*>(HostSys::JitGetWritablePointer(data_base));
+	_VURegsNum* const lregs_data_w = uregs_data_w + numPairs;
+
 	// Zero the entire data section first — some regs functions don't set all
 	// fields (e.g., branch regs don't set 'cycles'). The interpreter does
 	// 'lregs.cycles = 0' before calling the regs function; we match that by
 	// zeroing the whole array.
-	std::memset(data_base, 0, data_size);
+	std::memset(uregs_data_w, 0, data_size);
 
 	// _VURegsNum pre-walk: decode each pair's upper/lower into the data
 	// section so subsequent passes have field-level operand info without
@@ -5290,13 +5294,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			const bool ibit = ((upper >> 31) & 1) != 0;
 
 			VU1.code = upper;
-			VU1regs_UPPER_OPCODE[upper & 0x3f](&uregs_data[i]);
+			VU1regs_UPPER_OPCODE[upper & 0x3f](&uregs_data_w[i]);
 
 			if (!ibit)
 			{
 				// Non-I-bit: lower field is an instruction.
 				VU1.code = lower;
-				VU1regs_LOWER_OPCODE[lower >> 25](&lregs_data[i]);
+				VU1regs_LOWER_OPCODE[lower >> 25](&lregs_data_w[i]);
 			}
 			// I-bit pairs: lregs_data[i] stays zeroed (no lower instruction).
 

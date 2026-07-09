@@ -107,7 +107,8 @@ u8* armStartBlock()
 	HostSys::BeginCodeWrite();
 
 	pxAssert(!armAsm);
-	armAsm = new (s_masmStorage) a64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr), armAsmCapacity);
+	// Horizon forbids RWX on memory pages
+	armAsm = new (s_masmStorage) a64::MacroAssembler(static_cast<vixl::byte*>(HostSys::JitGetWritablePointer(armAsmPtr)), armAsmCapacity);
 	armAsm->GetScratchVRegisterList()->Remove(31);
 	armAsm->GetScratchRegisterList()->Remove(RSCRATCHADDR.GetCode());
 	return armAsmPtr;
@@ -210,7 +211,8 @@ void armEmitJmpPtr(void* code_address, const void* target, bool flush_icache)
 	u32 insn = 0x14000000u | (static_cast<u32>(displacement) & 0x03FFFFFFu);
 
 	HostSys::BeginCodeWrite();
-	std::memcpy(code_address, &insn, sizeof(insn));
+	// Relative displacement is alias-invariant
+	std::memcpy(HostSys::JitGetWritablePointer(code_address), &insn, sizeof(insn));
 	HostSys::EndCodeWrite();
 
 	if (flush_icache)
@@ -432,7 +434,7 @@ u8* ArmConstantPool::GetJumpTrampoline(const void* target)
 		return nullptr;
 	}
 
-	a64::MacroAssembler masm(static_cast<vixl::byte*>(m_base_ptr + offset), m_capacity - offset);
+	a64::MacroAssembler masm(static_cast<vixl::byte*>(HostSys::JitGetWritablePointer(m_base_ptr + offset)), m_capacity - offset);
 	masm.Mov(RXVIXLSCRATCH, reinterpret_cast<intptr_t>(target));
 	masm.Br(RXVIXLSCRATCH);
 	masm.FinalizeCode();
@@ -461,7 +463,7 @@ u8* ArmConstantPool::GetLiteral(const u128& value)
 		return nullptr;
 
 	const u32 offset = Common::AlignUpPow2(m_used, 16);
-	std::memcpy(&m_base_ptr[offset], &value, sizeof(value));
+	std::memcpy(HostSys::JitGetWritablePointer(&m_base_ptr[offset]), &value, sizeof(value));
 	m_used = offset + sizeof(value);
 	return m_base_ptr + offset;
 }

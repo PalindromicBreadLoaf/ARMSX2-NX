@@ -118,7 +118,7 @@ using parse_options = parse_options_t<char>;
 #endif
 
 #if ((defined(_WIN32) || defined(_WIN64)) && !defined(__clang__)) ||           \
-    (defined(_M_ARM64) && !defined(__MINGW32__))
+    (defined(_M_ARM64) && !defined(__MINGW32__) && defined(_MSC_VER))
 #include <intrin.h>
 #endif
 
@@ -577,7 +577,7 @@ full_multiplication(uint64_t a, uint64_t b) {
     return answer;
   }
   value128 answer;
-#if defined(_M_ARM64) && !defined(__MINGW32__)
+#if defined(_M_ARM64) && !defined(__MINGW32__) && defined(_MSC_VER)
   // ARM64 has native support for 64-bit multiplications, no need to emulate
   // But MinGW on ARM64 doesn't have native support for 64-bit multiplications
   answer.high = __umulh(a, b);
