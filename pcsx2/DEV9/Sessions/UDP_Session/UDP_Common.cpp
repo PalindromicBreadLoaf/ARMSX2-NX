@@ -12,6 +12,9 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <netinet/in.h>
+#if defined(__SWITCH__)
+#include <arpa/inet.h>
+#endif
 #endif
 
 #ifdef _WIN32

@@ -244,7 +244,7 @@ std::optional<InputBindingKey> InputManager::ParseInputBindingKey(const std::str
 	{
 		for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 		{
-			if (s_input_sources[i]->IsInitialized())
+			if (s_input_sources[i] && s_input_sources[i]->IsInitialized())
 			{
 				std::optional<InputBindingKey> key = s_input_sources[i]->ParseKeyString(source, sub_binding);
 				if (key.has_value())
@@ -264,7 +264,7 @@ bool InputManager::ParseBindingAndGetSource(const std::string_view binding, Inpu
 
 	for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 	{
-		if (s_input_sources[i]->IsInitialized())
+		if (s_input_sources[i] && s_input_sources[i]->IsInitialized())
 		{
 			std::optional<InputBindingKey> parsed_key = s_input_sources[i]->ParseKeyString(source_string, sub_binding);
 			if (parsed_key.has_value())
@@ -1276,7 +1276,8 @@ bool InputManager::PreprocessEvent(InputBindingKey key, float value, GenericInpu
 	}
 	else if (generic_key != GenericInputBinding::Unknown)
 	{
-		InputLayout layout = s_input_sources[static_cast<u32>(InputSourceType::SDL)]->GetControllerLayout(key.source_index);
+		const std::unique_ptr<InputSource>& sdl_source = s_input_sources[static_cast<u32>(InputSourceType::SDL)];
+		InputLayout layout = sdl_source ? sdl_source->GetControllerLayout(key.source_index) : InputLayout::Unknown;
 		if (ImGuiManager::ProcessGenericInputEvent(generic_key, layout, value) && value != 0.0f)
 			return true;
 	}
@@ -1617,7 +1618,7 @@ bool InputManager::ReloadDevices()
 
 	for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 	{
-		if (s_input_sources[i]->IsInitialized())
+		if (s_input_sources[i] && s_input_sources[i]->IsInitialized())
 			changed |= s_input_sources[i]->ReloadDevices();
 	}
 
@@ -1640,7 +1641,7 @@ void InputManager::PollSources()
 {
 	for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 	{
-		if (s_input_sources[i]->IsInitialized())
+		if (s_input_sources[i] && s_input_sources[i]->IsInitialized())
 			s_input_sources[i]->PollEvents();
 	}
 
@@ -1660,7 +1661,7 @@ std::vector<std::pair<std::string, std::string>> InputManager::EnumerateDevices(
 
 	for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 	{
-		if (s_input_sources[i]->IsInitialized())
+		if (s_input_sources[i] && s_input_sources[i]->IsInitialized())
 		{
 			std::vector<std::pair<std::string, std::string>> devs(s_input_sources[i]->EnumerateDevices());
 			if (ret.empty())
@@ -1679,7 +1680,7 @@ std::vector<InputBindingKey> InputManager::EnumerateMotors()
 
 	for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 	{
-		if (s_input_sources[i]->IsInitialized())
+		if (s_input_sources[i] && s_input_sources[i]->IsInitialized())
 		{
 			std::vector<InputBindingKey> devs(s_input_sources[i]->EnumerateMotors());
 			if (ret.empty())
@@ -1739,7 +1740,7 @@ InputManager::GenericInputBindingMapping InputManager::GetGenericBindingMapping(
 	{
 		for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 		{
-			if (s_input_sources[i]->IsInitialized() && s_input_sources[i]->GetGenericBindingMapping(device, &mapping))
+			if (s_input_sources[i] && s_input_sources[i]->IsInitialized() && s_input_sources[i]->GetGenericBindingMapping(device, &mapping))
 				break;
 		}
 	}
@@ -1787,7 +1788,9 @@ void InputManager::UpdateInputSourceState(SettingsInterface& si, std::unique_loc
 	}
 }
 
+#if !defined(__SWITCH__)
 #include "Input/SDLInputSource.h"
+#endif
 
 #ifdef _WIN32
 #include "Input/DInputSource.h"
@@ -1796,7 +1799,9 @@ void InputManager::UpdateInputSourceState(SettingsInterface& si, std::unique_loc
 
 void InputManager::ReloadSources(SettingsInterface& si, std::unique_lock<std::mutex>& settings_lock)
 {
+#if !defined(__SWITCH__)
 	UpdateInputSourceState<SDLInputSource>(si, settings_lock, InputSourceType::SDL);
+#endif
 #ifdef _WIN32
 	UpdateInputSourceState<DInputSource>(si, settings_lock, InputSourceType::DInput);
 	UpdateInputSourceState<XInputSource>(si, settings_lock, InputSourceType::XInput);

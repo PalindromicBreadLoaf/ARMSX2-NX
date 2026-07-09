@@ -21,6 +21,19 @@
 
 #include "fmt/format.h"
 
+#if defined(__SWITCH__)
+
+// Provide no-ops for PINE-related things
+namespace PINEServer
+{
+	bool Initialize(int slot) { return false; }
+	void Deinitialize() {}
+	bool IsInitialized() { return false; }
+	int GetSlot() { return 0; }
+} // namespace PINEServer
+
+#else // !__SWITCH__
+
 #if defined(_WIN32)
 #define read_portable(a, b, c) (recv(a, (char*)b, c, 0))
 #define write_portable(a, b, c) (send(a, (const char*)b, c, 0))
@@ -755,3 +768,5 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 	}
 	return IPCBuffer{(int)ret_cnt, MakeOkIPC(ret_buffer, ret_cnt)};
 }
+
+#endif // !__SWITCH__

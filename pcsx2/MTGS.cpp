@@ -7,11 +7,13 @@
 #include "MTVU.h"
 #include "Host.h"
 #include "IconsFontAwesome.h"
+#include "PerformanceMetrics.h"
 #include "VMManager.h"
 
 #include "common/FPControl.h"
 #include "common/ScopedGuard.h"
 #include "common/StringUtil.h"
+#include "common/Timer.h"
 #include "common/WrappedMemCopy.h"
 
 #include <list>
@@ -282,7 +284,10 @@ void MTGS::PostVsyncStart(bool registers_written)
 	s_VsyncSignalListener.store(true, std::memory_order_release);
 	//Console.WriteLn( Color_Blue, "(EEcore Sleep) Vsync\t\tringpos=0x%06x, writepos=0x%06x", m_ReadPos.load(), m_WritePos.load() );
 
+	const Common::Timer::Value stall_start = Common::Timer::GetCurrentValue();
 	s_sem_Vsync.Wait();
+	PerformanceMetrics::AccumulateEEStallVsync(
+		static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - stall_start)));
 }
 
 void MTGS::InitAndReadFIFO(u8* mem, u32 qwc)
@@ -340,7 +345,10 @@ void MTGS::MainLoop()
 		else
 		{
 			mtvu_lock.unlock();
+			const Common::Timer::Value idle_start = Common::Timer::GetCurrentValue();
 			s_sem_event.WaitForWork();
+			PerformanceMetrics::AccumulateGSWorkWait(
+				static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - idle_start)));
 			mtvu_lock.lock();
 		}
 
@@ -709,6 +717,7 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 	// we don't want to access the content of the queue
 
 	SetEvent();
+	const Common::Timer::Value stall_start = Common::Timer::GetCurrentValue();
 	if (weakWait && isMTVU)
 	{
 		// On weakWait we will stop waiting on the MTGS thread if the
@@ -735,6 +744,9 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 		if (!s_sem_event.WaitForEmpty())
 			pxFailRel("MTGS Thread Died");
 	}
+
+	PerformanceMetrics::AccumulateEEStallGS(
+		static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - stall_start)));
 
 	pxAssert(!(weakWait && syncRegs) && "No synchronization for this!");
 
@@ -815,6 +827,7 @@ void MTGS::GenericStall(uint size)
 
 	if (freeroom <= size)
 	{
+		const Common::Timer::Value stall_start = Common::Timer::GetCurrentValue();
 		// writepos will overlap readpos if we commit the data, so we need to wait until
 		// readpos is out past the end of the future write pos, or until it wraps around
 		// (in which case writepos will be >= readpos).
@@ -875,6 +888,9 @@ void MTGS::GenericStall(uint size)
 					break;
 			}
 		}
+
+		PerformanceMetrics::AccumulateEEStallGS(
+			static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - stall_start)));
 	}
 }
 

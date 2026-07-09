@@ -12,6 +12,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#if defined(__SWITCH__)
+#include <arpa/inet.h>
+#endif
 #define SD_RECEIVE SHUT_RD
 #define SD_SEND SHUT_WR
 #endif

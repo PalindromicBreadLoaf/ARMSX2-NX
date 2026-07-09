@@ -2718,6 +2718,9 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 #ifdef __APPLE__
 		FSUI_NSTR("Metal"),
 #endif
+#ifdef __SWITCH__
+		FSUI_NSTR("Deko3D"),
+#endif
 		FSUI_NSTR("Software Renderer"),
 		FSUI_NSTR("Null"),
 	};
@@ -2735,6 +2738,9 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 #endif
 #ifdef __APPLE__
 		"17", //GSRendererType::Metal,
+#endif
+#ifdef __SWITCH__
+		"18", //GSRendererType::DK3D,
 #endif
 		"13", //GSRendererType::SW,
 		"11", //GSRendererType::Null
@@ -2883,7 +2889,8 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 	const GSRendererType effective_renderer =
 		(renderer == GSRendererType::Auto) ? GSUtil::GetPreferredRenderer() : renderer;
 	const bool is_hardware = (renderer == GSRendererType::Auto || renderer == GSRendererType::DX11 || renderer == GSRendererType::DX12 ||
-							  renderer == GSRendererType::OGL || renderer == GSRendererType::VK || renderer == GSRendererType::Metal);
+							  renderer == GSRendererType::OGL || renderer == GSRendererType::VK || renderer == GSRendererType::Metal ||
+							  renderer == GSRendererType::DK3D);
 	//const bool is_software = (renderer == GSRendererType::SW);
 
 	static std::optional<GSRendererType> s_last_adapter_list_renderer;
@@ -3443,6 +3450,10 @@ void FullscreenUI::DrawOSDSettingsPage()
 	// TODO: Change this to a GPU icon when FA gets one or PromptFont fixes their codepoints.
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_IMAGE, "Show GPU Usage"),
 		FSUI_CSTR("Shows the host's GPU utilization."), "EmuCore/GS", "OsdShowGPU", false);
+	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_PF_MICROCHIP_ALT, "Show Thread Stall Meters"),
+		FSUI_CSTR("Shows the synthesized frame limiter (EE/VU/GS/GPU), per-stage busy %, and the underlying "
+				  "thread stall times in the top-right corner of the display."),
+		"EmuCore/GS", "OsdShowStallMeters", false);
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_PLAY, "Show Status Indicators"),
 		FSUI_CSTR("Shows indicators when fast forwarding, pausing, and other abnormal states are active."), "EmuCore/GS",
 		"OsdShowIndicators", true);
@@ -5650,6 +5661,7 @@ TRANSLATE_NOOP("FullscreenUI", "Direct3D 12");
 TRANSLATE_NOOP("FullscreenUI", "OpenGL");
 TRANSLATE_NOOP("FullscreenUI", "Vulkan");
 TRANSLATE_NOOP("FullscreenUI", "Metal");
+TRANSLATE_NOOP("FullscreenUI", "Deko3D");
 TRANSLATE_NOOP("FullscreenUI", "Software Renderer");
 TRANSLATE_NOOP("FullscreenUI", "Null");
 TRANSLATE_NOOP("FullscreenUI", "Off");

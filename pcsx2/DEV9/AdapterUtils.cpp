@@ -30,6 +30,9 @@
 #include <net/route.h>
 #include <net/if_var.h>
 #endif
+#if defined(__SWITCH__)
+#include <net/if_dl.h>
+#endif
 #endif
 
 using namespace PacketReader;
@@ -518,7 +521,7 @@ std::vector<IP_Address> AdapterUtils::GetGateways(const Adapter* adapter)
 	return collection;
 }
 #else
-std::vector<IP_Address> AdapterUtils::GetGateways(Adapter* adapter)
+std::vector<IP_Address> AdapterUtils::GetGateways(const Adapter* adapter)
 {
 	Console.Error("DEV9: Unsupported OS, can't find Gateway");
 	return {};

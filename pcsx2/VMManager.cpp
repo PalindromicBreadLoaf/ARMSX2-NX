@@ -66,7 +66,9 @@
 #include "IconsFontAwesome.h"
 #include "IconsPromptFont.h"
 #include "cpuinfo.h"
+#if !defined(__SWITCH__)
 #include "discord_rpc.h"
+#endif
 #include "fmt/format.h"
 
 #include <atomic>
@@ -84,6 +86,10 @@
 
 #ifdef __APPLE__
 #include "common/Darwin/DarwinMisc.h"
+#endif
+
+#ifdef __SWITCH__
+#include "common/Horizon/Horizon.h"
 #endif
 
 namespace VMManager
@@ -3812,6 +3818,29 @@ void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
 	}
 }
 
+#elif defined(__SWITCH__)
+
+static void InitializeProcessorList()
+{
+	u64 allowed_cores = 0;
+	if (R_FAILED(svcGetInfo(&allowed_cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || allowed_cores == 0)
+		allowed_cores = 0x7;
+
+	for (u32 i = 0; i < 4; i++)
+	{
+		if (allowed_cores & (static_cast<u64>(1) << i))
+			s_processor_list.push_back(i);
+	}
+
+	INFO_LOG("Switch: {} cores (allowed mask 0x{:x})", s_processor_list.size(), allowed_cores);
+}
+
+void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
+{
+	si.SetBoolValue("EmuCore/Speedhacks", "vuThread", true);
+	si.SetBoolValue("EmuCore", "EnableThreadPinning", true);
+}
+
 #else
 
 static void InitializeProcessorList()
@@ -3894,9 +3923,11 @@ void VMManager::SetEmuThreadAffinities()
 	INFO_LOG("  GS thread is on processor {} (0x{:x})", gs_index, gs_affinity);
 	MTGS::GetThreadHandle().SetAffinity(gs_affinity);
 
+#if !defined(__SWITCH__)
 	// Try to find some threads for the software renderer.
 	// They should be in the same cluster as the main GS thread. If they're not, for example,
 	// we had 4 P cores and 6 E cores, let the OS schedule them instead.
+	// cpuinfo aborts on Horizon.
 	s_software_renderer_processor_list.clear();
 	s_software_renderer_processor_list.reserve(s_processor_list.size() - (mtvu ? 3 : 2));
 	const cpuinfo_processor* gs_proc = FindCpuinfoProcessorForOSId(gs_index);
@@ -3915,6 +3946,7 @@ void VMManager::SetEmuThreadAffinities()
 
 		s_software_renderer_processor_list.push_back(proc_index);
 	}
+#endif
 }
 
 const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()
@@ -3965,6 +3997,7 @@ void VMManager::ReloadPINE()
 		PINEServer::Initialize(EmuConfig.PINESlot);
 }
 
+#if !defined(__SWITCH__)
 void VMManager::InitializeDiscordPresence()
 {
 	if (s_discord_presence_active)
@@ -4039,6 +4072,12 @@ void VMManager::PollDiscordPresence()
 
 	Discord_RunCallbacks();
 }
+#else // __SWITCH__
+void VMManager::InitializeDiscordPresence() {}
+void VMManager::ShutdownDiscordPresence() {}
+void VMManager::UpdateDiscordPresence(bool update_session_time) {}
+void VMManager::PollDiscordPresence() {}
+#endif
 
 bool VMManager::WriteBytesToEESIORXFIFO(const std::span<const u8> data)
 {

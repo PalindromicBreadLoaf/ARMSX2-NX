@@ -31,6 +31,9 @@
 #ifndef _WIN32
 #include <time.h>
 #endif
+#if defined(__SWITCH__)
+#include "common/Horizon/HorizonTime.h"
+#endif
 #include <memory>
 
 cdvdStruct cdvd;
@@ -974,6 +977,9 @@ void cdvdReset()
 #if defined(_WIN32)
 		const std::time_t input_time = _mkgmtime(&resulting_tm) + GMT9_OFFSET_SECONDS - bios_settings_offset_seconds;
 		gmtime_s(&input_tm, &input_time);
+#elif defined(__SWITCH__)
+		const std::time_t input_time = Horizon::timegm_utc(resulting_tm) + GMT9_OFFSET_SECONDS - bios_settings_offset_seconds;
+		gmtime_r(&input_time, &input_tm);
 #else
 		const std::time_t input_time = timegm(&resulting_tm) + GMT9_OFFSET_SECONDS - bios_settings_offset_seconds;
 		gmtime_r(&input_time, &input_tm);
@@ -995,6 +1001,9 @@ void cdvdReset()
 #if defined(_WIN32)
 		const std::time_t resulting_time = _mkgmtime(&input_tm) - GMT9_OFFSET_SECONDS + bios_settings_offset_seconds;
 		gmtime_s(&resulting_tm, &resulting_time);
+#elif defined(__SWITCH__)
+		const std::time_t resulting_time = Horizon::timegm_utc(input_tm) - GMT9_OFFSET_SECONDS + bios_settings_offset_seconds;
+		gmtime_r(&resulting_time, &resulting_tm);
 #else
 		const std::time_t resulting_time = timegm(&input_tm) - GMT9_OFFSET_SECONDS + bios_settings_offset_seconds;
 		gmtime_r(&resulting_time, &resulting_tm);

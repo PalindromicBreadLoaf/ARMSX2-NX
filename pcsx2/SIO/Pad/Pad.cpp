@@ -12,7 +12,9 @@
 #include "SIO/Pad/PadNotConnected.h"
 #include "SIO/Sio.h"
 
+#if !defined(__SWITCH__)
 #include "Input/SDLInputSource.h"
+#endif
 
 #include "IconsFontAwesome.h"
 
@@ -173,7 +175,9 @@ void Pad::SetDefaultControllerConfig(SettingsInterface& si)
 	si.SetBoolValue("Pad", "MultitapPort2", false);
 	si.SetFloatValue("Pad", "PointerXScale", 8.0f);
 	si.SetFloatValue("Pad", "PointerYScale", 8.0f);
+#if !defined(__SWITCH__)
 	SDLInputSource::ResetRGBForAllPlayers(si);
+#endif
 
 	// PCSX2 Controller Settings - Default pad types and parameters.
 	for (u32 i = 0; i < Pad::NUM_CONTROLLER_PORTS; i++)
@@ -548,7 +552,12 @@ void Pad::SetControllerState(u32 controller, u32 bind, float value)
 	if (controller >= NUM_CONTROLLER_PORTS)
 		return;
 
-	s_controllers[controller]->Set(bind, value);
+	// Stop controller input before shutdown otherwise things get unhappy
+	PadBase* const pad = s_controllers[controller].get();
+	if (!pad)
+		return;
+
+	pad->Set(bind, value);
 }
 
 bool Pad::Freeze(StateWrapper& sw)

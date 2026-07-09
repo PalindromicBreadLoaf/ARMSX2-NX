@@ -79,6 +79,10 @@ static std::string s_font_path;
 
 static FT_Library s_ft_lib = nullptr;
 
+#ifdef __SWITCH__
+static bool s_use_default_font = false;
+#endif
+
 static ImFont* s_standard_font;
 static ImFont* s_fixed_font;
 static ImFont* s_osd_font;
@@ -134,8 +138,13 @@ bool ImGuiManager::Initialize()
 {
 	if (!LoadFontData())
 	{
+#ifdef __SWITCH__
+		Console.Warning("ImGuiManager font data unavailable. Using ImGui's built-in default font.");
+		s_use_default_font = true;
+#else
 		pxFailRel("Failed to load font data");
 		return false;
+#endif
 	}
 
 	s_global_scale = std::max(0.5f, g_gs_device->GetWindowScale() * (GSConfig.OsdScale / 100.0f));
@@ -763,6 +772,17 @@ bool ImGuiManager::AddImGuiFonts()
 {
 	ImGuiIO& io = ImGui::GetIO();
 	io.Fonts->Clear();
+
+#ifdef __SWITCH__
+	if (s_use_default_font)
+	{
+		s_standard_font = io.Fonts->AddFontDefault();
+		s_fixed_font = s_standard_font;
+		s_osd_font = s_standard_font;
+		ImGuiFullscreen::SetFont(s_standard_font);
+		return s_standard_font != nullptr && io.Fonts->Build();
+	}
+#endif
 
 	s_standard_font = AddTextFont();
 	if (!s_standard_font || !AddIconFonts() || !AddEmojiFont())

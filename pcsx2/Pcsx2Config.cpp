@@ -576,6 +576,12 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(fpuOverflow);
 	SettingsWrapBitBool(fpuExtraOverflow);
 	SettingsWrapBitBool(fpuFullMode);
+
+#if defined(__SWITCH__)
+	// The Switch lacking RWX isn't going to ever support fastmem.
+	// There is a fastmemlite implementation that gets some of this performance back.
+	EnableFastmem = false;
+#endif
 }
 
 u32 Pcsx2Config::RecompilerOptions::GetEEClampMode() const
@@ -727,6 +733,7 @@ const char* Pcsx2Config::GSOptions::GetRendererName(GSRendererType type)
 		case GSRendererType::VK:    return "Vulkan";
 		case GSRendererType::SW:    return "Software";
 		case GSRendererType::Null:  return "Null";
+		case GSRendererType::DK3D:  return "Deko3D";
 		default:                    return "";
 			// clang-format on
 	}
@@ -764,6 +771,7 @@ Pcsx2Config::GSOptions::GSOptions()
 	OsdShowCPU = false;
 	OsdShowGPU = false;
 	OsdShowGPUDebug = false;
+	OsdShowStallMeters = false;
 	OsdShowIndicators = true;
 	OsdShowFrameTimes = false;
 	OsdShowHardwareInfo = false;
@@ -998,6 +1006,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(OsdShowCPU);
 	SettingsWrapBitBool(OsdShowGPU);
 	SettingsWrapBitBool(OsdShowGPUDebug);
+	SettingsWrapBitBool(OsdShowStallMeters);
 	SettingsWrapBitBool(OsdShowResolution);
 	SettingsWrapBitBool(OsdShowGSStats);
 	SettingsWrapBitBool(OsdShowIndicators);

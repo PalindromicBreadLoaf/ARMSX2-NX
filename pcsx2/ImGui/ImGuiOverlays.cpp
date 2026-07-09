@@ -71,6 +71,10 @@ std::vector<SmallString> s_software_thread_lines;
 SmallString s_capture_line;
 SmallString s_gpu_usage_line;
 SmallString s_gpu_debug_info_line;
+SmallString s_stall_limiter_line;
+SmallString s_stall_busy_line;
+SmallString s_stall_ee_wait_line;
+SmallString s_stall_gs_wait_line;
 SmallString s_speed_icon;
 
 constexpr ImU32 white_color = IM_COL32(255, 255, 255, 255);
@@ -503,6 +507,21 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 					DRAW_LINE(osd_font, font_size, s_gpu_debug_info_line.c_str(), white_color);
 				}
 #endif
+			}
+
+			if (GSConfig.OsdShowStallMeters)
+			{
+				s_stall_limiter_line.format("Limiter: {}", PerformanceMetrics::GetLimiterName());
+				s_stall_busy_line.format("EE busy {:.0f}%  GS busy {:.0f}%  GPU {:.0f}%", PerformanceMetrics::GetEEBusyPercent(),
+					PerformanceMetrics::GetGSBusyPercent(), PerformanceMetrics::GetGPUBusyPercent());
+				s_stall_ee_wait_line.format("EE wait VU/GS/vs: {:.1f}/{:.1f}/{:.1f} ms", PerformanceMetrics::GetEEStallVUTime(),
+					PerformanceMetrics::GetEEStallGSTime(), PerformanceMetrics::GetEEStallVsyncTime());
+				s_stall_gs_wait_line.format("GS wait work/acq/gpu: {:.1f}/{:.1f}/{:.1f} ms", PerformanceMetrics::GetGSWorkWaitTime(),
+					PerformanceMetrics::GetGSAcquireWaitTime(), PerformanceMetrics::GetGSGpuWaitTime());
+				DRAW_LINE(osd_font, font_size, s_stall_limiter_line.c_str(), IM_COL32(255, 255, 140, 255));
+				DRAW_LINE(osd_font, font_size, s_stall_busy_line.c_str(), white_color);
+				DRAW_LINE(osd_font, font_size, s_stall_ee_wait_line.c_str(), white_color);
+				DRAW_LINE(osd_font, font_size, s_stall_gs_wait_line.c_str(), white_color);
 			}
 		}
 		// No refresh yet. Display cached lines.
