@@ -22,6 +22,10 @@
 #include "common/Path.h"
 #include "common/ScopedGuard.h"
 
+#ifdef __SWITCH__
+#include "common/Horizon/Horizon.h"
+#endif
+
 #include "imgui.h"
 
 #include <bit>
@@ -200,6 +204,10 @@ bool GSDeviceVK::SelectInstanceExtensions(ExtensionList* extension_list, const W
 #endif
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
 	if (wi.type == WindowInfo::Type::Android && !SupportsExtension(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME, true))
+		return false;
+#endif
+#if defined(VK_USE_PLATFORM_VI_NN)
+	if (wi.type == WindowInfo::Type::VI && !SupportsExtension(VK_NN_VI_SURFACE_EXTENSION_NAME, true))
 		return false;
 #endif
 
@@ -2555,6 +2563,16 @@ bool GSDeviceVK::CreateDeviceAndSwapChain()
 
 	if (!AcquireWindow(true))
 		return false;
+
+#ifdef __SWITCH__
+	// Present through the libnx default VI window.
+	m_window_info.type = WindowInfo::Type::VI;
+	m_window_info.window_handle = nwindowGetDefault();
+	m_window_info.surface_width = 1280;
+	m_window_info.surface_height = 720;
+	m_window_info.surface_scale = 1.0f;
+	m_window_info.surface_refresh_rate = 60.0f;
+#endif
 
 	m_instance = CreateVulkanInstance(m_window_info, &m_optional_extensions, enable_debug_utils, enable_validation_layer);
 	if (m_instance == VK_NULL_HANDLE)

@@ -69,8 +69,8 @@ namespace
 		sel.tme = (has_tex || ps.tex_is_fb || ps.depth_fmt != 0) ? 1u : 0u;
 		sel.tfx = ps.tfx;
 		sel.tcc = ps.tcc;
-		sel.atst = ps.atst;
-		sel.afail = ps.afail;
+		sel.atst = static_cast<u32>(ps.atst);
+		sel.afail = static_cast<u32>(ps.afail);
 		sel.fog = ps.fog;
 		sel.aem = ps.aem;
 		sel.aem_fmt = ps.aem_fmt;
@@ -132,9 +132,9 @@ namespace
 	{
 		switch (shader)
 		{
-			case ShaderConvert::RGBA8_TO_16_BITS:
-			case ShaderConvert::FLOAT32_TO_16_BITS:
-			case ShaderConvert::FLOAT32_TO_32_BITS:
+			case ShaderConvert::RGB5A1_TO_16_BITS:
+			case ShaderConvert::DEPTH32_TO_16_BITS:
+			case ShaderConvert::DEPTH32_TO_32_BITS:
 				return true;
 			default:
 				return false;
@@ -944,7 +944,7 @@ bool GSDeviceDK::UpdateWindow()
 	return true;
 }
 
-void GSDeviceDK::ResizeWindow(s32 new_window_width, s32 new_window_height, float new_window_scale)
+void GSDeviceDK::ResizeWindow(u32 new_window_width, u32 new_window_height, float new_window_scale)
 {
 }
 
@@ -1364,35 +1364,26 @@ void GSDeviceDK::DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureD
 		return;
 	}
 
-	DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_fsh, false, &ub, sizeof(ub), HasDepthOutput(shader),
+	DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_fsh, false, &ub, sizeof(ub), HasFloat32Output(shader),
 		color_write_mask);
 #endif
 }
 
-void GSDeviceDK::StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	ShaderConvert shader, bool linear)
+void GSDeviceDK::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
+	ShaderConvertSelector shader, Filter filter)
 {
 #ifdef __SWITCH__
-	DoConvert(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, shader, linear,
-		ShaderConvertWriteMask(shader));
-#endif
-}
-
-void GSDeviceDK::StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	bool red, bool green, bool blue, bool alpha, ShaderConvert shader)
-{
-#ifdef __SWITCH__
-	const u32 mask = (red ? 1u : 0u) | (green ? 2u : 0u) | (blue ? 4u : 0u) | (alpha ? 8u : 0u);
-	DoConvert(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, shader, false, mask);
+	DoConvert(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, shader.Shader(),
+		filter == Filter::Biln, shader.Mask());
 #endif
 }
 
 void GSDeviceDK::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	PresentShader shader, float shaderTime, bool linear)
+	PresentShader shader, float shaderTime, Filter filter)
 {
 #ifdef __SWITCH__
 	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, &m_copy_fsh,
-		linear);
+		filter == Filter::Biln);
 #endif
 }
 
@@ -1470,7 +1461,7 @@ u32 GSDeviceDK::SelectTfxVariant(const GSHWDrawConfig& config)
 	const GSHWDrawConfig::PSSelector& ps = config.ps;
 
 	// Heavy per-pixel effects the specialised variants fold out entirely
-	const bool special = (ps.channel != 0 || ps.channel_fb || ps.depth_fmt != 0 ||
+	const bool special = (ps.channel != 0 || ps.depth_fmt != 0 ||
 		ps.urban_chaos_hle || ps.tales_of_abyss_hle || ps.shuffle || ps.dither);
 
 	const bool extra_pass = config.blend_multi_pass.enable || config.alpha_second_pass.enable;
@@ -1492,7 +1483,7 @@ u32 GSDeviceDK::SelectTfxVariant(const GSHWDrawConfig& config)
 	if (extra_pass)
 		return TfxVariantUber;
 
-	if (ps.IsFeedbackLoop())
+	if (ps.IsFeedbackLoopRT())
 		return TfxVariantUber;
 
 	// shader-side blend, fbmask, tex-is-fb, DATE all read the target.
@@ -2176,11 +2167,13 @@ GSTexture* GSDeviceDK::CreateSurface(GSTexture::Type type, int width, int height
 }
 
 void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
-	const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const bool linear)
+	const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
 {
 #ifdef __SWITCH__
 	if (!dTex)
 		return;
+
+	const bool linear = (filter == Filter::Biln);
 
 	GSTextureDK* const dst = static_cast<GSTextureDK*>(dTex);
 	GSTextureDK* const src0 = static_cast<GSTextureDK*>(sTex[0]); // alpha-blended foreground
@@ -2264,11 +2257,13 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 }
 
 void GSDeviceDK::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	ShaderInterlace shader, bool linear, const InterlaceConstantBuffer& cb)
+	ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb)
 {
 #ifdef __SWITCH__
 	if (!m_postprocess_shaders_ok || !sTex || !dTex)
 		return;
+
+	const bool linear = (filter == Filter::Biln);
 
 	// cb0: vec4 ZrH + uint mode
 	struct

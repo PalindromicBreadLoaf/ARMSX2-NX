@@ -1841,7 +1841,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 	u8* const data_base = s_code_write;
 	_VURegsNum* const uregs_data = reinterpret_cast<_VURegsNum*>(data_base);
 	_VURegsNum* const lregs_data = uregs_data + numPairs;
-	
+
 	_VURegsNum* const uregs_data_w = reinterpret_cast<_VURegsNum*>(HostSys::JitGetWritablePointer(data_base));
 	_VURegsNum* const lregs_data_w = uregs_data_w + numPairs;
 

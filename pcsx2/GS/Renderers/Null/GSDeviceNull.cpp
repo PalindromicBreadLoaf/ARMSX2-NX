@@ -184,7 +184,7 @@ bool GSDeviceNull::UpdateWindow()
 	return true;
 }
 
-void GSDeviceNull::ResizeWindow(s32 new_window_width, s32 new_window_height, float new_window_scale)
+void GSDeviceNull::ResizeWindow(u32 new_window_width, u32 new_window_height, float new_window_scale)
 {
 }
 
@@ -284,8 +284,8 @@ void GSDeviceNull::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& 
 #endif
 }
 
-void GSDeviceNull::StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	ShaderConvert shader, bool linear)
+void GSDeviceNull::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
+	ShaderConvertSelector shader, Filter filter)
 {
 #ifdef __SWITCH__
 	GSTexture::GSMap sm, dm;
@@ -302,19 +302,14 @@ void GSDeviceNull::StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTextur
 #endif
 }
 
-void GSDeviceNull::StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	bool red, bool green, bool blue, bool alpha, ShaderConvert shader)
-{
-}
-
 void GSDeviceNull::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	PresentShader shader, float shaderTime, bool linear)
+	PresentShader shader, float shaderTime, Filter filter)
 {
 #ifdef __SWITCH__
 	// dTex != null means present to a texture
 	if (dTex)
 	{
-		StretchRect(sTex, sRect, dTex, dRect, ShaderConvert::COPY, linear);
+		StretchRect(sTex, sRect, dTex, dRect, ShaderConvert::COPY, filter);
 		return;
 	}
 
@@ -362,7 +357,7 @@ GSTexture* GSDeviceNull::CreateSurface(GSTexture::Type type, int width, int heig
 }
 
 void GSDeviceNull::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
-	const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const bool linear)
+	const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
 {
 #ifdef __SWITCH__
 	GSTexture::GSMap dm;
@@ -400,7 +395,7 @@ void GSDeviceNull::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex
 }
 
 void GSDeviceNull::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-	ShaderInterlace shader, bool linear, const InterlaceConstantBuffer& cb)
+	ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb)
 {
 }
 

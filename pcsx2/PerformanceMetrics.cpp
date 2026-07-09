@@ -371,3 +371,25 @@ u32 PerformanceMetrics::GetFrameTimeHistoryPos()
 {
 	return s_frame_time_history_pos;
 }
+
+#ifdef __SWITCH__
+// GS-thread stall accounting for the Switch stall meters.
+static std::atomic<u64> s_gs_acquire_wait_ns_accumulator{0};
+static std::atomic<u64> s_gs_gpu_wait_ns_accumulator{0};
+static std::atomic<u64> s_gs_work_wait_ns_accumulator{0};
+
+void PerformanceMetrics::AccumulateGSAcquireWait(u64 ns)
+{
+	s_gs_acquire_wait_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
+void PerformanceMetrics::AccumulateGSGpuWait(u64 ns)
+{
+	s_gs_gpu_wait_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+
+void PerformanceMetrics::AccumulateGSWorkWait(u64 ns)
+{
+	s_gs_work_wait_ns_accumulator.fetch_add(ns, std::memory_order_relaxed);
+}
+#endif

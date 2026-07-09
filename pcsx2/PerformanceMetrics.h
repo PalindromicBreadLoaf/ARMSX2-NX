@@ -60,4 +60,11 @@ namespace PerformanceMetrics
 
 	const FrameTimeHistory& GetFrameTimeHistory();
 	u32 GetFrameTimeHistoryPos();
+
+#ifdef __SWITCH__
+	// GS-thread stall accounting for the Switch
+	void AccumulateGSAcquireWait(u64 ns);
+	void AccumulateGSGpuWait(u64 ns);
+	void AccumulateGSWorkWait(u64 ns);
+#endif
 } // namespace PerformanceMetrics

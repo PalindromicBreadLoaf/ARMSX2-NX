@@ -34,6 +34,11 @@
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #endif
 
+#ifdef __SWITCH__
+#include "GS/Renderers/Null/GSDeviceNull.h"
+#include "GS/Renderers/DK3D/GSDeviceDK.h"
+#endif
+
 #ifdef _WIN32
 
 #include "GS/Renderers/DX11/GSDevice11.h"
@@ -98,9 +103,22 @@ static RenderAPI GetAPIForRenderer(GSRendererType renderer)
 			return RenderAPI::Metal;
 #endif
 
+#ifdef __SWITCH__
+		case GSRendererType::DK3D:
+			return RenderAPI::DK3D;
+#endif
+
 			// We could end up here if we ever removed a renderer.
 		default:
-			return GetAPIForRenderer(GSUtil::GetPreferredRenderer());
+		{
+			// The Null and SW renderers have no graphics API of their own. On builds without a
+			// hardware backend GetPreferredRenderer() returns SW.
+			// This is a hack and will be removed in the future if I can remember to.
+			const GSRendererType preferred = GSUtil::GetPreferredRenderer();
+			if (preferred == renderer || preferred == GSRendererType::SW || preferred == GSRendererType::Null)
+				return RenderAPI::None;
+			return GetAPIForRenderer(preferred);
+		}
 	}
 }
 
@@ -132,6 +150,15 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 #ifdef ENABLE_VULKAN
 		case RenderAPI::Vulkan:
 			g_gs_device = std::make_unique<GSDeviceVK>();
+			break;
+#endif
+
+#ifdef __SWITCH__
+		case RenderAPI::None:
+			g_gs_device = std::make_unique<GSDeviceNull>();
+			break;
+		case RenderAPI::DK3D:
+			g_gs_device = std::make_unique<GSDeviceDK>();
 			break;
 #endif
 
@@ -1014,6 +1041,25 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 	s_fh = NULL;
 }
 
+#elif defined(__SWITCH__)
+
+#include <cstring>
+#include <malloc.h>
+
+// Horizon has no shm_open/mmap
+void* GSAllocateWrappedMemory(size_t size, size_t repeat)
+{
+	void* base = memalign(0x1000, size * repeat);
+	if (base)
+		std::memset(base, 0, size * repeat);
+	return base;
+}
+
+void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
+{
+	free(ptr);
+}
+
 #else
 
 #include <sys/mman.h>
@@ -1055,7 +1101,6 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 		fprintf(stderr, "Failed to reserve memory due to %s\n", strerror(errno));
 
 	void* fifo = mmap(nullptr, size * repeat, PROT_READ | PROT_WRITE, MAP_SHARED, s_shm_fd, 0);
-#endif
 	for (size_t i = 1; i < repeat; i++)
 	{
 		void* base = (u8*)fifo + size * i;
@@ -1079,6 +1124,8 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 	close(s_shm_fd);
 	s_shm_fd = -1;
 }
+
+#endif
 
 std::pair<u8, u8> GSGetRGBA8AlphaMinMax(const void* data, u32 width, u32 height, u32 stride)
 {
