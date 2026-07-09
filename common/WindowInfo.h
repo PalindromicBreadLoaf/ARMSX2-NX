@@ -16,7 +16,9 @@ struct WindowInfo
 		X11,
 		Wayland,
 		MacOS,
-		Android
+		Android,
+		// Nintendo Switch NWindow.
+		VI
 	};
 
 	/// The type of the surface. Surfaceless indicates it will not be displayed on screen at all.

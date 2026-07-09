@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// Copyright (c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 // SPDX-License-Identifier: GPL-3.0+
 
 /*
@@ -919,6 +920,9 @@ static void vtlb_CreateFastmemMapping(u32 vaddr, u32 mainmem_offset, const PageP
 {
 	FASTMEM_LOG("Create fastmem mapping @ vaddr %08X mainmem %08X", vaddr, mainmem_offset);
 
+	if (s_fastmem_virtual_mapping.empty())
+		return;
+
 	const u32 page = vaddr / VTLB_PAGE_SIZE;
 
 	if (s_fastmem_virtual_mapping[page] == mainmem_offset)
@@ -992,6 +996,9 @@ static void vtlb_RemoveFastmemMappings(u32 vaddr, u32 size)
 {
 	pxAssert((vaddr & VTLB_PAGE_MASK) == 0);
 	pxAssert(size > 0 && (size & VTLB_PAGE_MASK) == 0);
+
+	if (s_fastmem_virtual_mapping.empty())
+		return;
 
 	const u32 num_pages = size / VTLB_PAGE_SIZE;
 	for (u32 i = 0; i < num_pages; i++, vaddr += VTLB_PAGE_SIZE)
@@ -1330,14 +1337,21 @@ bool vtlb_Core_Alloc()
 	s_fastmem_area = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);
 	if (!s_fastmem_area)
 	{
+#if defined(__SWITCH__)
+		Console.Warning("Fastmem area unavailable.");
+#else
 		Host::ReportErrorAsync("Error", "Failed to allocate fastmem area");
 		return false;
+#endif
 	}
 
-	s_fastmem_virtual_mapping.resize(FASTMEM_PAGE_COUNT, NO_FASTMEM_MAPPING);
-	vtlbdata.fastmem_base = (uptr)s_fastmem_area->BasePointer();
-	DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
-		vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
+	if (s_fastmem_area)
+	{
+		s_fastmem_virtual_mapping.resize(FASTMEM_PAGE_COUNT, NO_FASTMEM_MAPPING);
+		vtlbdata.fastmem_base = (uptr)s_fastmem_area->BasePointer();
+		DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
+			vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
+	}
 
 	Error error;
 	if (!PageFaultHandler::Install(&error))
