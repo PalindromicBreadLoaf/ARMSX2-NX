@@ -30,12 +30,6 @@ extern "C" int lockf(int fd, int cmd, off_t len)
 	return 0;
 }
 
-int FileSystem::OpenFDFileContent(const char* filename)
-{
-	(void)filename;
-	return -1;
-}
-
 std::unique_ptr<HTTPDownloader> HTTPDownloader::Create(std::string user_agent)
 {
 	(void)user_agent;

@@ -3957,6 +3957,10 @@ const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()
 
 u64 VMManager::Internal::GetPerformanceClusterAffinityMask()
 {
+#if defined(__SWITCH__)
+	// Switch pins EE/VU/GS to explicit cores via svcSetThreadCoreMask.
+	return 0;
+#else
 	// Union the clusters that contain the EE/VU/GS target processors so
 	// callers (Oboe audio data callback) can pin onto the same big cluster
 	// without competing with EE for L1/L2. EE/VU/GS themselves use single-
@@ -3982,6 +3986,7 @@ u64 VMManager::Internal::GetPerformanceClusterAffinityMask()
 		ClusterAffinityMaskForOSId(vu_index) |
 		ClusterAffinityMaskForOSId(gs_index);
 	return perf_mask;
+#endif
 }
 
 void VMManager::ReloadPINE()

@@ -7,6 +7,7 @@
 
 #ifndef __APPLE__
 #include "cpuinfo.h"
+#include <thread>
 #endif
 
 #if defined(__ANDROID__)
@@ -155,8 +156,22 @@ void AbortWithMessage(const char* msg)
 // MacOS version is in DarwinMisc
 static CPUInfo CalcCPUInfo()
 {
-	CPUInfo out;
-	out.name = cpuinfo_get_package(0)->name;
+	CPUInfo out = {};
+
+	// Switch can't set cpuinfo without crashing, so hardcode sane defaults.
+	if (!cpuinfo_initialize())
+	{
+		const u32 hc = std::thread::hardware_concurrency();
+		out.name = "Tegra X1";
+		out.num_threads = hc ? hc : 1;
+		out.num_big_cores = out.num_threads;
+		out.num_small_cores = 0;
+		out.num_clusters = 1;
+		return out;
+	}
+
+	const cpuinfo_package* const package = cpuinfo_get_package(0);
+	out.name = package ? package->name : "Unknown";
 #if defined(__ANDROID__)
 	if (out.name.empty() || out.name == "Unknown")
 	{

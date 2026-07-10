@@ -289,8 +289,13 @@ GSRendererType GSUtil::GetPreferredRenderer()
 		// Use D3D device info to select renderer.
 		preferred_renderer = D3D::GetPreferredRenderer();
 #elif defined(__SWITCH__)
-		// Switch: prefer Vulkan over DK3D for accuracy
+#ifdef ENABLE_VULKAN
+		// Switch: prefer Vulkan over DK3D for accuracy (when the nxvk backend is built in)
 		preferred_renderer = GSRendererType::VK;
+#else
+		// Switch without the Vulkan backend
+		preferred_renderer = GSRendererType::DK3D;
+#endif
 #elif defined(__ANDROID__)
 		// Android: prefer OpenGL HW. Vulkan's suitability probe is fragile
 		// across the wide spread of mobile driver stacks, and falling through

@@ -1141,6 +1141,14 @@ elseif(ARCH_ARM64)
 	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers})
 	if(HORIZON)
 		list(APPEND pcsx2LTOSources ${pcsx2arm64RecSources} ${pcsx2arm64RecHeaders})
+		# Arch-agnostic support the native ARM64 rec/core need but which normally
+		# live in the ARCH_X86-only (BaseblockEx) or Android (pcap) source lists,
+		# plus the port's VU1 fingerprinting.
+		list(APPEND pcsx2LTOSources
+			x86/BaseblockEx.cpp
+			VU1Fingerprint.cpp
+			Android/AndroidPcapStubs.cpp
+		)
 	endif()
 	target_link_libraries(PCSX2_FLAGS INTERFACE vixl)
 endif()

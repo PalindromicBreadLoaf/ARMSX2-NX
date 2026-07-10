@@ -146,12 +146,6 @@ void Host::ReportInfoAsync(const std::string_view title, const std::string_view 
 		INFO_LOG("ReportInfoAsync: {}", message);
 }
 
-bool Host::ConfirmMessage(const std::string_view title, const std::string_view message)
-{
-	WARNING_LOG("ConfirmMessage (auto yes): {}: {}", title, message);
-	return true;
-}
-
 std::unique_ptr<ProgressCallback> Host::CreateHostProgressCallback()
 {
 	return nullptr;
@@ -164,6 +158,17 @@ void Host::OpenURL(const std::string_view url)
 bool Host::CopyTextToClipboard(const std::string_view text)
 {
 	return false;
+}
+
+std::string Host::GetTextFromClipboard()
+{
+	return {};
+}
+
+int Host::LocaleSensitiveCompare(std::string_view lhs, std::string_view rhs)
+{
+	// A byte-wise compare is a fine fallback for the game-list sorting this drives.
+	return lhs.compare(rhs);
 }
 
 void Host::BeginTextInput()

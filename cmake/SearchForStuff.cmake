@@ -14,11 +14,11 @@ set(CMAKE_FIND_FRAMEWORK NEVER)
 find_package(PNG 1.6.40 REQUIRED)
 find_package(JPEG REQUIRED) # No version because flatpak uses libjpeg-turbo.
 find_package(ZLIB REQUIRED) # v1.3, but Mac uses the SDK version.
-find_package(Freetype 2.10 REQUIRED) # 2.10 is the first with COLRv0 support, which we need for rendering emoji
 if(HORIZON)
-	# devkitPro portlibs supplies zlib/png/jpeg/freetype2.
-	# bundle the 3rdparty copies.
-	# SDL3 is not built at all on Switch.
+	# devkitPro portlibs supplies zlib/png/jpeg
+	# bundle the 3rdparty copies of the rest.
+	add_subdirectory(3rdparty/harfbuzz EXCLUDE_FROM_ALL)
+	add_subdirectory(3rdparty/freetype EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/zstd EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/lz4 EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/libwebp EXCLUDE_FROM_ALL)
@@ -27,6 +27,7 @@ if(HORIZON)
 	add_library(ryml::ryml ALIAS pcsx2-rapidyaml)
 	add_subdirectory(3rdparty/plutosvg1 EXCLUDE_FROM_ALL)
 else()
+	find_package(Freetype 2.10 REQUIRED)
 	find_package(Zstd 1.5.5 REQUIRED)
 	find_package(LZ4 REQUIRED)
 	find_package(WebP REQUIRED) # v1.3.2, spews an error on Linux because no pkg-config.

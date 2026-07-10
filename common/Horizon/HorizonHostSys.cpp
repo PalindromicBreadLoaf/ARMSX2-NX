@@ -19,30 +19,31 @@
 
 namespace
 {
-	struct HorizonMapping
-	{
-		void* src; // heap backing pointer
-		size_t size;
-	};
-
-	std::mutex s_mapping_mutex;
-	std::map<void*, HorizonMapping> s_mappings;
-
-	// Nintendo hates JIT so this is a hack but it maybe works?
+	// Nintendo hates JIT so this is a hack but it works.
 	struct HorizonCodeMapping
 	{
 		Jit jit;
-		u8* rx; // writeable page
-		u8* rw; // writable alias of the same physical page
+		u8* rx; // executable view
+		u8* rw; // writable alias of the same physical pages
+		size_t size;
+	};
+
+	// svcMapMemory alias of a CreateSharedMemory() backing into a reserved range.
+	struct HorizonRamMapping
+	{
+		void* src; // borrowed backing pointer
 		size_t size;
 	};
 
 	std::mutex s_code_mutex;
-	std::map<u8*, HorizonCodeMapping> s_code_mappings;
+	std::map<u8*, HorizonCodeMapping> s_code_mappings; // rx base
 
 	std::mutex s_shm_mutex;
-	std::map<void*, size_t> s_shm_handles;            // backing pointer -> size
-	std::map<void*, HorizonMapping> s_shm_mappings;   // mapped base -> {borrowed src, size}
+	std::map<void*, size_t> s_shm_handles;          // backing pointer
+	std::map<void*, HorizonRamMapping> s_ram_mappings; // mapped base
+
+	std::mutex s_area_mutex;
+	std::map<u8*, VirtmemReservation*> s_area_reservations; // area base
 
 	const HorizonCodeMapping* FindCodeMapping(const void* ptr)
 	{
@@ -69,113 +70,12 @@ static u32 HorizonProt(const PageProtectionMode& mode)
 	return Perm_None;
 }
 
-void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
-{
-	pxAssertMsg((size & (__pagesize - 1)) == 0, "Size is page aligned");
-
-	if (mode.IsNone())
-		return nullptr;
-
-	// Horizon cannot make anonymous pages executable
-	if (mode.CanExecute())
-	{
-		Jit jit;
-		const Result rc = jitCreate(&jit, size);
-		if (R_FAILED(rc))
-		{
-			Console.Error("HostSys::Mmap: jitCreate(%zu) failed: 0x%08x. This usually means the "
-						  "process lacks the JIT capability. Make sure you aren't using Applet Mode.", size, rc);
-			return nullptr;
-		}
-
-		const Result trc = jitTransitionToExecutable(&jit);
-		if (R_FAILED(trc))
-		{
-			Console.Error("HostSys::Mmap: jitTransitionToExecutable() failed: 0x%08x", trc);
-			jitClose(&jit);
-			return nullptr;
-		}
-
-		u8* const rx = static_cast<u8*>(jitGetRxAddr(&jit));
-		u8* const rw = static_cast<u8*>(jitGetRwAddr(&jit));
-
-		std::lock_guard lock(s_code_mutex);
-		s_code_mappings.emplace(rx, HorizonCodeMapping{jit, rx, rw, size});
-		return rx;
-	}
-
-	void* src = memalign(__pagesize, size);
-	if (!src)
-		return nullptr;
-	std::memset(src, 0, size);
-
-	// svcMapMemory requires the destination to live in the process' stack region
-	virtmemLock();
-	void* dst = base ? base : virtmemFindStack(size, 0);
-	const Result rc = dst ? svcMapMemory(dst, src, size) : MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
-	virtmemUnlock();
-
-	if (!dst || R_FAILED(rc))
-	{
-		Console.Error("HostSys::Mmap: svcMapMemory(%p, %p, 0x%zx) failed: 0x%08x", dst, src, size, rc);
-		free(src);
-		return nullptr;
-	}
-
-	const u32 prot = HorizonProt(mode);
-	if (prot != Perm_Rw)
-		svcSetMemoryPermission(dst, size, prot);
-
-	std::lock_guard lock(s_mapping_mutex);
-	s_mappings.emplace(dst, HorizonMapping{src, size});
-	return dst;
-}
-
-void HostSys::Munmap(void* base, size_t size)
-{
-	if (!base)
-		return;
-
-	// Executable (Jit-backed) region?
-	{
-		std::unique_lock clock(s_code_mutex);
-		const auto cit = s_code_mappings.find(static_cast<u8*>(base));
-		if (cit != s_code_mappings.end())
-		{
-			Jit jit = cit->second.jit;
-			s_code_mappings.erase(cit);
-			clock.unlock();
-			jitClose(&jit);
-			return;
-		}
-	}
-
-	std::unique_lock lock(s_mapping_mutex);
-	const auto it = s_mappings.find(base);
-	if (it == s_mappings.end())
-		return;
-
-	void* const src = it->second.src;
-	const size_t mapped_size = it->second.size;
-	s_mappings.erase(it);
-	lock.unlock();
-
-	svcSetMemoryPermission(base, mapped_size, Perm_Rw);
-
-	virtmemLock();
-	svcUnmapMemory(base, src, mapped_size);
-	virtmemUnlock();
-
-	free(src);
-}
-
 void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& mode)
 {
 	pxAssertMsg((size & (__pagesize - 1)) == 0, "Size is page aligned");
 
 	if (mode.CanExecute())
 	{
-		// Execute permission can only be granted through the Jit aliasing path
 		Console.Error("HostSys::MemProtect: execute permission is unsupported on Horizon");
 		return;
 	}
@@ -215,55 +115,6 @@ void HostSys::DestroySharedMemory(void* ptr)
 	std::lock_guard lock(s_shm_mutex);
 	if (s_shm_handles.erase(ptr) > 0)
 		free(ptr);
-}
-
-void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size_t size, const PageProtectionMode& mode)
-{
-	if (mode.CanExecute())
-	{
-		Console.Error("HostSys::MapSharedMemory: executable shared mappings are unsupported on Horizon");
-		return nullptr;
-	}
-
-	u8* const src = static_cast<u8*>(handle) + offset;
-
-	virtmemLock();
-	void* dst = baseaddr ? baseaddr : virtmemFindStack(size, 0);
-	const Result rc = dst ? svcMapMemory(dst, src, size) : MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
-	virtmemUnlock();
-
-	if (!dst || R_FAILED(rc))
-	{
-		Console.Error("HostSys::MapSharedMemory: svcMapMemory(%p, %p, 0x%zx) failed: 0x%08x", dst, src, size, rc);
-		return nullptr;
-	}
-
-	const u32 prot = HorizonProt(mode);
-	if (prot != Perm_Rw)
-		svcSetMemoryPermission(dst, size, prot);
-
-	std::lock_guard lock(s_shm_mutex);
-	s_shm_mappings.emplace(dst, HorizonMapping{src, size});
-	return dst;
-}
-
-void HostSys::UnmapSharedMemory(void* baseaddr, size_t size)
-{
-	std::unique_lock lock(s_shm_mutex);
-	const auto it = s_shm_mappings.find(baseaddr);
-	if (it == s_shm_mappings.end())
-		return;
-
-	void* const src = it->second.src; // borrowed. owned by the handle. do not free
-	const size_t mapped_size = it->second.size;
-	s_shm_mappings.erase(it);
-	lock.unlock();
-
-	svcSetMemoryPermission(baseaddr, mapped_size, Perm_Rw);
-
-	virtmemLock();
-	svcUnmapMemory(baseaddr, src, mapped_size);
-	virtmemUnlock();
 }
 
 size_t HostSys::GetRuntimePageSize()
@@ -311,21 +162,147 @@ SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size
 SharedMemoryMappingArea::~SharedMemoryMappingArea()
 {
 	pxAssertRel(m_num_mappings == 0, "No mappings left");
+
+	std::unique_lock lock(s_area_mutex);
+	const auto it = s_area_reservations.find(m_base_ptr);
+	if (it != s_area_reservations.end())
+	{
+		VirtmemReservation* const rv = it->second;
+		s_area_reservations.erase(it);
+		lock.unlock();
+
+		virtmemLock();
+		virtmemRemoveReservation(rv);
+		virtmemUnlock();
+	}
 }
 
-std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t size)
+std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t size, bool jit)
 {
-	return nullptr;
+	pxAssertRel(Common::IsAlignedPow2(size, __pagesize), "Size is page aligned");
+
+	// On Horizon only the JIT code+data reservation is backed.
+	if (!jit)
+		return nullptr;
+
+	// svcMapMemory requires the destination to live in the process' stack region.
+	virtmemLock();
+	void* const base = virtmemFindStack(size, 0);
+	VirtmemReservation* const rv = base ? virtmemAddReservation(base, size) : nullptr;
+	virtmemUnlock();
+
+	if (!base || !rv)
+	{
+		Console.Error("SharedMemoryMappingArea::Create: failed to reserve 0x%zx bytes", size);
+		return nullptr;
+	}
+
+	{
+		std::lock_guard lock(s_area_mutex);
+		s_area_reservations.emplace(static_cast<u8*>(base), rv);
+	}
+
+	return std::unique_ptr<SharedMemoryMappingArea>(
+		new SharedMemoryMappingArea(static_cast<u8*>(base), size, size / __pagesize));
 }
 
 u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* map_base, size_t map_size, const PageProtectionMode& mode)
 {
-	return nullptr;
+	if (mode.CanExecute())
+	{
+		Jit jit;
+		const Result rc = jitCreate(&jit, map_size);
+		if (R_FAILED(rc))
+		{
+			Console.Error("SharedMemoryMappingArea::Map: jitCreate(%zu) failed: 0x%08x. This usually means the "
+						  "process lacks the JIT capability. Make sure you aren't using Applet Mode.", map_size, rc);
+			return nullptr;
+		}
+
+		const Result trc = jitTransitionToExecutable(&jit);
+		if (R_FAILED(trc))
+		{
+			Console.Error("SharedMemoryMappingArea::Map: jitTransitionToExecutable() failed: 0x%08x", trc);
+			jitClose(&jit);
+			return nullptr;
+		}
+
+		u8* const rx = static_cast<u8*>(jitGetRxAddr(&jit));
+		u8* const rw = static_cast<u8*>(jitGetRwAddr(&jit));
+
+		{
+			std::lock_guard lock(s_code_mutex);
+			s_code_mappings.emplace(rx, HorizonCodeMapping{jit, rx, rw, map_size});
+		}
+
+		m_num_mappings++;
+		return rx;
+	}
+
+	if (!file_handle)
+	{
+		// Anonymous, non-executable mappings are only requested by the (disabled) fastmem path.
+		Console.Error("SharedMemoryMappingArea::Map: anonymous non-exec mappings are unsupported on Horizon");
+		return nullptr;
+	}
+
+	u8* const src = static_cast<u8*>(file_handle) + file_offset;
+
+	const Result rc = svcMapMemory(map_base, src, map_size);
+	if (R_FAILED(rc))
+	{
+		Console.Error("SharedMemoryMappingArea::Map: svcMapMemory(%p, %p, 0x%zx) failed: 0x%08x", map_base, src, map_size, rc);
+		return nullptr;
+	}
+
+	const u32 prot = HorizonProt(mode);
+	if (prot != Perm_Rw)
+		svcSetMemoryPermission(map_base, map_size, prot);
+
+	{
+		std::lock_guard lock(s_shm_mutex);
+		s_ram_mappings.emplace(map_base, HorizonRamMapping{src, map_size});
+	}
+
+	m_num_mappings++;
+	return static_cast<u8*>(map_base);
 }
 
-bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
+bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size, bool is_file)
 {
-	return false;
+	// Executable (Jit-backed) region?
+	{
+		std::unique_lock clock(s_code_mutex);
+		const auto cit = s_code_mappings.find(static_cast<u8*>(map_base));
+		if (cit != s_code_mappings.end())
+		{
+			Jit jit = cit->second.jit;
+			s_code_mappings.erase(cit);
+			clock.unlock();
+			jitClose(&jit);
+			m_num_mappings--;
+			return true;
+		}
+	}
+
+	std::unique_lock lock(s_shm_mutex);
+	const auto it = s_ram_mappings.find(map_base);
+	if (it == s_ram_mappings.end())
+		return false;
+
+	void* const src = it->second.src; // owned by the shared-memory handle
+	const size_t mapped_size = it->second.size;
+	s_ram_mappings.erase(it);
+	lock.unlock();
+
+	svcSetMemoryPermission(map_base, mapped_size, Perm_Rw);
+
+	virtmemLock();
+	svcUnmapMemory(map_base, src, mapped_size);
+	virtmemUnlock();
+
+	m_num_mappings--;
+	return true;
 }
 
 namespace PageFaultHandler
@@ -335,7 +312,12 @@ namespace PageFaultHandler
 
 bool PageFaultHandler::Install(Error* error)
 {
-
+	// Horizon has no POSIX signal delivery for SIGSEGV
 	s_installed = true;
+	return true;
+}
+
+bool PageFaultHandler::InstallSecondaryThread()
+{
 	return true;
 }
