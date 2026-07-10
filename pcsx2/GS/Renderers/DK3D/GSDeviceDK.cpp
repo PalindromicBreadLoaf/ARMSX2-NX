@@ -990,6 +990,8 @@ void GSDeviceDK::RenderImGui()
 	const ImDrawData* draw_data = ImGui::GetDrawData();
 	if (!draw_data || draw_data->CmdListsCount == 0 || !m_imgui_shaders_ok || !m_frame_active || m_present_slot < 0)
 		return;
+	
+	UpdateImGuiTextures();
 
 	InvalidateHWStateCache();
 

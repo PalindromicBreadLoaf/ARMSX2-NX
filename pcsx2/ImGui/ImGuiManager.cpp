@@ -780,7 +780,7 @@ bool ImGuiManager::AddImGuiFonts()
 		s_fixed_font = s_standard_font;
 		s_osd_font = s_standard_font;
 		ImGuiFullscreen::SetFont(s_standard_font);
-		return s_standard_font != nullptr && io.Fonts->Build();
+		return s_standard_font != nullptr;
 	}
 #endif
 
