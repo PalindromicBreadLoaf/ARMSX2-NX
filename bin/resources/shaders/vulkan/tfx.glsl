@@ -1776,6 +1776,7 @@ void main()
 			}
 		#endif
 	#endif
+	#endif
 
 	#if PS_ZCLAMP
 		input_z = min(input_z, MaxDepthPS);
