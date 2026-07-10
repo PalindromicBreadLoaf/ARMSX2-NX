@@ -148,7 +148,11 @@ namespace
 			VMManager::SetDefaultSettings(*s_settings_interface, true, true, true, true, true);
 
 			s_settings_interface->SetStringValue("Filenames", "Game", "");
+#ifdef ENABLE_VULKAN
 			s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::VK));
+#else
+			s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::DK3D));
+#endif
 			s_settings_interface->SetStringValue("EmuCore/GS", "AspectRatio", "4:3");
 			s_settings_interface->SetIntValue("EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Off));
 			s_settings_interface->SetStringValue("SPU2/Output", "Backend", "Horizon");
@@ -175,7 +179,7 @@ namespace
 		params.filename = std::move(path);
 
 		INFO_LOG("Booting image: {}", params.filename);
-		if (VMManager::Initialize(std::move(params)))
+		if (VMManager::Initialize(std::move(params)) == VMBootResult::StartupSuccess)
 			VMManager::SetState(VMState::Running);
 		else
 			ERROR_LOG("VMManager::Initialize() failed for the launch image");
@@ -231,9 +235,6 @@ int main(int argc, char** argv)
 	else
 		INFO_LOG("Configured BIOS: {}", bios);
 
-	// Point ImGui at its fonts
-	ImGuiManager::SetFontPathAndRange(
-		Path::Combine(EmuFolders::Resources, "fonts" FS_OSPATH_SEPARATOR_STR "Roboto-Regular.ttf"), {});
 
 	if (!VMManager::Internal::CPUThreadInitialize())
 	{

@@ -218,7 +218,7 @@ nx_generate_nacp(OUTPUT armsx2.nacp
 	VERSION "2.0.0"
 )
 nx_create_nro(armsx2
-	OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/armsx2nx.nro"
+	OUTPUT "${CMAKE_BINARY_DIR}/armsx2nx-refresh.nro"
 	NACP "${CMAKE_CURRENT_BINARY_DIR}/armsx2.nacp"
 	ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg"
 	ROMFS armsx2_romfs)
