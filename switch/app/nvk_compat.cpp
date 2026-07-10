@@ -9,7 +9,7 @@
 #include <regex.h>
 #include <unistd.h>
 
-#include <switch.h>
+#include "common/Horizon/Horizon.h"
 
 extern "C" {
 

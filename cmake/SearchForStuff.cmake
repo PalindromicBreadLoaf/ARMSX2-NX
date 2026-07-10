@@ -38,7 +38,12 @@ else()
 endif()
 
 if(USE_VULKAN)
-	find_package(Shaderc REQUIRED)
+	if(HORIZON)
+		# No shaderc portlib on Switch.
+		add_subdirectory(3rdparty/glslang EXCLUDE_FROM_ALL)
+	else()
+		find_package(Shaderc REQUIRED)
+	endif()
 endif()
 
 # Platform-specific dependencies.

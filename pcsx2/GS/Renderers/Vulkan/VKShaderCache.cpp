@@ -19,7 +19,18 @@
 #include "common/Path.h"
 
 #include "fmt/format.h"
+
+#if defined(__SWITCH__)
+// Switch has no shaderc portlib
+// Instead we use glslang so I don't have to bother porting shaderc
+#include "SPIRV/GlslangToSpv.h"
+#include "StandAlone/ResourceLimits.h"
+#include "glslang/Public/ShaderLang.h"
+#include <cstdlib>
+#include <fstream>
+#else
 #include "shaderc/shaderc.h"
+#endif
 
 #include <cstring>
 #include <memory>
@@ -99,6 +110,9 @@ static void FillPipelineCacheHeader(VK_PIPELINE_CACHE_HEADER* header)
 	header->device_id = GSDeviceVK::GetInstance()->GetDeviceProperties().deviceID;
 	std::memcpy(header->uuid, GSDeviceVK::GetInstance()->GetDeviceProperties().pipelineCacheUUID, VK_UUID_SIZE);
 }
+
+#if !defined(__SWITCH__)
+// shaderc
 
 #if defined(__ANDROID__)
 
@@ -336,6 +350,115 @@ std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::CompileShaderToSPV(
 	dyn_shaderc::shaderc_compile_options_release(options);
 	return ret;
 }
+
+#else // __SWITCH__ glslang-direct backend
+
+static bool s_glslang_initialized = false;
+
+// Registers itself for cleanup via atexit.
+static bool InitializeGlslang()
+{
+	if (s_glslang_initialized)
+		return true;
+
+	if (!glslang::InitializeProcess())
+	{
+		pxFailRel("Failed to initialize glslang shader compiler");
+		return false;
+	}
+
+	std::atexit(&glslang::FinalizeProcess);
+	s_glslang_initialized = true;
+	return true;
+}
+
+std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::CompileShaderToSPV(u32 stage, std::string_view source, bool debug)
+{
+	if (!InitializeGlslang())
+		return std::nullopt;
+
+	std::unique_ptr<glslang::TShader> shader = std::make_unique<glslang::TShader>(static_cast<EShLanguage>(stage));
+	std::unique_ptr<glslang::TProgram> program;
+	glslang::TShader::ForbidIncluder includer;
+	const EProfile profile = ECoreProfile;
+	const EShMessages messages =
+		static_cast<EShMessages>(EShMsgDefault | EShMsgSpvRules | EShMsgVulkanRules | (debug ? EShMsgDebugInfo : 0));
+	const int default_version = 450;
+
+	const char* pass_source_code = source.data();
+	int pass_source_code_length = static_cast<int>(source.size());
+	shader->setStringsWithLengths(&pass_source_code, &pass_source_code_length, 1);
+
+	auto DumpBadShader = [&](const char* msg) {
+		const std::string filename =
+			Path::Combine(EmuFolders::Logs, fmt::format("pcsx2_bad_shader_{}.txt", ++s_next_bad_shader_id));
+		Console.Error("CompileShaderToSPV: %s, writing to %s", msg, filename.c_str());
+
+		std::ofstream ofs(filename, std::ofstream::out | std::ofstream::binary);
+		if (ofs.is_open())
+		{
+			ofs << source;
+			ofs << "\n";
+
+			ofs << msg << std::endl;
+			ofs << "Shader Info Log:" << std::endl;
+			ofs << shader->getInfoLog() << std::endl;
+			ofs << shader->getInfoDebugLog() << std::endl;
+			if (program)
+			{
+				ofs << "Program Info Log:" << std::endl;
+				ofs << program->getInfoLog() << std::endl;
+				ofs << program->getInfoDebugLog() << std::endl;
+			}
+
+			ofs.close();
+		}
+	};
+
+	if (!shader->parse(&glslang::DefaultTBuiltInResource, default_version, profile, false, true, messages, includer))
+	{
+		DumpBadShader("Failed to parse shader");
+		return std::nullopt;
+	}
+
+	// Even though there's only a single shader, we still need to link it to generate SPV.
+	program = std::make_unique<glslang::TProgram>();
+	program->addShader(shader.get());
+	if (!program->link(messages))
+	{
+		DumpBadShader("Failed to link program");
+		return std::nullopt;
+	}
+
+	glslang::TIntermediate* intermediate = program->getIntermediate(static_cast<EShLanguage>(stage));
+	if (!intermediate)
+	{
+		DumpBadShader("Failed to generate SPIR-V");
+		return std::nullopt;
+	}
+
+	SPIRVCodeVector out_code;
+	spv::SpvBuildLogger logger;
+	glslang::SpvOptions options;
+	options.generateDebugInfo = debug;
+	glslang::GlslangToSpv(*intermediate, out_code, &logger, &options);
+
+	if (std::strlen(shader->getInfoLog()) > 0)
+		Console.Warning("Shader info log: %s", shader->getInfoLog());
+	if (std::strlen(shader->getInfoDebugLog()) > 0)
+		Console.Warning("Shader debug info log: %s", shader->getInfoDebugLog());
+	if (std::strlen(program->getInfoLog()) > 0)
+		Console.Warning("Program info log: %s", program->getInfoLog());
+	if (std::strlen(program->getInfoDebugLog()) > 0)
+		Console.Warning("Program debug info log: %s", program->getInfoDebugLog());
+	const std::string spv_messages = logger.getAllMessages();
+	if (!spv_messages.empty())
+		Console.Warning("SPIR-V conversion messages: %s", spv_messages.c_str());
+
+	return out_code;
+}
+
+#endif // !__SWITCH__
 
 VKShaderCache::VKShaderCache() = default;
 
@@ -723,17 +846,29 @@ VkShaderModule VKShaderCache::GetShaderModule(u32 type, std::string_view shader_
 
 VkShaderModule VKShaderCache::GetVertexShader(std::string_view shader_code)
 {
+#if defined(__SWITCH__)
+	return GetShaderModule(EShLangVertex, std::move(shader_code));
+#else
 	return GetShaderModule(shaderc_glsl_vertex_shader, std::move(shader_code));
+#endif
 }
 
 VkShaderModule VKShaderCache::GetFragmentShader(std::string_view shader_code)
 {
+#if defined(__SWITCH__)
+	return GetShaderModule(EShLangFragment, std::move(shader_code));
+#else
 	return GetShaderModule(shaderc_glsl_fragment_shader, std::move(shader_code));
+#endif
 }
 
 VkShaderModule VKShaderCache::GetComputeShader(std::string_view shader_code)
 {
+#if defined(__SWITCH__)
+	return GetShaderModule(EShLangCompute, std::move(shader_code));
+#else
 	return GetShaderModule(shaderc_glsl_compute_shader, std::move(shader_code));
+#endif
 }
 
 std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::CompileAndAddShaderSPV(

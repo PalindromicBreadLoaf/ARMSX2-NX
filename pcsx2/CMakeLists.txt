@@ -652,7 +652,11 @@ if(USE_VULKAN)
 		GS/Renderers/Vulkan/VKSwapChain.h
 	)
 	target_link_libraries(PCSX2_FLAGS INTERFACE vulkan-headers)
-	target_include_directories(PCSX2_FLAGS INTERFACE ${SHADERC_INCLUDE_DIR})
+	if(HORIZON)
+		target_link_libraries(PCSX2_FLAGS INTERFACE glslang)
+	else()
+		target_include_directories(PCSX2_FLAGS INTERFACE ${SHADERC_INCLUDE_DIR})
+	endif()
 endif()
 
 set(pcsx2GSMetalShaders
