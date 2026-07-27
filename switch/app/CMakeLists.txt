@@ -3,7 +3,12 @@
 add_executable(armsx2
 	main.cpp
 	HorizonHost.cpp
+	HorizonException.cpp
+	HorizonExceptionEntry.S
 )
+
+set_source_files_properties(HorizonException.cpp HorizonExceptionEntry.S
+	PROPERTIES COMPILE_OPTIONS "-fno-lto")
 
 target_include_directories(armsx2 PRIVATE ${CMAKE_SOURCE_DIR})
 

@@ -163,6 +163,7 @@ elseif(APPLE)
 	)
 elseif(HORIZON)
 	target_sources(common PRIVATE
+		Horizon/HorizonFastmem.cpp
 		Horizon/HorizonHostSys.cpp
 		Horizon/HorizonThreads.cpp
 		Horizon/HorizonMisc.cpp

@@ -163,6 +163,9 @@ namespace PageFaultHandler
 
 	HandlerResult HandlePageFault(void* exception_pc, void* fault_address, bool is_write);
 	bool Install(Error* error = nullptr);
+#if defined(__SWITCH__)
+	bool IsHorizonFaultCandidate(void* fault_address);
+#endif
 } // namespace PageFaultHandler
 
 class SharedMemoryMappingArea

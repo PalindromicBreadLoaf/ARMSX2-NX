@@ -7,7 +7,9 @@
 #include "common/Console.h"
 #include "common/Error.h"
 #include "common/HostSys.h"
+#include "common/Horizon/HorizonFastmem.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -41,8 +43,19 @@ namespace
 	std::map<u8*, HorizonCodeMapping> s_code_mappings;
 
 	std::mutex s_shm_mutex;
-	std::map<void*, size_t> s_shm_handles;            // backing pointer -> size
-	std::map<void*, HorizonMapping> s_shm_mappings;   // mapped base -> {borrowed src, size}
+	struct HorizonSharedMemory
+	{
+		size_t size;
+		bool alias_code_data;
+	};
+	struct HorizonSharedMapping
+	{
+		void* src;
+		size_t size;
+		bool direct;
+	};
+	std::map<void*, HorizonSharedMemory> s_shm_handles;
+	std::map<void*, HorizonSharedMapping> s_shm_mappings;
 
 	const HorizonCodeMapping* FindCodeMapping(const void* ptr)
 	{
@@ -200,20 +213,50 @@ std::string HostSys::GetFileMappingName(const char* prefix)
 
 void* HostSys::CreateSharedMemory(const char* name, size_t size)
 {
+	if (u8* const canonical = HorizonFastmem::CreateSegment(size))
+	{
+		std::lock_guard lock(s_shm_mutex);
+		s_shm_handles.emplace(canonical, HorizonSharedMemory{size, true});
+		Console.WriteLn(Color_StrongGreen, "Horizon SMC write protection enabled: %s",
+			HorizonFastmem::GetSupportReason());
+		return canonical;
+	}
+
+	static bool s_warned = false;
+	if (!s_warned)
+	{
+		if (HorizonFastmem::IsSupported())
+			Console.Warning("Horizon SMC write protection setup failed. Using manual integrity checks.");
+		else
+			Console.Warning("Horizon SMC write protection unavailable: %s. Using manual integrity checks.",
+				HorizonFastmem::GetSupportReason());
+		s_warned = true;
+	}
+
 	void* const backing = memalign(__pagesize, size);
 	if (!backing)
 		return nullptr;
 	std::memset(backing, 0, size);
 
 	std::lock_guard lock(s_shm_mutex);
-	s_shm_handles.emplace(backing, size);
+	s_shm_handles.emplace(backing, HorizonSharedMemory{size, false});
 	return backing;
 }
 
 void HostSys::DestroySharedMemory(void* ptr)
 {
-	std::lock_guard lock(s_shm_mutex);
-	if (s_shm_handles.erase(ptr) > 0)
+	std::unique_lock lock(s_shm_mutex);
+	const auto it = s_shm_handles.find(ptr);
+	if (it == s_shm_handles.end())
+		return;
+
+	const bool alias_code_data = it->second.alias_code_data;
+	s_shm_handles.erase(it);
+	lock.unlock();
+
+	if (alias_code_data)
+		HorizonFastmem::DestroySegment(static_cast<u8*>(ptr));
+	else
 		free(ptr);
 }
 
@@ -225,7 +268,38 @@ void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size
 		return nullptr;
 	}
 
+	std::lock_guard lock(s_shm_mutex);
+	const auto handle_it = s_shm_handles.find(handle);
+	if (handle_it == s_shm_handles.end() || offset > handle_it->second.size ||
+		size > handle_it->second.size - offset)
+	{
+		return nullptr;
+	}
+
 	u8* const src = static_cast<u8*>(handle) + offset;
+	if (handle_it->second.alias_code_data)
+	{
+		if (baseaddr && baseaddr != src)
+		{
+			Console.Error("HostSys::MapSharedMemory: fixed aliases are not implemented on Horizon");
+			return nullptr;
+		}
+
+		const u32 prot = HorizonProt(mode);
+		if (prot != Perm_Rw)
+		{
+			const Result rc = svcSetMemoryPermission(src, size, prot);
+			if (R_FAILED(rc))
+			{
+				Console.Error("HostSys::MapSharedMemory: svcSetMemoryPermission(%p, 0x%zx) failed: 0x%08x",
+					src, size, static_cast<u32>(rc));
+				return nullptr;
+			}
+		}
+
+		s_shm_mappings.emplace(src, HorizonSharedMapping{src, size, true});
+		return src;
+	}
 
 	virtmemLock();
 	void* dst = baseaddr ? baseaddr : virtmemFindStack(size, 0);
@@ -242,8 +316,7 @@ void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size
 	if (prot != Perm_Rw)
 		svcSetMemoryPermission(dst, size, prot);
 
-	std::lock_guard lock(s_shm_mutex);
-	s_shm_mappings.emplace(dst, HorizonMapping{src, size});
+	s_shm_mappings.emplace(dst, HorizonSharedMapping{src, size, false});
 	return dst;
 }
 
@@ -256,10 +329,13 @@ void HostSys::UnmapSharedMemory(void* baseaddr, size_t size)
 
 	void* const src = it->second.src; // borrowed. owned by the handle. do not free
 	const size_t mapped_size = it->second.size;
+	const bool direct = it->second.direct;
 	s_shm_mappings.erase(it);
 	lock.unlock();
 
 	svcSetMemoryPermission(baseaddr, mapped_size, Perm_Rw);
+	if (direct)
+		return;
 
 	virtmemLock();
 	svcUnmapMemory(baseaddr, src, mapped_size);
@@ -330,12 +406,17 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
 
 namespace PageFaultHandler
 {
-	static bool s_installed = false;
+	static std::atomic<bool> s_installed{false};
 } // namespace PageFaultHandler
 
 bool PageFaultHandler::Install(Error* error)
 {
-
-	s_installed = true;
+	s_installed.store(true, std::memory_order_release);
 	return true;
+}
+
+bool PageFaultHandler::IsHorizonFaultCandidate(void* fault_address)
+{
+	return s_installed.load(std::memory_order_acquire) &&
+		HorizonFastmem::IsManagedFault(reinterpret_cast<uptr>(fault_address));
 }

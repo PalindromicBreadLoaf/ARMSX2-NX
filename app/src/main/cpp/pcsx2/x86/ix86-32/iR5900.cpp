@@ -23,6 +23,10 @@
 #include "common/Perf.h"
 #include "x86/microVU_Misc.h"
 
+#ifdef __SWITCH__
+#include "common/Horizon/HorizonFastmem.h"
+#endif
+
 // Only for MOVQ workaround.
 #if !defined(__ANDROID__) && !defined(__SWITCH__)
 #include "common/emitter/internal.h"
@@ -2254,11 +2258,11 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 	vtlb_ProtectionMode PageType = contains_thread_stack ? ProtMode_Manual : mmap_GetRamPageInfo(inpage_ptr);
 
 #ifdef __SWITCH__
-	// Horizon can't write-protect EE RAM, so ProtMode_Write SMC detection can't work.
-	if (PageType == ProtMode_None || PageType == ProtMode_Write)
+	if (!HorizonFastmem::IsSmcProtectionActive() &&
+		(PageType == ProtMode_None || PageType == ProtMode_Write))
 	{
 		PageType = ProtMode_Manual;
-		contains_thread_stack = true; // never revert to the (broken) write protection
+		contains_thread_stack = true;
 	}
 #endif
 
@@ -2287,7 +2291,7 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
             armAsm->Ldr(RSCRATCHADDR, PTR_CPU(vtlbdata.pmap));
 
 #ifdef __SWITCH__
-			// See above for why this is needed
+			if (!HorizonFastmem::IsSmcProtectionActive())
 			{
 				auto emitManualCheck = [&](u32 byteoff) {
 					const u32 a = (inpage_ptr + byteoff) & 0x1fffffff;
@@ -2299,28 +2303,27 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 				for (u32 off = 0; off < inpage_sz; off += 64)
 					emitManualCheck(off);
 				if (inpage_sz >= 4 && (inpage_sz - 4) % 64 != 0)
-					emitManualCheck(inpage_sz - 4); // always verify the last word too
+					emitManualCheck(inpage_sz - 4);
 			}
-			(void)lpc;
-			(void)stg;
-			(void)lpc_addr;
-#else
-			while (stg > 0)
-			{
-//				xCMP(ptr32[PSM(lpc)], *(u32*)PSM(lpc));
-
-                lpc_addr = lpc & 0x1fffffff;
-                armAsm->Add(RXVIXLSCRATCH, RSCRATCHADDR, lpc_addr);
-                armAsm->Ldr(EDX, a64::MemOperand(RXVIXLSCRATCH));
-                armAsm->Cmp(EDX, *(u32*)vtlb_GetPhyPtr(lpc_addr));
-
-//				xJNE(DispatchBlockDiscard);
-                armEmitCondBranch(a64::Condition::ne, DispatchBlockDiscard);
-
-				stg -= 4;
-				lpc += 4;
-			}
+			else
 #endif
+			{
+				while (stg > 0)
+				{
+//					xCMP(ptr32[PSM(lpc)], *(u32*)PSM(lpc));
+
+					lpc_addr = lpc & 0x1fffffff;
+					armAsm->Add(RXVIXLSCRATCH, RSCRATCHADDR, lpc_addr);
+					armAsm->Ldr(EDX, a64::MemOperand(RXVIXLSCRATCH));
+					armAsm->Cmp(EDX, *(u32*)vtlb_GetPhyPtr(lpc_addr));
+
+//					xJNE(DispatchBlockDiscard);
+					armEmitCondBranch(a64::Condition::ne, DispatchBlockDiscard);
+
+					stg -= 4;
+					lpc += 4;
+				}
+			}
 
 			// Tweakpoint!  3 is a 'magic' number representing the number of times a counted block
 			// is re-protected before the recompiler gives up and sets it up as an uncounted (permanent)

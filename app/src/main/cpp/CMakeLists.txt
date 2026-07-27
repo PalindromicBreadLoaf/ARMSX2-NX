@@ -33,6 +33,10 @@ check_no_parenthesis_in_path()
 detect_operating_system()
 detect_compiler()
 
+if(HORIZON)
+	enable_language(ASM)
+endif()
+
 #-------------------------------------------------------------------------------
 # Include specific module
 include(BuildParameters)
