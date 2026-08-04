@@ -38,6 +38,10 @@ BIOS
 #include "common/AlignedMalloc.h"
 #include "common/Error.h"
 
+#ifdef __SWITCH__
+#include <malloc.h>
+#endif
+
 #ifdef ENABLECACHE
 #include "Cache.h"
 #endif
@@ -186,6 +190,24 @@ bool SysMemory::AllocateMemoryMap()
 	HostMemoryMap::VUmem = (uptr)(s_data_memory + HostMemoryMap::VUmemSize);
 
 	DumpMemoryMap();
+
+#ifdef __SWITCH__
+	{
+		struct mallinfo mi = mallinfo();
+		INFO_LOG("Horizon: reserved {} MiB data + {} MiB code = {} MiB of heap before GS starts "
+				 "(heap in use {} MiB, heap arena {} MiB)",
+			HostMemoryMap::MainSize / _1mb, HostMemoryMap::CodeSize / _1mb,
+			(HostMemoryMap::MainSize + HostMemoryMap::CodeSize) / _1mb,
+			static_cast<size_t>(mi.uordblks) / _1mb, static_cast<size_t>(mi.arena) / _1mb);
+		INFO_LOG("Horizon: code region breakdown - EE {} MiB, IOP {} MiB, mVU0 {} MiB, "
+				 "mVU1 {} MiB, VIF0 {} MiB, VIF1 {} MiB, VIFUnpack {} MiB, SW renderer {} MiB",
+			HostMemoryMap::EErecSize / _1mb, HostMemoryMap::IOPrecSize / _1mb,
+			HostMemoryMap::mVU0recSize / _1mb, HostMemoryMap::mVU1recSize / _1mb,
+			HostMemoryMap::VIF0recSize / _1mb, HostMemoryMap::VIF1recSize / _1mb,
+			HostMemoryMap::VIFUnpackRecSize / _1mb, HostMemoryMap::SWrecSize / _1mb);
+	}
+#endif
+
 	return true;
 }
 

@@ -16,6 +16,10 @@
 #include "common/Timer.h"
 #include "common/WrappedMemCopy.h"
 
+#ifdef __SWITCH__
+#include "common/Horizon/Horizon.h"
+#endif
+
 #include <list>
 #include <mutex>
 #include <thread>
@@ -344,6 +348,18 @@ void MTGS::MainLoop()
 
 		if (!s_open_flag.load(std::memory_order_acquire))
 			break;
+
+#ifdef __SWITCH__
+		// Report the core we actually landed on, once, after the VM is running.
+		{
+			static bool s_logged_processor = false;
+			if (!s_logged_processor && VMManager::GetState() == VMState::Running)
+			{
+				s_logged_processor = true;
+				INFO_LOG("GS thread is running on processor {}", svcGetCurrentProcessorNumber());
+			}
+		}
+#endif
 
 		// note: m_ReadPos is intentionally not volatile, because it should only
 		// ever be modified by this thread.
