@@ -76,6 +76,10 @@ namespace Log
 
 	static HostCallbackType s_host_callback;
 
+	// Ceiling on lines/second for any one throttled call site.
+	static constexpr u32 THROTTLE_LINES_PER_SECOND = 8;
+	static constexpr double THROTTLE_WINDOW_MS = 1000.0;
+
 #ifdef _WIN32
 	static HANDLE s_hConsoleStdIn = NULL;
 	static HANDLE s_hConsoleStdOut = NULL;
@@ -366,6 +370,32 @@ __ri void Log::WriteToFile(LOGLEVEL level, ConsoleColors color, std::string_view
 bool Log::IsFileOutputEnabled()
 {
 	return (s_file_level > LOGLEVEL_NONE);
+}
+
+bool Log::ThrottleAdmit(ThrottleState& state, u32& out_suppressed)
+{
+	out_suppressed = 0;
+
+	const Common::Timer::Value now = Common::Timer::GetCurrentValue();
+	const u64 window_start = state.window_start.load(std::memory_order_relaxed);
+
+	if (window_start == 0 ||
+		Common::Timer::ConvertValueToMilliseconds(now - window_start) >= THROTTLE_WINDOW_MS)
+	{
+		state.window_start.store(static_cast<u64>(now), std::memory_order_relaxed);
+		state.emitted_this_window.store(1, std::memory_order_relaxed);
+		out_suppressed = state.suppressed.exchange(0, std::memory_order_relaxed);
+		return true;
+	}
+
+	if (state.emitted_this_window.fetch_add(1, std::memory_order_relaxed) < THROTTLE_LINES_PER_SECOND)
+	{
+		out_suppressed = state.suppressed.exchange(0, std::memory_order_relaxed);
+		return true;
+	}
+
+	state.suppressed.fetch_add(1, std::memory_order_relaxed);
+	return false;
 }
 
 bool Log::SetFileOutputLevel(LOGLEVEL level, std::string path)

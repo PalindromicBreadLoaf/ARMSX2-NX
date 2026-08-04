@@ -7,6 +7,7 @@
 
 #include "fmt/base.h"
 
+#include <atomic>
 #include <cstdarg>
 #include <string>
 
@@ -113,6 +114,18 @@ namespace Log
 		if (level <= GetMaxLevel())
 			return WriteFmtArgs(level, color, fmt, fmt::make_format_args(args...));
 	}
+
+	/// Rate limiting for log sites that can fire once per guest access, per page, or per
+	/// frame to prevent the entire emulator being clogged up by logging requests.
+	struct ThrottleState
+	{
+		std::atomic<u64> window_start{0};
+		std::atomic<u32> emitted_this_window{0};
+		std::atomic<u32> suppressed{0};
+	};
+
+	/// Returns true if this call site should emit now.
+	bool ThrottleAdmit(ThrottleState& state, u32& out_suppressed);
 } // namespace Log
 
 // Adapter classes to handle old code.
@@ -141,7 +154,7 @@ struct ConsoleLogWriter
 	static void Warning(const char* format, ...) { MAKE_PRINTF_CONSOLE_WRITER(Color_StrongOrange); }
 	static void WriteLn(const char* format, ...) { MAKE_PRINTF_CONSOLE_WRITER(Color_Default); }
 	static void WriteLn(ConsoleColors color, const char* format, ...) { MAKE_PRINTF_CONSOLE_WRITER(color); }
-	// clang-format on	
+	// clang-format on
 
 #undef MAKE_PRINTF_CONSOLE_WRITER
 
@@ -180,7 +193,7 @@ struct NullLogWriter
 	template<typename... T> __fi static bool WarningFmt(fmt::format_string<T...> fmt, T&&... args) { return false; }
 	template<typename... T> __fi static bool WriteLnFmt(fmt::format_string<T...> fmt, T&&... args) { return false; }
 	template<typename... T> __fi static bool WriteLnFmt(ConsoleColors color, fmt::format_string<T...> fmt, T&&... args) { return false; }
-	// clang-format on	
+	// clang-format on
 };
 
 extern ConsoleLogWriter<LOGLEVEL_INFO> Console;
@@ -190,6 +203,24 @@ extern ConsoleLogWriter<LOGLEVEL_DEV> DevCon;
 #define WARNING_LOG(...) Log::Write(LOGLEVEL_WARNING, Color_StrongOrange, __VA_ARGS__)
 #define INFO_LOG(...) Log::Write(LOGLEVEL_INFO, Color_White, __VA_ARGS__)
 #define DEV_LOG(...) Log::Write(LOGLEVEL_DEV, Color_StrongGray, __VA_ARGS__)
+
+// Rate-limited variants, for log sites that can fire per guest access, per page or per frame.
+#define LOG_THROTTLED_IMPL(level, color, ...) \
+	do \
+	{ \
+		static Log::ThrottleState s_log_throttle_state; \
+		u32 s_log_throttle_suppressed = 0; \
+		if (Log::ThrottleAdmit(s_log_throttle_state, s_log_throttle_suppressed)) \
+		{ \
+			Log::Write(level, color, __VA_ARGS__); \
+			if (s_log_throttle_suppressed > 0) \
+				Log::Write(level, color, "  (suppressed {} preceding entries from this site)", \
+					s_log_throttle_suppressed); \
+		} \
+	} while (0)
+
+#define ERROR_LOG_THROTTLED(...) LOG_THROTTLED_IMPL(LOGLEVEL_ERROR, Color_StrongRed, __VA_ARGS__)
+#define WARNING_LOG_THROTTLED(...) LOG_THROTTLED_IMPL(LOGLEVEL_WARNING, Color_StrongOrange, __VA_ARGS__)
 
 #ifdef _DEBUG
 extern ConsoleLogWriter<LOGLEVEL_DEBUG> DbgConWriter;
