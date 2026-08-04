@@ -8,6 +8,7 @@
 
 #include "common/Threading.h"
 #include "common/Assertions.h"
+#include "common/Console.h"
 #include "common/Horizon/Horizon.h"
 
 #include <memory>
@@ -146,18 +147,32 @@ u64 Threading::ThreadHandle::GetCPUTime() const
 
 bool Threading::ThreadHandle::SetAffinity(u64 processor_mask) const
 {
+	// Every path out of here that isn't a successful pin gets logged.
 	if (!m_native_handle)
+	{
+		Console.Warning("SetAffinity(0x%llx): no native handle; thread left unpinned.",
+			static_cast<unsigned long long>(processor_mask));
 		return false;
+	}
 
-	// Check for allowed cores (should be 3 unless under applet mode)
 	u64 allowed_cores = 0;
 	if (R_FAILED(svcGetInfo(&allowed_cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || allowed_cores == 0)
+	{
+		Console.Warning("SetAffinity(0x%llx): InfoType_CoreMask unavailable.",
+			static_cast<unsigned long long>(processor_mask));
 		return false;
+	}
 
 	// Zero mask for unpin
 	const u64 mask = (processor_mask != 0) ? (processor_mask & allowed_cores) : allowed_cores;
 	if (mask == 0)
+	{
+		Console.Warning("SetAffinity(0x%llx): no requested core is grantable (allowed 0x%llx). "
+						"Thread left unpinned.",
+			static_cast<unsigned long long>(processor_mask),
+			static_cast<unsigned long long>(allowed_cores));
 		return false;
+	}
 
 	const s32 preferred_core = __builtin_ctzll(mask);
 
@@ -171,11 +186,25 @@ bool Threading::ThreadHandle::SetAffinity(u64 processor_mask) const
 		std::lock_guard<std::mutex> lock(s_thread_handle_map_mutex);
 		const auto it = s_thread_handle_map.find(m_native_handle);
 		if (it == s_thread_handle_map.end())
+		{
+
+			Console.Warning("SetAffinity(0x%llx): thread is not registered.",
+				static_cast<unsigned long long>(processor_mask));
 			return false;
+		}
 		handle = it->second;
 	}
 
-	return R_SUCCEEDED(svcSetThreadCoreMask(handle, preferred_core, static_cast<u32>(mask)));
+	const Result rc = svcSetThreadCoreMask(handle, preferred_core, static_cast<u32>(mask));
+	if (R_FAILED(rc))
+	{
+		Console.Warning("SetAffinity: svcSetThreadCoreMask(core %d, mask 0x%llx) failed: 0x%08x; "
+						"thread left unpinned.",
+			preferred_core, static_cast<unsigned long long>(mask), static_cast<unsigned>(rc));
+		return false;
+	}
+
+	return true;
 }
 
 Threading::Thread::Thread() = default;
