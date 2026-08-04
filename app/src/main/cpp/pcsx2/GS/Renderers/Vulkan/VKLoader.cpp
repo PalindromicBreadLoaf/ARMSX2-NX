@@ -10,6 +10,11 @@
 #include "pcsx2/Config.h"
 #include "GS/GS.h"
 
+#ifdef __SWITCH__
+#include "common/FileSystem.h"
+#include "common/Path.h"
+#endif
+
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -77,7 +82,19 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 #ifdef __SWITCH__
 	// Set required NXVK environment variables.
 	setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
-	setenv("MESA_SHADER_CACHE_DISABLE", "1", 1);
+
+	const std::string mesa_cache_dir = Path::Combine(EmuFolders::Cache, "mesa");
+	if (FileSystem::CreateDirectoryPath(mesa_cache_dir.c_str(), true))
+	{
+		setenv("MESA_SHADER_CACHE_DISABLE", "false", 1);
+		setenv("MESA_SHADER_CACHE_DIR", mesa_cache_dir.c_str(), 1);
+		INFO_LOG("NVK shader cache directory: {}", mesa_cache_dir);
+	}
+	else
+	{
+		ERROR_LOG("Failed to create {}. NVK shader cache disabled.", mesa_cache_dir);
+		setenv("MESA_SHADER_CACHE_DISABLE", "1", 1);
+	}
 
 	vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(&vk_icdGetInstanceProcAddr);
 
@@ -130,7 +147,7 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 #if defined(__ANDROID__) && defined(USE_ADRENOTOOLS)
 		std::string custom_driver_dir;
 		std::string custom_driver_name;
-		
+
 		size_t last_slash = custom_driver_path.find_last_of("/\\");
 		if (last_slash != std::string::npos)
 		{
@@ -147,12 +164,12 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 		{
 			hook_lib_dir = getenv("ANDROID_DATA_DIR");
 		}
-		
+
 		if (hook_lib_dir && !custom_driver_dir.empty() && !custom_driver_name.empty())
 		{
-			Console.WriteLn(Color_StrongGreen, "Vulkan: Using libadrenotools to load custom driver: %s from %s", 
+			Console.WriteLn(Color_StrongGreen, "Vulkan: Using libadrenotools to load custom driver: %s from %s",
 				custom_driver_name.c_str(), custom_driver_dir.c_str());
-			
+
 			void* vulkan_handle = adrenotools_open_libvulkan(
 				RTLD_NOW | RTLD_LOCAL,  // dlopenMode
 				ADRENOTOOLS_DRIVER_CUSTOM,  // featureFlags
@@ -163,7 +180,7 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 				nullptr,  // fileRedirectDir
 				nullptr   // userMappingHandle
 			);
-			
+
 			if (vulkan_handle)
 			{
 				// Grab the handle from libadrenotools
@@ -231,7 +248,7 @@ bool Vulkan::LoadVulkanLibrary(Error* error)
 				Console.WriteLn(Color_StrongGreen, "Vulkan: Loaded custom driver from app directory");
 			}
 		}
-		
+
 		if (!s_vulkan_library.IsOpen())
 		{
 			if (!s_vulkan_library.Open("libvulkan.so", error))
