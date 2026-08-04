@@ -14,6 +14,7 @@
 #include "common/Error.h"
 #include "common/HTTPDownloader.h"
 #include "common/HeterogeneousContainers.h"
+#include "common/Horizon/HorizonBoost.h"
 #include "common/Path.h"
 #include "common/ProgressCallback.h"
 #include "common/StringUtil.h"
@@ -825,6 +826,8 @@ void GameList::Refresh(bool invalidate_cache, bool only_cache, ProgressCallback*
 {
 	if (!progress)
 		progress = ProgressCallback::NullProgressCallback;
+
+	const Horizon::CpuBoostScope scan_cpu_boost;
 
 	if (invalidate_cache)
 		DeleteCacheFile();

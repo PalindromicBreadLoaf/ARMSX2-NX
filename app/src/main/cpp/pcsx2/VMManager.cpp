@@ -46,6 +46,7 @@
 #include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/FPControl.h"
+#include "common/Horizon/HorizonBoost.h"
 #include "common/Path.h"
 #include "common/ScopedGuard.h"
 #include "common/SettingsWrapper.h"
@@ -1597,6 +1598,8 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 {
 	const Common::Timer init_timer;
 	pxAssertRel(s_state.load(std::memory_order_acquire) == VMState::Shutdown, "VM is shutdown");
+
+	const Horizon::CpuBoostScope boot_cpu_boost;
 
 	// cancel any game list scanning, we need to use CDVD!
 	// TODO: we can get rid of this once, we make CDVD not use globals...
