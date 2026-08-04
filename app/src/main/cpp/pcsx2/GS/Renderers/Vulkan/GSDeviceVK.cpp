@@ -47,7 +47,14 @@ enum : u32
 	INDEX_BUFFER_SIZE = 16 * 1024 * 1024,
 	VERTEX_UNIFORM_BUFFER_SIZE = 8 * 1024 * 1024,
 	FRAGMENT_UNIFORM_BUFFER_SIZE = 8 * 1024 * 1024,
+
+#ifdef __SWITCH__
+	TEXTURE_BUFFER_SIZE = 32 * 1024 * 1024,
+#else
 	TEXTURE_BUFFER_SIZE = 64 * 1024 * 1024,
+#endif
+	PRESENT_VERTEX_BUFFER_SIZE = 4 * 1024 * 1024,
+	PRESENT_INDEX_BUFFER_SIZE = 2 * 1024 * 1024,
 };
 
 
@@ -2419,6 +2426,11 @@ GSDevice::PresentResult GSDeviceVK::BeginPresent(bool frame_skip)
 		1u, &s_present_clear_color};
 	vkCmdBeginRenderPass(GetCurrentCommandBuffer(), &rp, VK_SUBPASS_CONTENTS_INLINE);
 
+	// This render pass is not tracked in m_current_render_pass, so nothing downstream knows it
+	// is open. Route vertex/index uploads to the dedicated present rings until EndPresent, so
+	// that no upload between here and there can force a submit.
+	m_in_present_pass = true;
+
 	const VkViewport vp{0.0f, 0.0f, static_cast<float>(swap_chain_texture->GetWidth()),
 		static_cast<float>(swap_chain_texture->GetHeight()), 0.0f, 1.0f};
 	const VkRect2D scissor{
@@ -2431,6 +2443,8 @@ GSDevice::PresentResult GSDeviceVK::BeginPresent(bool frame_skip)
 void GSDeviceVK::EndPresent()
 {
 	RenderImGui();
+
+	m_in_present_pass = false;
 
 	VkCommandBuffer cmdbuffer = GetCurrentCommandBuffer();
 	vkCmdEndRenderPass(cmdbuffer);
@@ -3187,7 +3201,8 @@ void GSDeviceVK::DrawStretchRect(const GSVector4& sRect, const GSVector4& dRect,
 		{GSVector4(left, bottom, 0.5f, 1.0f), GSVector2(sRect.x, sRect.w)},
 		{GSVector4(right, bottom, 0.5f, 1.0f), GSVector2(sRect.z, sRect.w)},
 	};
-	IASetVertexBuffer(vertices, sizeof(vertices[0]), std::size(vertices));
+	if (!IASetVertexBuffer(vertices, sizeof(vertices[0]), std::size(vertices)))
+		return;
 
 	if (ApplyUtilityState())
 		DrawPrimitive();
@@ -3459,40 +3474,62 @@ void GSDeviceVK::DoFXAA(GSTexture* sTex, GSTexture* dTex)
 	static_cast<GSTextureVK*>(dTex)->TransitionToLayout(GSTextureVK::Layout::ShaderReadOnly);
 }
 
-void GSDeviceVK::IASetVertexBuffer(const void* vertex, size_t stride, size_t count)
+bool GSDeviceVK::IASetVertexBuffer(const void* vertex, size_t stride, size_t count)
 {
 	const u32 size = static_cast<u32>(stride) * static_cast<u32>(count);
-	if (!m_vertex_stream_buffer.ReserveMemory(size, static_cast<u32>(stride)))
+
+	// Inside the present pass we use a dedicated ring and must not submit. See the comment on
+	// m_in_present_pass for more information.
+	VKStreamBuffer& sbuffer = m_in_present_pass ? m_present_vertex_stream_buffer : m_vertex_stream_buffer;
+	if (!sbuffer.ReserveMemory(size, static_cast<u32>(stride)))
 	{
+		if (m_in_present_pass)
+		{
+			Console.Warning("VK: Skipping present-pass draw, no space for %u bytes of vertices", size);
+			return false;
+		}
+
 		ExecuteCommandBufferAndRestartRenderPass(false, "Uploading bytes to vertex buffer");
-		if (!m_vertex_stream_buffer.ReserveMemory(size, static_cast<u32>(stride)))
+		if (!sbuffer.ReserveMemory(size, static_cast<u32>(stride)))
 			pxFailRel("Failed to reserve space for vertices");
 	}
 
-	m_vertex.start = m_vertex_stream_buffer.GetCurrentOffset() / stride;
+	m_vertex.start = sbuffer.GetCurrentOffset() / stride;
 	m_vertex.count = count;
 
-	GSVector4i::storent(m_vertex_stream_buffer.GetCurrentHostPointer(), vertex, count * stride);
-	m_vertex_stream_buffer.CommitMemory(size);
+	GSVector4i::storent(sbuffer.GetCurrentHostPointer(), vertex, count * stride);
+	sbuffer.CommitMemory(size);
+
+	SetVertexBuffer(sbuffer.GetBuffer());
+	return true;
 }
 
-void GSDeviceVK::IASetIndexBuffer(const void* index, size_t count)
+bool GSDeviceVK::IASetIndexBuffer(const void* index, size_t count)
 {
 	const u32 size = sizeof(u16) * static_cast<u32>(count);
-	if (!m_index_stream_buffer.ReserveMemory(size, sizeof(u16)))
+
+	VKStreamBuffer& sbuffer = m_in_present_pass ? m_present_index_stream_buffer : m_index_stream_buffer;
+	if (!sbuffer.ReserveMemory(size, sizeof(u16)))
 	{
+		if (m_in_present_pass)
+		{
+			Console.Warning("VK: Skipping present-pass draw, no space for %u bytes of indices", size);
+			return false;
+		}
+
 		ExecuteCommandBufferAndRestartRenderPass(false, "Uploading bytes to index buffer");
-		if (!m_index_stream_buffer.ReserveMemory(size, sizeof(u16)))
+		if (!sbuffer.ReserveMemory(size, sizeof(u16)))
 			pxFailRel("Failed to reserve space for vertices");
 	}
 
-	m_index.start = m_index_stream_buffer.GetCurrentOffset() / sizeof(u16);
+	m_index.start = sbuffer.GetCurrentOffset() / sizeof(u16);
 	m_index.count = count;
 
-	std::memcpy(m_index_stream_buffer.GetCurrentHostPointer(), index, size);
-	m_index_stream_buffer.CommitMemory(size);
+	std::memcpy(sbuffer.GetCurrentHostPointer(), index, size);
+	sbuffer.CommitMemory(size);
 
-	SetIndexBuffer(m_index_stream_buffer.GetBuffer());
+	SetIndexBuffer(sbuffer.GetBuffer());
+	return true;
 }
 
 void GSDeviceVK::OMSetRenderTargets(
@@ -3829,6 +3866,18 @@ bool GSDeviceVK::CreateBuffers()
 		return false;
 	}
 
+	if (!m_present_vertex_stream_buffer.Create(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, PRESENT_VERTEX_BUFFER_SIZE))
+	{
+		Host::ReportErrorAsync("GS", "Failed to allocate present vertex buffer");
+		return false;
+	}
+
+	if (!m_present_index_stream_buffer.Create(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, PRESENT_INDEX_BUFFER_SIZE))
+	{
+		Host::ReportErrorAsync("GS", "Failed to allocate present index buffer");
+		return false;
+	}
+
 	if (!AllocatePreinitializedGPUBuffer(EXPAND_BUFFER_SIZE, &m_expand_index_buffer, &m_expand_index_buffer_allocation,
 			VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &GSDevice::GenerateExpansionIndexBuffer))
 	{
@@ -3837,6 +3886,19 @@ bool GSDeviceVK::CreateBuffers()
 	}
 
 	SetIndexBuffer(m_index_stream_buffer.GetBuffer());
+	SetVertexBuffer(m_vertex_stream_buffer.GetBuffer());
+
+	// Log heap pressure to see if anything can be shrunk/needs expansion
+	constexpr u32 total_ring_bytes = VERTEX_BUFFER_SIZE + INDEX_BUFFER_SIZE + VERTEX_UNIFORM_BUFFER_SIZE +
+									 FRAGMENT_UNIFORM_BUFFER_SIZE + TEXTURE_BUFFER_SIZE +
+									 PRESENT_VERTEX_BUFFER_SIZE + PRESENT_INDEX_BUFFER_SIZE;
+	INFO_LOG("VK: stream rings total {} MiB (vertex {}, index {}, vs-uniform {}, fs-uniform {}, "
+			 "texture {}, present-vertex {}, present-index {})",
+		total_ring_bytes / (1024 * 1024), VERTEX_BUFFER_SIZE / (1024 * 1024), INDEX_BUFFER_SIZE / (1024 * 1024),
+		VERTEX_UNIFORM_BUFFER_SIZE / (1024 * 1024), FRAGMENT_UNIFORM_BUFFER_SIZE / (1024 * 1024),
+		TEXTURE_BUFFER_SIZE / (1024 * 1024), PRESENT_VERTEX_BUFFER_SIZE / (1024 * 1024),
+		PRESENT_INDEX_BUFFER_SIZE / (1024 * 1024));
+
 	return true;
 }
 
@@ -4564,19 +4626,21 @@ void GSDeviceVK::RenderImGui()
 		u32 vertex_offset;
 		{
 			const u32 size = sizeof(ImDrawVert) * static_cast<u32>(cmd_list->VtxBuffer.Size);
-			if (!m_vertex_stream_buffer.ReserveMemory(size, sizeof(ImDrawVert)))
+			if (!m_present_vertex_stream_buffer.ReserveMemory(size, sizeof(ImDrawVert)))
 			{
 				Console.Warning("VK: Skipping ImGui draw because of no vertex buffer space");
 				return;
 			}
 
-			vertex_offset = m_vertex_stream_buffer.GetCurrentOffset() / sizeof(ImDrawVert);
-			std::memcpy(m_vertex_stream_buffer.GetCurrentHostPointer(), cmd_list->VtxBuffer.Data, size);
-			m_vertex_stream_buffer.CommitMemory(size);
+			vertex_offset = m_present_vertex_stream_buffer.GetCurrentOffset() / sizeof(ImDrawVert);
+			std::memcpy(m_present_vertex_stream_buffer.GetCurrentHostPointer(), cmd_list->VtxBuffer.Data, size);
+			m_present_vertex_stream_buffer.CommitMemory(size);
+			SetVertexBuffer(m_present_vertex_stream_buffer.GetBuffer());
 		}
 
 		static_assert(sizeof(ImDrawIdx) == sizeof(u16));
-		IASetIndexBuffer(cmd_list->IdxBuffer.Data, cmd_list->IdxBuffer.Size);
+		if (!IASetIndexBuffer(cmd_list->IdxBuffer.Data, cmd_list->IdxBuffer.Size))
+			return;
 
 		for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++)
 		{
@@ -4761,6 +4825,8 @@ void GSDeviceVK::DestroyResources()
 	m_texture_stream_buffer.Destroy(false);
 	m_fragment_uniform_stream_buffer.Destroy(false);
 	m_vertex_uniform_stream_buffer.Destroy(false);
+	m_present_index_stream_buffer.Destroy(false);
+	m_present_vertex_stream_buffer.Destroy(false);
 	m_index_stream_buffer.Destroy(false);
 	m_vertex_stream_buffer.Destroy(false);
 	if (m_expand_index_buffer != VK_NULL_HANDLE)
@@ -5046,8 +5112,38 @@ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 	if (it != m_tfx_pipelines.end())
 		return it->second;
 
+#ifdef __SWITCH__
+	// This compile happens inline on the GS thread, mid-frame, and on a console there is at
+	// most one core free to do it on.
+	static constexpr double COMPILE_STALL_REPORT_THRESHOLD_MS = 100.0;
+	static Common::Timer::Value s_compile_time_accumulated = 0;
+	static u32 s_compile_count = 0;
+	static Log::ThrottleState s_compile_report_throttle;
+
+	const Common::Timer::Value compile_start = Common::Timer::GetCurrentValue();
+#endif
+
 	VkPipeline pipeline = CreateTFXPipeline(p);
 	m_tfx_pipelines.emplace(p, pipeline);
+
+#ifdef __SWITCH__
+	const Common::Timer::Value compile_elapsed = Common::Timer::GetCurrentValue() - compile_start;
+	s_compile_time_accumulated += compile_elapsed;
+	s_compile_count++;
+
+	if (Common::Timer::ConvertValueToMilliseconds(compile_elapsed) >= COMPILE_STALL_REPORT_THRESHOLD_MS)
+	{
+		u32 suppressed = 0;
+		if (Log::ThrottleAdmit(s_compile_report_throttle, suppressed))
+		{
+			WARNING_LOG("GS thread blocked {:.1f}ms compiling a TFX pipeline "
+						"({} compiled so far, {:.1f}ms total)",
+				Common::Timer::ConvertValueToMilliseconds(compile_elapsed), s_compile_count,
+				Common::Timer::ConvertValueToMilliseconds(s_compile_time_accumulated));
+		}
+	}
+#endif
+
 	return pipeline;
 }
 
@@ -5194,6 +5290,15 @@ void GSDeviceVK::InvalidateCachedState()
 	m_tfx_texture_descriptor_set = VK_NULL_HANDLE;
 	m_tfx_rt_descriptor_set = VK_NULL_HANDLE;
 	m_utility_descriptor_set = VK_NULL_HANDLE;
+}
+
+void GSDeviceVK::SetVertexBuffer(VkBuffer buffer)
+{
+	if (m_vertex_buffer == buffer)
+		return;
+
+	m_vertex_buffer = buffer;
+	m_dirty_flags |= DIRTY_FLAG_VERTEX_BUFFER;
 }
 
 void GSDeviceVK::SetIndexBuffer(VkBuffer buffer)
@@ -5406,16 +5511,24 @@ void GSDeviceVK::SetPipeline(VkPipeline pipeline)
 
 void GSDeviceVK::SetInitialState(VkCommandBuffer cmdbuf)
 {
-	VkBuffer buffer = *m_vertex_stream_buffer.GetBufferPtr();
+	// A fresh command buffer has no vertex binding, so whatever we think is bound isn't.
+	VkBuffer buffer = m_vertex_buffer;
 	if (buffer != VK_NULL_HANDLE)
 	{
 		constexpr VkDeviceSize buffer_offset = 0;
 		vkCmdBindVertexBuffers(cmdbuf, 0, 1, &buffer, &buffer_offset);
+		m_dirty_flags &= ~DIRTY_FLAG_VERTEX_BUFFER;
 	}
 }
 
 __ri void GSDeviceVK::ApplyBaseState(u32 flags, VkCommandBuffer cmdbuf)
 {
+	if (flags & DIRTY_FLAG_VERTEX_BUFFER)
+	{
+		constexpr VkDeviceSize buffer_offset = 0;
+		vkCmdBindVertexBuffers(cmdbuf, 0, 1, &m_vertex_buffer, &buffer_offset);
+	}
+
 	if (flags & DIRTY_FLAG_INDEX_BUFFER)
 		vkCmdBindIndexBuffer(cmdbuf, m_index_buffer, 0, VK_INDEX_TYPE_UINT16);
 

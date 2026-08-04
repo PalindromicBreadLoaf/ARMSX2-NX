@@ -379,6 +379,10 @@ private:
 
 	VKStreamBuffer m_vertex_stream_buffer;
 	VKStreamBuffer m_index_stream_buffer;
+
+	// Dedicated rings for everything drawn inside the present pass.
+	VKStreamBuffer m_present_vertex_stream_buffer;
+	VKStreamBuffer m_present_index_stream_buffer;
 	VKStreamBuffer m_vertex_uniform_stream_buffer;
 	VKStreamBuffer m_fragment_uniform_stream_buffer;
 	VKStreamBuffer m_texture_stream_buffer;
@@ -555,8 +559,10 @@ public:
 	void SetupDATE(GSTexture* rt, GSTexture* ds, SetDATM datm, const GSVector4i& bbox);
 	GSTextureVK* SetupPrimitiveTrackingDATE(GSHWDrawConfig& config);
 
-	void IASetVertexBuffer(const void* vertex, size_t stride, size_t count);
-	void IASetIndexBuffer(const void* index, size_t count);
+	// Both return false if the upload could not be made without submitting the command buffer
+	// mid-present-pass. The caller must skip the draw in that case.
+	bool IASetVertexBuffer(const void* vertex, size_t stride, size_t count);
+	bool IASetIndexBuffer(const void* index, size_t count);
 
 	void PSSetShaderResource(int i, GSTexture* sr, bool check_state);
 	void PSSetSampler(GSHWDrawConfig::SamplerSelector sel);
@@ -599,6 +605,7 @@ public:
 	bool ApplyTFXState(bool already_execed = false);
 
 	void SetIndexBuffer(VkBuffer buffer);
+	void SetVertexBuffer(VkBuffer buffer);
 	void SetBlendConstants(u8 color);
 	void SetLineWidth(float width);
 
@@ -634,6 +641,7 @@ private:
 		DIRTY_FLAG_PIPELINE = (1 << 11),
 		DIRTY_FLAG_VS_CONSTANT_BUFFER = (1 << 12),
 		DIRTY_FLAG_PS_CONSTANT_BUFFER = (1 << 13),
+		DIRTY_FLAG_VERTEX_BUFFER = (1 << 14),
 
 		DIRTY_FLAG_TFX_TEXTURE_TEX = (DIRTY_FLAG_TFX_TEXTURE_0 << 0),
 		DIRTY_FLAG_TFX_TEXTURE_PALETTE = (DIRTY_FLAG_TFX_TEXTURE_0 << 1),
@@ -643,8 +651,9 @@ private:
 		DIRTY_FLAG_TFX_TEXTURES = DIRTY_FLAG_TFX_TEXTURE_TEX | DIRTY_FLAG_TFX_TEXTURE_PALETTE |
 								  DIRTY_FLAG_TFX_TEXTURE_RT | DIRTY_FLAG_TFX_TEXTURE_PRIMID,
 
-		DIRTY_BASE_STATE = DIRTY_FLAG_INDEX_BUFFER | DIRTY_FLAG_PIPELINE | DIRTY_FLAG_VIEWPORT | DIRTY_FLAG_SCISSOR |
-						   DIRTY_FLAG_BLEND_CONSTANTS | DIRTY_FLAG_LINE_WIDTH,
+		DIRTY_BASE_STATE = DIRTY_FLAG_INDEX_BUFFER | DIRTY_FLAG_VERTEX_BUFFER | DIRTY_FLAG_PIPELINE |
+						   DIRTY_FLAG_VIEWPORT | DIRTY_FLAG_SCISSOR | DIRTY_FLAG_BLEND_CONSTANTS |
+						   DIRTY_FLAG_LINE_WIDTH,
 		DIRTY_TFX_STATE = DIRTY_BASE_STATE | DIRTY_FLAG_TFX_TEXTURES,
 		DIRTY_UTILITY_STATE = DIRTY_BASE_STATE | DIRTY_FLAG_UTILITY_TEXTURE,
 		DIRTY_CONSTANT_BUFFER_STATE = DIRTY_FLAG_VS_CONSTANT_BUFFER | DIRTY_FLAG_PS_CONSTANT_BUFFER,
@@ -670,6 +679,12 @@ private:
 	bool m_warned_slow_spin = false;
 
 	VkBuffer m_index_buffer = VK_NULL_HANDLE;
+	VkBuffer m_vertex_buffer = VK_NULL_HANDLE;
+
+	// Set between BeginPresent() and EndPresent(). That render pass is begun and ended by raw
+	// vkCmdBegin/EndRenderPass calls which do not set m_current_render_pass, so it is invisible
+	// to EndRenderPass() and to ExecuteCommandBufferAndRestartRenderPass().
+	bool m_in_present_pass = false;
 
 	GSTextureVK* m_current_render_target = nullptr;
 	GSTextureVK* m_current_depth_target = nullptr;
