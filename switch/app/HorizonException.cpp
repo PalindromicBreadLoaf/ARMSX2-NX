@@ -99,6 +99,13 @@ extern "C" int horizon_run_deferred_fault(ThreadExceptionDump* dump)
 	if (!slot)
 		return 0;
 
+	if (HorizonFastmem::ResolveFault(static_cast<uptr>(slot->dump.far.x)))
+	{
+		slot->dump.cpu_gprs[0].x = slot->original_x0;
+		slot->dump.pc.x = slot->original_pc;
+		return 1;
+	}
+
 	const bool is_write = (slot->dump.esr & (1u << 6)) != 0;
 	const PageFaultHandler::HandlerResult result =
 		PageFaultHandler::HandlePageFault(reinterpret_cast<void*>(slot->original_pc),

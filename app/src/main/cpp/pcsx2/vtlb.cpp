@@ -995,6 +995,7 @@ static void vtlb_CreateFastmemMapping(u32 vaddr, u32 mainmem_offset, const PageP
 	if (s_fastmem_virtual_mapping[page] != NO_FASTMEM_MAPPING)
 	{
 		// current mapping needs to be removed
+		const u32 old_mainmem_offset = s_fastmem_virtual_mapping[page];
 		const bool was_coalesced = vtlb_IsHostCoalesced(page);
 
 		s_fastmem_virtual_mapping[page] = NO_FASTMEM_MAPPING;
@@ -1002,7 +1003,7 @@ static void vtlb_CreateFastmemMapping(u32 vaddr, u32 mainmem_offset, const PageP
 			Console.Error("Failed to unmap vaddr %08X", vaddr);
 
 		// remove reverse mapping
-		auto range = s_fastmem_physical_mapping.equal_range(mainmem_offset);
+		auto range = s_fastmem_physical_mapping.equal_range(old_mainmem_offset);
 		for (auto it = range.first; it != range.second;)
 		{
 			auto this_it = it++;
@@ -1395,11 +1396,21 @@ bool vtlb_Core_Alloc()
 	vtlbdata.vmap = reinterpret_cast<VTLBVirtual*>(SysMemory::GetVTLBVirtualMap());
 
 	pxAssert(!s_fastmem_area);
+#if defined(__SWITCH__)
+	const bool requested_fastmem = CHECK_FASTMEM;
+	if (requested_fastmem)
+		s_fastmem_area = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);
+#else
 	s_fastmem_area = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);
+#endif
 	if (!s_fastmem_area)
 	{
 #if defined(__SWITCH__)
-		Console.Warning("Fastmem area unavailable.");
+		if (requested_fastmem)
+		{
+			Console.Warning("Fastmem area unavailable.");
+			EmuConfig.Cpu.Recompiler.EnableFastmem = false;
+		}
 #else
 		Host::ReportErrorAsync("Error", "Failed to allocate fastmem area");
 		return false;

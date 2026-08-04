@@ -193,6 +193,22 @@ void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& 
 		return;
 	}
 
+	if (HorizonFastmem::IsArenaAddress(reinterpret_cast<uptr>(baseaddr), size))
+	{
+		if (!HorizonFastmem::ProtectArena(baseaddr, size, mode.CanWrite()))
+			Console.Error("HostSys::MemProtect: failed to update Horizon fastmem protection");
+		return;
+	}
+
+	const bool canonical =
+		HorizonFastmem::IsCanonicalAddress(reinterpret_cast<uptr>(baseaddr), size);
+	if (canonical && !mode.CanWrite() &&
+		!HorizonFastmem::PrepareCanonicalProtection(baseaddr, size))
+	{
+		Console.Error("HostSys::MemProtect: failed to unmap Horizon fastmem aliases");
+		return;
+	}
+
 	const Result rc = svcSetMemoryPermission(baseaddr, size, HorizonProt(mode));
 	if (R_FAILED(rc))
 	{
@@ -203,6 +219,10 @@ void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& 
 							"(continuing with further failures suppressed)", baseaddr, size, static_cast<u32>(rc));
 			s_warned = true;
 		}
+	}
+	else if (canonical && mode.CanWrite())
+	{
+		HorizonFastmem::RestoreCanonicalProtection(baseaddr, size);
 	}
 }
 
@@ -387,21 +407,45 @@ SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size
 SharedMemoryMappingArea::~SharedMemoryMappingArea()
 {
 	pxAssertRel(m_num_mappings == 0, "No mappings left");
+
+	if (!HorizonFastmem::DestroyArena(m_base_ptr, m_size))
+		pxFailRel("Failed to release Horizon fastmem area");
 }
 
 std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t size)
 {
-	return nullptr;
+	pxAssertRel(Common::IsAlignedPow2(size, __pagesize), "Size is page aligned");
+
+	u8* const base = HorizonFastmem::CreateArena(size);
+	if (!base)
+		return nullptr;
+
+	return std::unique_ptr<SharedMemoryMappingArea>(
+		new SharedMemoryMappingArea(base, size, size / __pagesize));
 }
 
 u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* map_base, size_t map_size, const PageProtectionMode& mode)
 {
-	return nullptr;
+	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr &&
+		static_cast<u8*>(map_base) < (m_base_ptr + m_size));
+
+	u8* const result = HorizonFastmem::MapArena(
+		file_handle, file_offset, static_cast<u8*>(map_base), map_size, mode.CanWrite());
+	if (result)
+		m_num_mappings++;
+	return result;
 }
 
 bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
 {
-	return false;
+	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr &&
+		static_cast<u8*>(map_base) < (m_base_ptr + m_size));
+
+	if (!HorizonFastmem::UnmapArena(static_cast<u8*>(map_base), map_size))
+		return false;
+
+	m_num_mappings--;
+	return true;
 }
 
 namespace PageFaultHandler

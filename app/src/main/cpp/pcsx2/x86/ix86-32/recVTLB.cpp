@@ -431,11 +431,7 @@ void vtlb_DynGenDispatchers()
 
 #ifdef __SWITCH__
 // fastmem-lite
-// Fastmem is disabled on Switch since HOS has no way to recover from thread faults.
-// However, any writes directly to the main 32MB of RAM can be assigned direct values
-// to get some of the perfance that was lost back.
-// Writes need no SMC special case for this since Switch already has manual integrity checks
-// for any self-modifying code
+// Used when the fastmem arena is unavailable.
 static constexpr u32 FML_SEG_MASK = 0x7E000000u;
 static constexpr u32 FML_RAM_MASK = 0x01FFFFFFu; // 32 MB - 1
 
@@ -464,7 +460,7 @@ int vtlb_DynGenReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg, vtlb_Rea
         iFlushCall(FLUSH_FULLVTLB);
 
 #ifdef __SWITCH__
-        if (eeRecFastmemLiteOK)
+        if (eeRecFastmemLiteOK && (!CHECK_FASTMEM || !vtlbdata.fastmem_base))
         {
             // Allocate the destination up-front
             if (!xmm)
@@ -603,6 +599,15 @@ int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, 
 {
     int x86_dest_reg;
     auto vmv = vtlbdata.vmap[addr_const >> VTLB_PAGE_BITS];
+#ifdef __SWITCH__
+	if (CHECK_FASTMEM && vtlbdata.fastmem_base && !vtlb_IsFaultingPC(pc) &&
+		!vmv.isHandler(addr_const))
+	{
+		armAsm->Mov(ECX, addr_const);
+		return vtlb_DynGenReadNonQuad(bits, sign, xmm, ECX.GetCode(), dest_reg_alloc);
+	}
+#endif
+
     if (!vmv.isHandler(addr_const))
     {
 //        uptr ppf = vmv.assumePtr(addr_const);
@@ -753,7 +758,7 @@ int vtlb_DynGenReadQuad(u32 bits, int addr_reg, vtlb_ReadRegAllocCallback dest_r
 		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0); // Handler returns in xmm0
 
 #ifdef __SWITCH__
-		if (eeRecFastmemLiteOK)
+		if (eeRecFastmemLiteOK && (!CHECK_FASTMEM || !vtlbdata.fastmem_base))
 		{
 			a64::Label slow, done;
 			DynGen_FastmemLiteCheck(ECX.GetCode(), &slow);
@@ -808,8 +813,17 @@ int vtlb_DynGenReadQuad_Const(u32 bits, u32 addr_const, vtlb_ReadRegAllocCallbac
 
 	EE::Profiler.EmitConstMem(addr_const);
 
-	int reg;
 	auto vmv = vtlbdata.vmap[addr_const >> VTLB_PAGE_BITS];
+#ifdef __SWITCH__
+	if (CHECK_FASTMEM && vtlbdata.fastmem_base && !vtlb_IsFaultingPC(pc) &&
+		!vmv.isHandler(addr_const))
+	{
+		armAsm->Mov(ECX, addr_const);
+		return vtlb_DynGenReadQuad(bits, ECX.GetCode(), dest_reg_alloc);
+	}
+#endif
+
+	int reg;
 	if (!vmv.isHandler(addr_const))
 	{
 //		void* ppf = reinterpret_cast<void*>(vmv.assumePtr(addr_const));
@@ -911,7 +925,7 @@ void vtlb_DynGenWrite(u32 sz, bool xmm, int addr_reg, int value_reg)
 		iFlushCall(FLUSH_FULLVTLB);
 
 #ifdef __SWITCH__
-		if (eeRecFastmemLiteOK)
+		if (eeRecFastmemLiteOK && (!CHECK_FASTMEM || !vtlbdata.fastmem_base))
 		{
 			a64::Label slow, done;
 			DynGen_FastmemLiteCheck(addr_reg, &slow);
@@ -1073,6 +1087,16 @@ void vtlb_DynGenWrite_Const(u32 bits, bool xmm, u32 addr_const, int value_reg)
 #endif
 
 	auto vmv = vtlbdata.vmap[addr_const >> VTLB_PAGE_BITS];
+#ifdef __SWITCH__
+	if (CHECK_FASTMEM && vtlbdata.fastmem_base && !vtlb_IsFaultingPC(pc) &&
+		!vmv.isHandler(addr_const))
+	{
+		armAsm->Mov(ECX, addr_const);
+		vtlb_DynGenWrite(bits, xmm, ECX.GetCode(), value_reg);
+		return;
+	}
+#endif
+
 	if (!vmv.isHandler(addr_const))
 	{
 //		auto ppf = vmv.assumePtr(addr_const);

@@ -520,10 +520,11 @@ static const void* _DynGen_EnterRecompiledCode()
     }
 
 #ifdef __SWITCH__
-    // Fastmem is disabled on Switch due to fault recover missing
-	// This allows for a "FastmemLite" that get some of the fastmem performance back
-    armMoveAddressToReg(RXVIXLSCRATCH, &eeMem);
-    armAsm->Ldr(RFASTMEMBASE, a64::MemOperand(RXVIXLSCRATCH));
+	if (!CHECK_FASTMEM || !vtlb_private::vtlbdata.fastmem_base)
+	{
+		armMoveAddressToReg(RXVIXLSCRATCH, &eeMem);
+		armAsm->Ldr(RFASTMEMBASE, a64::MemOperand(RXVIXLSCRATCH));
+	}
 #endif
 
 //	xJMP(DispatcherReg);
