@@ -372,7 +372,13 @@ namespace
 			const Result result = svcUnmapProcessMemory(reinterpret_cast<void*>(destination),
 				self, source, run * PAGE_SIZE);
 			if (R_FAILED(result))
+			{
+				// Deliberately leave the shadow entries intact to avoid potential corruption.
+				ERROR_LOG_THROTTLED("HorizonFastmem: svcUnmapProcessMemory({:#x}, {:#x}, {:#x}) "
+									"failed: {:#010x}. Keeping shadow entry for retry",
+					destination, source, run * PAGE_SIZE, static_cast<unsigned>(result));
 				return false;
+			}
 
 			s_arena.live_pages =
 				(s_arena.live_pages >= run) ? s_arena.live_pages - static_cast<unsigned>(run) : 0;
@@ -447,7 +453,14 @@ namespace
 		const Result result = svcUnmapProcessMemory(reinterpret_cast<void*>(destination),
 			envGetOwnProcessHandle(), source, PAGE_SIZE);
 		if (R_FAILED(result))
+		{
+			// Same rule as UnmapRangeLocked: the shadow entry stays, so the alias is never
+			// forgotten while the kernel still holds it.
+			ERROR_LOG_THROTTLED("HorizonFastmem: write-protect unmap of arena page {:#x} "
+								"failed: {:#010x}; keeping shadow entry for retry",
+				destination, static_cast<unsigned>(result));
 			return false;
+		}
 
 		if (s_arena.live_pages)
 			s_arena.live_pages--;

@@ -239,7 +239,7 @@ void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& 
 	if (canonical && !mode.CanWrite() &&
 		!HorizonFastmem::PrepareCanonicalProtection(baseaddr, size))
 	{
-		Console.Error("HostSys::MemProtect: failed to unmap Horizon fastmem aliases");
+		ERROR_LOG_THROTTLED("HostSys::MemProtect: failed to unmap Horizon fastmem aliases");
 		return;
 	}
 
