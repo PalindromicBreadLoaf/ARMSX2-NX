@@ -182,21 +182,55 @@ void HostSys::Munmap(void* base, size_t size)
 	free(src);
 }
 
+namespace
+{
+	// hbloader does not exit between NRO launches, so anything we leak is still there on the
+	// next run.
+	void ReleaseLeakedHorizonMappings()
+	{
+		{
+			std::lock_guard lock(s_code_mutex);
+			for (auto& mapping : s_code_mappings)
+				jitClose(&mapping.second.jit);
+			s_code_mappings.clear();
+		}
+
+		{
+			std::lock_guard lock(s_mapping_mutex);
+			for (auto& mapping : s_mappings)
+			{
+				svcSetMemoryPermission(mapping.first, mapping.second.size, Perm_Rw);
+				virtmemLock();
+				svcUnmapMemory(mapping.first, mapping.second.src, mapping.second.size);
+				virtmemUnlock();
+				free(mapping.second.src);
+			}
+			s_mappings.clear();
+		}
+	}
+
+	[[gnu::constructor(101)]] void RegisterHorizonMappingRelease()
+	{
+		std::atexit(&ReleaseLeakedHorizonMappings);
+	}
+} // namespace
+
 void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& mode)
 {
 	pxAssertMsg((size & (__pagesize - 1)) == 0, "Size is page aligned");
 
+	// The error sites below are throttled to not overload the SD Card.
 	if (mode.CanExecute())
 	{
 		// Execute permission can only be granted through the Jit aliasing path
-		Console.Error("HostSys::MemProtect: execute permission is unsupported on Horizon");
+		ERROR_LOG_THROTTLED("HostSys::MemProtect: execute permission is unsupported on Horizon");
 		return;
 	}
 
 	if (HorizonFastmem::IsArenaAddress(reinterpret_cast<uptr>(baseaddr), size))
 	{
 		if (!HorizonFastmem::ProtectArena(baseaddr, size, mode.CanWrite()))
-			Console.Error("HostSys::MemProtect: failed to update Horizon fastmem protection");
+			ERROR_LOG_THROTTLED("HostSys::MemProtect: failed to update Horizon fastmem protection");
 		return;
 	}
 
