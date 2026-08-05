@@ -155,7 +155,9 @@ void mVUdispatcherCD(mV)
 
         // Jump to Recompiled Code Block
 //		xJMP(ptrNative[&mVU.resumePtrXG]);
-        armEmitJmp(&mVU.resumePtrXG);
+        // Indirect: branch *through* resumePtrXG.
+        armAsm->Ldr(RXVIXLSCRATCH, PTR_MVU(microVU[mVU.index].resumePtrXG));
+        armAsm->Br(RXVIXLSCRATCH);
 
         mVU.exitFunctXG = armGetCurrentCodePointer();
 

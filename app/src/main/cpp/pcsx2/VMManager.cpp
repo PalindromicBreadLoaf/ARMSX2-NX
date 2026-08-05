@@ -979,11 +979,6 @@ void VMManager::LoadCoreSettings(SettingsInterface& si)
 	// Force MTVU off when playing back GS dumps, it doesn't get used.
 	if (GSDumpReplayer::IsReplayingDump())
 		EmuConfig.Speedhacks.vuThread = false;
-
-#ifdef __NINTENDO_SWITCH__
-	// MTVU emits illegal instructions on Switch dynarec today, so keep it disabled.
-	EmuConfig.Speedhacks.vuThread = false;
-#endif
 }
 
 void VMManager::LoadInputBindings(SettingsInterface& si, std::unique_lock<std::mutex>& lock)
@@ -3868,6 +3863,12 @@ void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
 	const int extra_threads = (core_count > 3) ? 3 : 2;
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn(fmt::format("  Setting Extra Software Rendering Threads to {}.", extra_threads));
 	si.SetIntValue("EmuCore/GS", "extrathreads", extra_threads);
+
+#ifdef __NINTENDO_SWITCH__
+	// MTVU may fault the dynarec here, unsure.
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("  Overriding: MTVU defaults off on Switch.");
+	si.SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
+#endif
 }
 
 #elif defined(__APPLE__)

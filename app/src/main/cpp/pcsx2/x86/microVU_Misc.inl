@@ -403,9 +403,9 @@ __fi void mVUaddrFix(mV, const a64::Register& gprReg)
             armAsm->And(reg32, reg32, 0x3f);
 
 //			xADD(gprReg, (u128*)VU1.VF - (u128*)VU0.Mem);
-            a64::MemOperand mop1 = PTR_CPU(vuRegs[1].VF);
-            a64::MemOperand mop2 = PTR_CPU(vuRegs[0].Mem);
-            armAsm->Sub(REX, mop1.GetBaseRegister(), mop2.GetBaseRegister());
+            const s64 vu1RegDisp =
+                (reinterpret_cast<sptr>(&VU1.VF[0]) - reinterpret_cast<sptr>(VU0.Mem)) / 16;
+            armAsm->Mov(REX, vu1RegDisp);
             armAsm->Add(gprReg, gprReg, REX);
 
 //		jmpB.SetTarget();
@@ -560,7 +560,7 @@ void MIN_MAX_SS(mV, const xmm& to, const xmm& from, const xmm& t1in, bool min)
 //	else	 xMAX.PD(to, t1);
     if (min) armAsm->Fminnm(to.V2D(), to.V2D(), t1.V2D());
     else     armAsm->Fmaxnm(to.V2D(), to.V2D(), t1.V2D());
-    if (!t1.Is(t1in)) 
+    if (!t1.Is(t1in))
 		mVU.regAlloc->clearNeeded(t1);
 }
 
