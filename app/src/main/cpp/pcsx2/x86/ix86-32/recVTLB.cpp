@@ -444,6 +444,48 @@ static void DynGen_FastmemLiteCheck(int addr_reg, a64::Label* slow)
 }
 #endif
 
+// ------------------------------------------------------------------------
+// Address setup for an access to a constant guest address which is known at recompile
+// time to be backed by real memory rather than a handler. The host pointer is a
+// compile-time constant (the TLB clears the rec when it remaps), so unlike the
+// register-address path there's no reason to walk vmap at runtime.
+//
+// Returns the operand for the access itself. Emits at most one instruction of setup,
+// and none at all for the low part of the memory block.
+static a64::MemOperand DynGen_ConstHostPtr(uptr ppf, u32 bits)
+{
+	const u64 access_size = bits / 8;
+
+#ifdef __SWITCH__
+	// When the fastmem arena isn't in use, RFASTMEMBASE holds eeMem for the fastmem-lite
+	// path (see _DynGen_EnterRecompiledCode). Main RAM, the scratchpad and the ROMs all
+	// live inside that block, so reach them off it rather than materializing a 64-bit
+	// address which likely won't be adrp-reachable from the code buffer.
+	if (eeMem && (!CHECK_FASTMEM || !vtlbdata.fastmem_base))
+	{
+		const uptr eebase = reinterpret_cast<uptr>(eeMem);
+		if (ppf >= eebase && (ppf - eebase) < sizeof(EEVM_MemoryAllocMess))
+		{
+			const u64 offset = ppf - eebase;
+
+			// scaled 12-bit unsigned immediate -> no setup at all
+			if ((offset % access_size) == 0 && (offset / access_size) <= 4095)
+				return a64::MemOperand(RFASTMEMBASE, static_cast<s64>(offset));
+
+			if (a64::Assembler::IsImmAddSub(static_cast<s64>(offset)))
+			{
+				armAsm->Add(RSCRATCHADDR, RFASTMEMBASE, static_cast<s64>(offset));
+				return a64::MemOperand(RSCRATCHADDR);
+			}
+		}
+	}
+#endif
+
+	// adrp+add when the pointer is within 4GB of the code buffer, movz/movk otherwise.
+	armMoveAddressToReg(RSCRATCHADDR, reinterpret_cast<const void*>(ppf));
+	return a64::MemOperand(RSCRATCHADDR);
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////
 //                            Dynarec Load Implementations
 // ------------------------------------------------------------------------
@@ -610,22 +652,15 @@ int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, 
 
     if (!vmv.isHandler(addr_const))
     {
-//        uptr ppf = vmv.assumePtr(addr_const);
-//        auto mop = armMemOperandPtr((u8*)ppf);
-
-        armAsm->Mov(ECX, addr_const);
-        armAsm->Mov(EAX, ECX);
-        armAsm->Lsr(EAX, EAX, VTLB_PAGE_BITS);
-        armAsm->Ldr(RXVIXLSCRATCH, PTR_CPU(vtlbdata.vmap));
-        armAsm->Ldr(RAX, a64::MemOperand(RXVIXLSCRATCH, RAX, a64::LSL, 3));
-        armAsm->Add(RCX, RCX, RAX);
-        auto mop = a64::MemOperand(RCX);
+        const uptr ppf = vmv.assumePtr(addr_const);
 
         if (!xmm)
         {
 //			x86_dest_reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(eax), eax.GetId());
             x86_dest_reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(EAX), EAX.GetCode());
 
+            // after the allocation, which can emit register writebacks of its own
+            const auto mop = DynGen_ConstHostPtr(ppf, bits);
             auto regX = a64::XRegister(x86_dest_reg);
             switch (bits)
             {
@@ -654,7 +689,7 @@ int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, 
         {
             x86_dest_reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
 //			xMOVSSZX(xRegisterSSE(x86_dest_reg), ptr32[(float*)ppf]);
-            armAsm->Ldr(a64::QRegister(x86_dest_reg).S(), mop);
+            armAsm->Ldr(a64::QRegister(x86_dest_reg).S(), DynGen_ConstHostPtr(ppf, bits));
         }
     }
     else
@@ -826,19 +861,11 @@ int vtlb_DynGenReadQuad_Const(u32 bits, u32 addr_const, vtlb_ReadRegAllocCallbac
 	int reg;
 	if (!vmv.isHandler(addr_const))
 	{
-//		void* ppf = reinterpret_cast<void*>(vmv.assumePtr(addr_const));
+		const uptr ppf = vmv.assumePtr(addr_const);
 		reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
 		if (reg >= 0) {
 //            xMOVAPS(xRegisterSSE(reg), ptr128[ppf]);
-//            armAsm->Ldr(a64::QRegister(reg).Q(), armMemOperandPtr(ppf));
-
-            armAsm->Mov(ECX, addr_const);
-            armAsm->Mov(EAX, ECX);
-            armAsm->Lsr(EAX, EAX, VTLB_PAGE_BITS);
-            armAsm->Ldr(RXVIXLSCRATCH, PTR_CPU(vtlbdata.vmap));
-            armAsm->Ldr(RAX, a64::MemOperand(RXVIXLSCRATCH, RAX, a64::LSL, 3));
-            armAsm->Add(RCX, RCX, RAX);
-            armAsm->Ldr(a64::QRegister(reg).Q(), a64::MemOperand(RCX));
+            armAsm->Ldr(a64::QRegister(reg).Q(), DynGen_ConstHostPtr(ppf, bits));
         }
 	}
 	else
@@ -1099,16 +1126,7 @@ void vtlb_DynGenWrite_Const(u32 bits, bool xmm, u32 addr_const, int value_reg)
 
 	if (!vmv.isHandler(addr_const))
 	{
-//		auto ppf = vmv.assumePtr(addr_const);
-//        a64::MemOperand mop = armMemOperandPtr((u8*)ppf);
-
-        armAsm->Mov(ECX, addr_const);
-        armAsm->Mov(EAX, ECX);
-        armAsm->Lsr(EAX, EAX, VTLB_PAGE_BITS);
-        armAsm->Ldr(RXVIXLSCRATCH, PTR_CPU(vtlbdata.vmap));
-        armAsm->Ldr(RAX, a64::MemOperand(RXVIXLSCRATCH, RAX, a64::LSL, 3));
-        armAsm->Add(RCX, RCX, RAX);
-        auto mop = a64::MemOperand(RCX);
+		const a64::MemOperand mop = DynGen_ConstHostPtr(vmv.assumePtr(addr_const), bits);
 
 		if (!xmm)
 		{
