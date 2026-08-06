@@ -84,6 +84,10 @@ layout(std140, binding = 0) uniform cbSel
 	uint ub_sel_manual_lod;
 };
 
+// When TFX_SPECIALIZED is defined the runtime compiler has already emitted a `const uint sel_*`
+// for every selector ahead of this file, so none of the folding below applies.
+#ifndef TFX_SPECIALIZED
+
 // Variants are generated from this source by prepending one TFX_VARIANT_* define (see switch/app/CMakeLists.txt)
 #if defined(TFX_VARIANT_FAST)
 	#define FOLD_RT_READ
@@ -206,6 +210,8 @@ layout(std140, binding = 0) uniform cbSel
 #define sel_shuffle_across ub_sel_shuffle_across
 #define sel_write_rg ub_sel_write_rg
 #define sel_scanmsk ub_sel_scanmsk
+
+#endif // !TFX_SPECIALIZED
 
 layout(binding = 2) uniform sampler2D Texture;
 layout(binding = 3) uniform sampler2D Palette;

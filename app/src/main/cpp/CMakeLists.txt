@@ -59,6 +59,21 @@ endif()
 get_git_version_info()
 write_svnrev_h()
 
+# uam is compiled into the NRO so the deko3d backend can specialise its tfx fragment shader per
+# draw instead of leaning on the ubershader. Probed here because pcsx2/ is configured before
+# switch/app, which is what actually builds the blob.
+if(HORIZON)
+	option(DK3D_RUNTIME_SHADERS "Compile deko3d tfx shaders at runtime with uam" ON)
+	set(UAM_ROOT "${CMAKE_SOURCE_DIR}/../../../../../uam" CACHE PATH "Root of the uam checkout")
+	if(DK3D_RUNTIME_SHADERS AND NOT EXISTS "${UAM_ROOT}/source/compiler_iface.cpp")
+		message(FATAL_ERROR
+			"DK3D_RUNTIME_SHADERS is on but uam was not found at ${UAM_ROOT}.\n"
+			"Clone it next to the ARMSX2 checkout (git clone https://github.com/devkitPro/uam), pass "
+			"-DUAM_ROOT=/path/to/uam, or configure with -DDK3D_RUNTIME_SHADERS=OFF to build with only "
+			"the prebuilt tfx variants.")
+	endif()
+endif()
+
 # make common
 add_subdirectory(common)
 

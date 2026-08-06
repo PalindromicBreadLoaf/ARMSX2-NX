@@ -893,6 +893,13 @@ if(HORIZON)
 	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/GSDeviceDK.h)
 	list(APPEND pcsx2GSSources GS/Renderers/DK3D/GSTextureDK.cpp)
 	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/GSTextureDK.h)
+	list(APPEND pcsx2GSSources GS/Renderers/DK3D/DKShaderCompiler.cpp)
+	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/DKShaderCompiler.h)
+	list(APPEND pcsx2GSHeaders GS/Renderers/DK3D/uam/UamBridge.h)
+	# The uam blob itself is built and linked by switch/app.
+	if(DK3D_RUNTIME_SHADERS)
+		target_compile_definitions(PCSX2_FLAGS INTERFACE DK3D_RUNTIME_SHADERS=1)
+	endif()
 endif()
 
 if(APPLE)
