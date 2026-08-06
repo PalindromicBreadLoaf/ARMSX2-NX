@@ -8,10 +8,12 @@
 #include "GS/Renderers/Common/GSTexture.h"
 
 #ifdef __SWITCH__
+#include "GS/Renderers/DK3D/DKShaderCompiler.h"
 #include "GS/Renderers/DK3D/GSTextureDK.h"
 
 #include <deko3d.h>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #endif
 
@@ -107,9 +109,13 @@ private:
 	bool LoadShaders();
 	bool SetupSamplers();
 	void BeginFrameIfNeeded();
-	// deko3d cbAddMem hook for command streams that exceed CMDBUF_SIZE.
+	// deko3d cbAddMem hook for command streams that exceed one slice of CMDBUF_SIZE.
 	static void AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minReqSize);
 	void AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize);
+	// Hand the command buffer its next unused slice.
+	bool BindNextCmdSlice(DkCmdBuf cmdbuf);
+	// Destroy the emergency command memory a frame had to allocate, once its fence has signalled.
+	void ReleaseOverflowCmdMemory(u32 frame_index);
 	// Flushes a pending ClearRenderTarget
 	void CommitClear(GSTextureDK* tex);
 	// Optional cb is fragment uniform buffer 0 for post-processing shaders.
@@ -122,6 +128,11 @@ private:
 	DkGpuAddr StreamVertices(const void* data, u32 size);
 	DkGpuAddr StreamIndices(const void* data, u32 size);
 	DkGpuAddr StreamUniform(const void* data, u32 size);
+	// Reserve space in a per-frame stream ring.
+	bool ReserveStreamSpace(u32& offset, u32 size, u32 alignment, u32 capacity, const char* ring_name);
+	// Submit and wait for everything recorded so far, so the stream rings can be rewound
+	// without overwriting data that already-recorded commands still reference.
+	void SyncStreamRings();
 	u32 PushImage(const GSTextureDK* tex);
 	// Draw tfx geometry, splitting barriers for feedback-loop reads.
 	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
@@ -137,6 +148,7 @@ private:
 		m_hw_invariants_bound = false;
 		m_hw_uniforms_valid = false;
 		m_hw_tex_valid = false;
+		m_hw_tfx_fsh = nullptr;
 	}
 	// Issue a deko3d barrier and stop image generation if the image cache was marked
 	void IssueBarrier(DkBarrier mode, u32 invalidate_flags);
@@ -160,6 +172,9 @@ private:
 		DkMemBlock index_memblock = nullptr;
 		DkMemBlock uniform_memblock = nullptr;
 		DkMemBlock staging_memblock = nullptr;
+		// Emergency slices handed to cbAddMem when the frame outgrew cmdbuf_memblock.
+		// Kept alive until this context's fence signals.
+		std::vector<DkMemBlock> overflow_cmd_blocks;
 		DkFence fence{};
 		bool fence_pending = false;
 		bool timestamp_written = false;
@@ -169,6 +184,7 @@ private:
 
 	DkMemBlock m_cmdbuf_memblock = nullptr;
 	DkCmdBuf m_cmdbuf = nullptr;
+	u32 m_cmdbuf_slice = 0;
 
 	// Convert/present
 	DkMemBlock m_code_memblock = nullptr;
@@ -208,13 +224,41 @@ private:
 	DkShader m_tfx_fsh[NumTfxVariants]{};
 	bool m_tfx_shaders_ok = false;
 
+	// A tfx fragment shader uam compiled for one exact selector, with every branch folded out.
+	// The baked variants above stand in until the background compile lands.
+	struct TfxShaderEntry
+	{
+		DKTfxSelector sel;
+		DkShader shader;
+		bool ready;  // compiled, uploaded and bindable
+		bool failed; // uam refused it or the code heap is full
+	};
+	std::unordered_map<u64, TfxShaderEntry> m_tfx_specialized;
+	u32 m_tfx_specialized_count = 0;
+	const DkShader* GetSpecializedTfxFragmentShader(const DKTfxSelector& sel);
+	// Turn finished DKSH blobs into bindable shaders. GS thread, at the top of a frame.
+	void InstallCompiledTfxShaders();
+
+	// Runtime shaders get their own code memory, grown one chunk at a time, because the startup
+	// block is sized for exactly what romfs holds.
+	static constexpr u32 SHADER_HEAP_CHUNK_SIZE = 512 * 1024;
+	static constexpr u32 SHADER_HEAP_MAX_CHUNKS = 16;
+	struct ShaderHeapChunk
+	{
+		DkMemBlock block;
+		u32 used;
+	};
+	std::vector<ShaderHeapChunk> m_shader_heap;
+	bool AllocShaderCode(const void* data, u32 size, DkMemBlock* out_block, u32* out_offset);
+	void DestroyShaderHeap();
+
 	// Skip re-emitting binds that match the previous HW draw
 	bool m_hw_invariants_bound = false;
-	u32 m_hw_tfx_variant = TfxVariantUber;
+	const DkShader* m_hw_tfx_fsh = nullptr;
 	u32 m_hw_blend_key = 0;
 	u32 m_hw_colormask = 0;
 	u32 m_hw_depth_key = 0;
-	
+
 	// Skip redoing cb_vs/cb_ps/selector when they match the prior draw
 	bool m_hw_uniforms_valid = false;
 	bool m_hw_last_has_tex = false;
@@ -279,6 +323,8 @@ private:
 
 	DkFence m_readback_fence{};
 	bool m_readback_pending = false;
+	// Signalled by SyncStreamRings when a stream ring has to wrap mid-frame.
+	DkFence m_ring_fence{};
 
 	// GPU-busy %
 	DkMemBlock m_timestamp_memblock = nullptr;

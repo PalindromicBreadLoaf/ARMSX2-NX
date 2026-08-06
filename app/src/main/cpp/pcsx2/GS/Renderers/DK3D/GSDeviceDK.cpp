@@ -26,7 +26,17 @@
 namespace
 {
 	constexpr u32 CMDBUF_SIZE = 8 * 1024 * 1024;
+	// Command memory is handed to deko3d one slice at a time. Running off the end of a slice
+	// invokes cbAddMem, which moves to the next one instead of recycling live memory.
+	constexpr u32 CMDBUF_SLICE_SIZE = 2 * 1024 * 1024;
+	constexpr u32 CMDBUF_NUM_SLICES = CMDBUF_SIZE / CMDBUF_SLICE_SIZE;
 	constexpr u32 CODE_MEMSIZE = 256 * 1024;
+	// The last DK_SHADER_CODE_UNUSABLE_SIZE bytes of a memblock cannot hold shader code.
+	constexpr u32 CODE_USABLE_SIZE = CODE_MEMSIZE - DK_SHADER_CODE_UNUSABLE_SIZE;
+	// deko3d's defaults are 64 KiB / 8 KiB, which makes the queue block on its own checkpoint
+	// fences once a frame's worth of submissions and fences wraps the internal ring.
+	constexpr u32 QUEUE_CMDMEM_SIZE = 512 * 1024;
+	constexpr u32 QUEUE_FLUSH_THRESHOLD = QUEUE_CMDMEM_SIZE / 8;
 	constexpr u32 VERTEX_BUFFER_SIZE = 4 * 1024 * 1024;
 	constexpr u32 INDEX_BUFFER_SIZE = 2 * 1024 * 1024;
 	constexpr u32 UNIFORM_BUFFER_SIZE = 2 * 1024 * 1024;
@@ -46,19 +56,7 @@ namespace
 		float uv[2];
 	};
 
-	struct DKTfxSelector
-	{
-		u32 fst, tme, tfx, tcc, atst, afail, fog, aem;
-		u32 aem_fmt, pal_fmt, ltf, wms, wmt, dst_fmt, fba, iip;
-		u32 region_rect, adjs, adjt, tcoffsethack;
-		u32 blend_a, blend_b, blend_c, blend_d, blend_mix, blend_hw, pabe, fixed_one_a;
-		u32 a_masked, colclip, colclip_hw, rta_correction, dither, dither_adjust, round_inv, tex_is_fb;
-		u32 channel, shuffle, shuffle_same, read16src, process_ba, process_rg, shuffle_across, write_rg;
-		u32 fbmask, scanmsk, date;
-		u32 depth_fmt, urban_chaos, tales;
-		u32 automatic_lod, manual_lod;
-	};
-
+	// DKTfxSelector is declared in DKShaderCompiler.h
 	// Translate a PSSelector into the tfx ubershader's cbSel uniform
 	DKTfxSelector MakeTfxSelector(const GSHWDrawConfig::PSSelector& ps, bool has_tex)
 	{
@@ -256,7 +254,7 @@ bool GSDeviceDK::CreateDeviceObjects()
 		ctx.cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
 		if (!ctx.cmdbuf)
 			return false;
-		dkCmdBufAddMemory(ctx.cmdbuf, ctx.cmdbuf_memblock, 0, CMDBUF_SIZE);
+		dkCmdBufAddMemory(ctx.cmdbuf, ctx.cmdbuf_memblock, 0, CMDBUF_SLICE_SIZE);
 
 		dkMemBlockMakerDefaults(&memblock_maker, m_device, VERTEX_BUFFER_SIZE);
 		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
@@ -291,11 +289,14 @@ bool GSDeviceDK::CreateDeviceObjects()
 	m_index_memblock = m_frames[0].index_memblock;
 	m_uniform_memblock = m_frames[0].uniform_memblock;
 	m_staging_memblock = m_frames[0].staging_memblock;
+	m_cmdbuf_slice = 1;
 
 	// Graphics and computre queue
 	DkQueueMaker queue_maker;
 	dkQueueMakerDefaults(&queue_maker, m_device);
 	queue_maker.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute;
+	queue_maker.commandMemorySize = QUEUE_CMDMEM_SIZE;
+	queue_maker.flushThreshold = QUEUE_FLUSH_THRESHOLD;
 	m_queue = dkQueueCreate(&queue_maker);
 	if (!m_queue)
 		return false;
@@ -328,6 +329,10 @@ bool GSDeviceDK::CreateDeviceObjects()
 		Console.Warning("DK3D: No shaders available. Things will be broken.");
 	else
 		SetupSamplers();
+
+	// Per-selector tfx specialisations.
+	if (m_tfx_shaders_ok)
+		DKShaderCompiler::Open();
 
 	m_features.cas_sharpening = m_cas_shader_ok;
 
@@ -363,7 +368,8 @@ bool GSDeviceDK::SetupSamplers()
 
 	// Samplers never change
 	dkCmdBufClear(m_cmdbuf);
-	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
+	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SLICE_SIZE);
+	m_cmdbuf_slice = 1;
 	dkCmdBufPushData(m_cmdbuf, m_sampler_descriptor_set, descriptors, sizeof(descriptors));
 	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
 	dkQueueWaitIdle(m_queue);
@@ -423,6 +429,9 @@ void GSDeviceDK::BeginFrameIfNeeded()
 		}
 	}
 
+	// The GPU is done with this context, so any emergency command memory it borrowed can go back.
+	ReleaseOverflowCmdMemory(m_frame_index);
+
 	m_cmdbuf = ctx.cmdbuf;
 	m_cmdbuf_memblock = ctx.cmdbuf_memblock;
 	m_vertex_memblock = ctx.vertex_memblock;
@@ -430,8 +439,11 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	m_uniform_memblock = ctx.uniform_memblock;
 	m_staging_memblock = ctx.staging_memblock;
 
+	// dkCmdBufClear only rewinds to the start of the slice that was appended last, so point the
+	// command buffer back at slice 0 explicitly.
 	dkCmdBufClear(m_cmdbuf);
-	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
+	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SLICE_SIZE);
+	m_cmdbuf_slice = 1;
 	m_vertex_offset = 0;
 	m_index_offset = 0;
 	m_uniform_offset = 0;
@@ -448,6 +460,8 @@ void GSDeviceDK::BeginFrameIfNeeded()
 		WriteGPUTimestamp(m_frame_index, 0);
 		ctx.timestamp_written = true;
 	}
+
+	InstallCompiledTfxShaders();
 }
 
 void GSDeviceDK::AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minReqSize)
@@ -455,18 +469,98 @@ void GSDeviceDK::AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minRe
 	static_cast<GSDeviceDK*>(userData)->AddCmdMemory(cmdbuf, minReqSize);
 }
 
+bool GSDeviceDK::BindNextCmdSlice(DkCmdBuf cmdbuf)
+{
+	if (m_cmdbuf_slice >= CMDBUF_NUM_SLICES)
+		return false;
+
+	dkCmdBufAddMemory(cmdbuf, m_cmdbuf_memblock, m_cmdbuf_slice * CMDBUF_SLICE_SIZE, CMDBUF_SLICE_SIZE);
+	m_cmdbuf_slice++;
+	return true;
+}
+
 void GSDeviceDK::AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize)
 {
-	// If a frame exceeds CMDBUF_SIZE, wrap instead of letting deko3d abort.
-	Console.Warning("DK3D: command buffer ring exhausted (need %zu bytes).", minReqSize);
-	dkCmdBufAddMemory(cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
+
+	if (minReqSize <= CMDBUF_SLICE_SIZE && BindNextCmdSlice(cmdbuf))
+		return;
+
+	const u32 size = static_cast<u32>(
+		AlignUp(std::max<size_t>(minReqSize, CMDBUF_SLICE_SIZE), DK_MEMBLOCK_ALIGNMENT));
+	Console.Warning("DK3D: frame outgrew its %u byte command memory, borrowing %u more bytes.", CMDBUF_SIZE, size);
+
+	DkMemBlockMaker memblock_maker;
+	dkMemBlockMakerDefaults(&memblock_maker, m_device, size);
+	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+	DkMemBlock block = dkMemBlockCreate(&memblock_maker);
+	if (!block)
+	{
+		// deko3d raises a fatal error when the callback returns without adding memory. Nothing
+		// better is available, so let it: the alternative is silently corrupting the frame.
+		Console.Error("DK3D: out of memory for command buffer overflow (%u bytes).", size);
+		return;
+	}
+
+	// Held until this frame's fence signals in BeginFrameIfNeeded.
+	m_frames[m_frame_index].overflow_cmd_blocks.push_back(block);
+	dkCmdBufAddMemory(cmdbuf, block, 0, size);
+}
+
+void GSDeviceDK::ReleaseOverflowCmdMemory(u32 frame_index)
+{
+	FrameContext& ctx = m_frames[frame_index];
+	for (DkMemBlock block : ctx.overflow_cmd_blocks)
+		dkMemBlockDestroy(block);
+	ctx.overflow_cmd_blocks.clear();
+}
+
+void GSDeviceDK::SyncStreamRings()
+{
+	// Nothing has been recorded against the rings yet, so there is nothing to wait for.
+	if (!m_frame_active)
+		return;
+
+	// Draws already recorded this frame hold GPU addresses into the stream rings and read that
+	// memory when they execute, so a ring can only be rewound once the GPU has retired them.
+	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
+	dkQueueSignalFence(m_queue, &m_ring_fence, false);
+	dkQueueFlush(m_queue);
+
+	const Common::Timer::Value wait_start = Common::Timer::GetCurrentValue();
+	dkFenceWait(&m_ring_fence, -1);
+	PerformanceMetrics::AccumulateGSGpuWait(
+		static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - wait_start)));
+
+	// A skipped uniform rebind leaves the GPU pointing at whatever address was bound last, which
+	// the rewind is about to hand out again, so the next draw has to re-stream and re-bind.
+	InvalidateHWStateCache();
+}
+
+bool GSDeviceDK::ReserveStreamSpace(u32& offset, u32 size, u32 alignment, u32 capacity, const char* ring_name)
+{
+	if (size > capacity) [[unlikely]]
+	{
+		Console.Error("DK3D: %s ring holds %u bytes, which cannot satisfy a %u byte request.", ring_name, capacity,
+			size);
+		return false;
+	}
+
+	offset = AlignUp(offset, alignment);
+	if (offset + size > capacity) [[unlikely]]
+	{
+		SyncStreamRings();
+		// Only this ring rewinds. The others may already hold data for the draw being recorded
+		// right now, whose draw call has not been submitted and so was not covered by the wait.
+		offset = 0;
+	}
+
+	return true;
 }
 
 DkGpuAddr GSDeviceDK::StreamVertices(const void* data, u32 size)
 {
-	m_vertex_offset = AlignUp(m_vertex_offset, sizeof(ConvertVertex));
-	if (m_vertex_offset + size > VERTEX_BUFFER_SIZE)
-		m_vertex_offset = 0;
+	if (!ReserveStreamSpace(m_vertex_offset, size, sizeof(ConvertVertex), VERTEX_BUFFER_SIZE, "vertex")) [[unlikely]]
+		return 0;
 	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_vertex_memblock)) + m_vertex_offset, data, size);
 	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_vertex_memblock) + m_vertex_offset;
 	m_vertex_offset += size;
@@ -475,9 +569,8 @@ DkGpuAddr GSDeviceDK::StreamVertices(const void* data, u32 size)
 
 DkGpuAddr GSDeviceDK::StreamIndices(const void* data, u32 size)
 {
-	m_index_offset = AlignUp(m_index_offset, sizeof(u32));
-	if (m_index_offset + size > INDEX_BUFFER_SIZE)
-		m_index_offset = 0;
+	if (!ReserveStreamSpace(m_index_offset, size, sizeof(u32), INDEX_BUFFER_SIZE, "index")) [[unlikely]]
+		return 0;
 	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_index_memblock)) + m_index_offset, data, size);
 	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_index_memblock) + m_index_offset;
 	m_index_offset += size;
@@ -486,12 +579,14 @@ DkGpuAddr GSDeviceDK::StreamIndices(const void* data, u32 size)
 
 DkGpuAddr GSDeviceDK::StreamUniform(const void* data, u32 size)
 {
-	m_uniform_offset = AlignUp(m_uniform_offset, DK_UNIFORM_BUF_ALIGNMENT);
-	if (m_uniform_offset + AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT) > UNIFORM_BUFFER_SIZE)
-		m_uniform_offset = 0;
+	const u32 stride = AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT);
+	const bool reserved =
+		ReserveStreamSpace(m_uniform_offset, stride, DK_UNIFORM_BUF_ALIGNMENT, UNIFORM_BUFFER_SIZE, "uniform");
+	if (!reserved) [[unlikely]]
+		return 0;
 	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_uniform_memblock)) + m_uniform_offset, data, size);
 	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_uniform_memblock) + m_uniform_offset;
-	m_uniform_offset += AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT);
+	m_uniform_offset += stride;
 	return addr;
 }
 
@@ -502,7 +597,13 @@ u32 GSDeviceDK::PushImage(const GSTextureDK* tex)
 	// On wrap a previously cached tex/pal slot is about to be overwritten before it could be reused
 	// Drop the bind cache to force a fresh push next draw.
 	if (m_next_image_slot == 0)
+	{
 		m_hw_tex_valid = false;
+		// deko3d only invalidates the descriptor cache when the queue flushes, so without this the
+		// GPU can keep serving slots from the copies it cached before the ring came back around.
+		IssueBarrier(DkBarrier_Primitives, DkInvalidateFlags_Descriptors);
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+	}
 	const DkImageDescriptor descriptor = tex->GetDescriptor();
 	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + slot * sizeof(DkImageDescriptor), &descriptor,
 		sizeof(descriptor));
@@ -705,10 +806,11 @@ bool GSDeviceDK::LoadShaders()
 
 		const u32 offset = code_offset;
 		code_offset += (static_cast<u32>(size) + DK_SHADER_CODE_ALIGNMENT - 1) & ~(DK_SHADER_CODE_ALIGNMENT - 1);
-		if (code_offset > CODE_MEMSIZE)
+		if (code_offset > CODE_USABLE_SIZE)
 		{
 			std::fclose(f);
-			Console.Error("DK3D: shader code memblock too small for %s", path);
+			Console.Error("DK3D: shader code memblock too small for %s (%u of %u bytes usable in use)", path, offset,
+				CODE_USABLE_SIZE);
 			return false;
 		}
 
@@ -792,10 +894,132 @@ bool GSDeviceDK::LoadShaders()
 	return m_convert_shaders_ok;
 }
 
+// Bump-allocate out of the runtime shader heap, growing it by a chunk when the tail is too small.
+// Code is never handed back: a DkShader points straight at these bytes, and the working set of
+// specialisations a game reaches is bounded by how many PSSelectors it actually draws with.
+bool GSDeviceDK::AllocShaderCode(const void* data, u32 size, DkMemBlock* out_block, u32* out_offset)
+{
+	const u32 aligned_size = AlignUp(size, DK_SHADER_CODE_ALIGNMENT);
+	// The last DK_SHADER_CODE_UNUSABLE_SIZE bytes of a memblock cannot hold shader code (hw bug).
+	constexpr u32 chunk_usable = SHADER_HEAP_CHUNK_SIZE - DK_SHADER_CODE_UNUSABLE_SIZE;
+	if (aligned_size > chunk_usable)
+		return false;
+
+	ShaderHeapChunk* chunk = nullptr;
+	if (!m_shader_heap.empty() && m_shader_heap.back().used + aligned_size <= chunk_usable)
+	{
+		chunk = &m_shader_heap.back();
+	}
+	else
+	{
+		if (m_shader_heap.size() >= SHADER_HEAP_MAX_CHUNKS)
+			return false;
+
+		DkMemBlockMaker memblock_maker;
+		dkMemBlockMakerDefaults(&memblock_maker, m_device, SHADER_HEAP_CHUNK_SIZE);
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+		DkMemBlock block = dkMemBlockCreate(&memblock_maker);
+		if (!block)
+			return false;
+
+		m_shader_heap.push_back({block, 0});
+		chunk = &m_shader_heap.back();
+	}
+
+	const u32 offset = chunk->used;
+	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(chunk->block)) + offset, data, size);
+	chunk->used += aligned_size;
+
+	*out_block = chunk->block;
+	*out_offset = offset;
+	return true;
+}
+
+void GSDeviceDK::DestroyShaderHeap()
+{
+	for (const ShaderHeapChunk& chunk : m_shader_heap)
+		dkMemBlockDestroy(chunk.block);
+	m_shader_heap.clear();
+	m_tfx_specialized.clear();
+	m_tfx_specialized_count = 0;
+}
+
+// Drains the compile worker. Called once at the top of a frame so a shader can never appear
+// between two draws that share bound state.
+void GSDeviceDK::InstallCompiledTfxShaders()
+{
+	if (!DKShaderCompiler::IsOpen())
+		return;
+
+	u64 hash;
+	DKTfxSelector sel;
+	std::vector<u8> blob;
+	bool installed_any = false;
+
+	while (DKShaderCompiler::PopCompiled(hash, sel, blob))
+	{
+		const auto it = m_tfx_specialized.find(hash);
+		if (it == m_tfx_specialized.end())
+			continue; // requested, then dropped by a device reset
+
+		TfxShaderEntry& entry = it->second;
+		DkMemBlock block;
+		u32 offset;
+		if (blob.empty() || !AllocShaderCode(blob.data(), static_cast<u32>(blob.size()), &block, &offset))
+		{
+			if (!blob.empty())
+				Console.Warning("DK3D: runtime shader code memory is full; falling back to the baked variants.");
+			entry.failed = true;
+			continue;
+		}
+
+		DkShaderMaker shader_maker;
+		dkShaderMakerDefaults(&shader_maker, block, offset);
+		dkShaderInitialize(&entry.shader, &shader_maker);
+		entry.ready = true;
+		m_tfx_specialized_count++;
+		installed_any = true;
+	}
+
+	// Fresh code the shader cache has never seen; make sure it is not read through a stale line.
+	if (installed_any)
+	{
+		IssueBarrier(DkBarrier_Primitives, DkInvalidateFlags_Shader);
+		g_perfmon.Put(GSPerfMon::Barriers, 1);
+	}
+}
+
+const DkShader* GSDeviceDK::GetSpecializedTfxFragmentShader(const DKTfxSelector& sel)
+{
+	if (!DKShaderCompiler::IsOpen())
+		return nullptr;
+
+	const u64 hash = DKShaderCompiler::HashSelector(sel);
+	const auto it = m_tfx_specialized.find(hash);
+	if (it != m_tfx_specialized.end())
+	{
+		// Two selectors under one hash is not worth a wrong shader; the loser stays on the
+		// ubershader forever.
+		if (it->second.sel != sel)
+			return nullptr;
+		return it->second.ready ? &it->second.shader : nullptr;
+	}
+
+	m_tfx_specialized.emplace(hash, TfxShaderEntry{sel, DkShader{}, false, false});
+	DKShaderCompiler::Request(sel, hash);
+	return nullptr;
+}
+
 void GSDeviceDK::DestroyDeviceObjects()
 {
+	// Stop the compile worker before anything it feeds goes away.
+	DKShaderCompiler::Close();
+
 	if (m_queue)
 		dkQueueWaitIdle(m_queue);
+
+	// Safe now that the queue is drained; nothing is executing out of the runtime shader heap.
+	DestroyShaderHeap();
 
 	// Per-frame contexts
 	for (unsigned i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
@@ -806,6 +1030,8 @@ void GSDeviceDK::DestroyDeviceObjects()
 			dkCmdBufDestroy(ctx.cmdbuf);
 			ctx.cmdbuf = nullptr;
 		}
+		// Safe after the queue drain above; the command buffer no longer references them either.
+		ReleaseOverflowCmdMemory(i);
 		if (ctx.cmdbuf_memblock)
 		{
 			dkMemBlockDestroy(ctx.cmdbuf_memblock);
@@ -1068,6 +1294,8 @@ void GSDeviceDK::RenderImGui()
 		const u32 idx_size = static_cast<u32>(cmd_list->IdxBuffer.Size) * sizeof(ImDrawIdx);
 		const DkGpuAddr vtx_addr = StreamVertices(cmd_list->VtxBuffer.Data, vtx_size);
 		const DkGpuAddr idx_addr = StreamIndices(cmd_list->IdxBuffer.Data, idx_size);
+		if (!vtx_addr || !idx_addr) [[unlikely]]
+			continue;
 		dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
 		dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
 
@@ -1208,6 +1436,13 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 	const DkCopyBuf dst = {dkMemBlockGetGpuAddr(dst_block) + dst_offset, 0, 0};
 	dkCmdBufCopyImageToBuffer(m_cmdbuf, &src_view, &src_rect, &dst, 0);
 
+	// The copy runs on the copy engine. A fence placed straight after it does not force the
+	// subchannel switch back to 3D that would flush the copy through, so the invalidate has to be
+	// preceded by a 3D-engine command to be ordered against it.
+	static constexpr u32 THREED_NOP = 0x80000040;
+	dkCmdBufReplayCmds(m_cmdbuf, &THREED_NOP, 1);
+	dkCmdBufBarrier(m_cmdbuf, DkBarrier_None, DkInvalidateFlags_L2Cache);
+
 	// Copy now rides in the frame command buffer
 	m_readback_pending = true;
 }
@@ -1222,9 +1457,10 @@ void GSDeviceDK::FlushReadback()
 	if (!m_frame_active)
 		return;
 
-	// Finish this list so EndPresent won't resubmit it, then wait only on the copy, not the entire frame
+	// Finish this list so EndPresent won't resubmit it, then wait only on the copy, not the entire frame.
+	// Signal with flush=true so the GPU's dirty cache lines reach memory before the CPU reads them.
 	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
-	dkQueueSignalFence(m_queue, &m_readback_fence, false);
+	dkQueueSignalFence(m_queue, &m_readback_fence, true);
 	dkQueueFlush(m_queue);
 	const Common::Timer::Value wait_start = Common::Timer::GetCurrentValue();
 	dkFenceWait(&m_readback_fence, -1);
@@ -1248,10 +1484,10 @@ bool GSDeviceDK::UploadToImage(GSTextureDK* dst_tex, const DkImageView& view, co
 	BeginFrameIfNeeded();
 	InvalidateHWStateCache();
 
-	// Reserve a slot in the staging ring
-	m_staging_offset = AlignUp(m_staging_offset, STAGING_ALIGNMENT);
-	if (m_staging_offset + upload_size > STAGING_BUFFER_SIZE)
-		m_staging_offset = 0;
+	// Reserve a slot in the staging ring. The copies recorded from it have not run yet, so
+	// wrapping drains the GPU first rather than overwriting a pending upload's source bytes.
+	if (!ReserveStreamSpace(m_staging_offset, upload_size, STAGING_ALIGNMENT, STAGING_BUFFER_SIZE, "staging"))
+		return false;
 	u8* const dst = static_cast<u8*>(dkMemBlockGetCpuAddr(m_staging_memblock)) + m_staging_offset;
 	const DkGpuAddr src_addr = dkMemBlockGetGpuAddr(m_staging_memblock) + m_staging_offset;
 	m_staging_offset += upload_size;
@@ -1279,12 +1515,17 @@ void GSDeviceDK::GenerateImageMipmaps(GSTextureDK* tex, DkImage* image, int widt
 	BeginFrameIfNeeded();
 	InvalidateHWStateCache();
 
+	// Level 0 is usually written by an upload, which runs on the copy engine. Only switches to or
+	// from the 3D/compute engines insert an implicit wait, so a copy engine -> 2D engine handoff
+	// still needs a real barrier.
 	if (tex && tex->GetWriteGen() == m_gpu_write_gen)
 	{
 		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 		g_perfmon.Put(GSPerfMon::Barriers, 1);
 	}
 
+	// The per-level barriers that used to sit here are gone: every blit runs on the one 2D engine
+	// subchannel and is processed in order, which is all the level N-1 -> level N dependency needs.
 	for (int level = 1; level < levels; level++)
 	{
 		DkImageView src_view;
@@ -1303,10 +1544,12 @@ void GSDeviceDK::GenerateImageMipmaps(GSTextureDK* tex, DkImage* image, int widt
 			static_cast<u32>(std::max(1, height >> level)), 1};
 
 		dkCmdBufBlitImage(m_cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect, DkBlitFlag_FilterLinear, 0);
-
-		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
-		g_perfmon.Put(GSPerfMon::Barriers, 1);
 	}
+
+	// Same contract as CopyRect: mark the write and let the next draw that samples this texture
+	// pay for the barrier, instead of one per mip level whether or not anything reads them.
+	if (tex)
+		tex->SetWriteGen(m_gpu_write_gen);
 }
 #endif
 
@@ -1602,20 +1845,28 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	};
 	static const DkVtxBufferState tfx_buffer_state = {sizeof(GSVertex), 0};
 
-	// Route to the cheapest specialised fragment shader this draw can use.
-	const u32 tfx_variant = SelectTfxVariant(config);
+	// A shader uam specialised for this exact selector beats every baked variant, but only once
+	// the background compile has landed. Until then this falls back to the cheapest baked variant
+	// the draw can use, which is also what a failed compile settles on permanently.
+	const DKTfxSelector main_sel = MakeTfxSelector(config.ps, tex != nullptr);
+	const DkShader* const specialized_fsh = GetSpecializedTfxFragmentShader(main_sel);
+	const DkShader* const main_fsh = specialized_fsh ? specialized_fsh : &m_tfx_fsh[SelectTfxVariant(config)];
 
-	// A variant switch needs the shaders re-bound
-	const bool force_state = !m_hw_invariants_bound || m_hw_tfx_variant != tfx_variant;
+	auto bind_tfx_shaders = [&](const DkShader* fsh, bool force) {
+		if (!force && m_hw_tfx_fsh == fsh)
+			return;
+		m_hw_tfx_fsh = fsh;
+		const DkShader* shaders[] = {&m_tfx_vsh, fsh};
+		dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
+	};
+
+	const bool force_state = !m_hw_invariants_bound;
 	if (force_state)
 	{
 		DkRasterizerState rasterizer_state;
 		dkRasterizerStateDefaults(&rasterizer_state);
 		rasterizer_state.cullMode = DkFace_None;
 		dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
-
-		const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh[tfx_variant]};
-		dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
 		dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
 		dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
@@ -1624,8 +1875,8 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		dkCmdBufBindVtxBufferState(m_cmdbuf, &tfx_buffer_state, 1);
 
 		m_hw_invariants_bound = true;
-		m_hw_tfx_variant = tfx_variant;
 	}
+	bind_tfx_shaders(main_fsh, force_state);
 
 	// Per-draw state is only re-bound when it differs from the previous draw.
 	auto bind_blend = [&](const GSHWDrawConfig::BlendState& blend, bool force) {
@@ -1742,6 +1993,14 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	// Rebuild the selector from PSSelector so second passes can swap overrides.
 	auto make_selector = [&](const GSHWDrawConfig::PSSelector& ps) { return MakeTfxSelector(ps, tex != nullptr); };
 
+	// A specialised shader has its selector baked in, so a pass that changes the selector has to
+	// bring its own shader along. Anything without one falls back to the ubershader, which is the
+	// only baked variant that reads every selector cbSel carries.
+	auto bind_pass_shader = [&](const DKTfxSelector& sel) {
+		const DkShader* const fsh = GetSpecializedTfxFragmentShader(sel);
+		bind_tfx_shaders(fsh ? fsh : &m_tfx_fsh[TfxVariantUber], false);
+	};
+
 	auto bind_selector = [&](const DKTfxSelector& sel) {
 		const DkGpuAddr sel_addr = StreamUniform(&sel, sizeof(sel));
 		dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 0, sel_addr, AlignUp(sizeof(sel), DK_UNIFORM_BUF_ALIGNMENT));
@@ -1764,7 +2023,7 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 1, vs_addr,
 			AlignUp(sizeof(config.cb_vs), DK_UNIFORM_BUF_ALIGNMENT));
 		bind_ps_cb();
-		bind_selector(make_selector(config.ps));
+		bind_selector(main_sel);
 
 		m_hw_last_vs = config.cb_vs;
 		m_hw_last_ps = config.cb_ps;
@@ -1777,6 +2036,13 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	const u32 idx_size = config.nindices * sizeof(u16);
 	const DkGpuAddr vtx_addr = StreamVertices(config.verts, vtx_size);
 	const DkGpuAddr idx_addr = StreamIndices(config.indices, idx_size);
+	// Geometry too big for the ring; skipping the draw beats binding a null address.
+	if (!vtx_addr || !idx_addr) [[unlikely]]
+	{
+		if (date_image)
+			Recycle(date_image);
+		return;
+	}
 
 	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
 	dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
@@ -1795,10 +2061,11 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 	if (config.blend_multi_pass.enable)
 	{
 		bind_blend(config.blend_multi_pass.blend, false);
-		DKTfxSelector mp_sel = make_selector(config.ps);
+		DKTfxSelector mp_sel = main_sel;
 		mp_sel.blend_hw = config.blend_multi_pass.blend_hw;
 		mp_sel.dither = config.blend_multi_pass.dither;
 		bind_selector(mp_sel);
+		bind_pass_shader(mp_sel);
 		dkCmdBufDrawIndexed(m_cmdbuf, primitive, config.nindices, 1, 0, 0, 0);
 		g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 	}
@@ -1814,7 +2081,9 @@ void GSDeviceDK::RenderHW(GSHWDrawConfig& config)
 		bind_color_mask(config.alpha_second_pass.colormask.wrgba, false);
 		bind_depth(config.alpha_second_pass.depth, false);
 		bind_blend(config.blend, false);
-		bind_selector(make_selector(config.alpha_second_pass.ps));
+		const DKTfxSelector alpha_sel = make_selector(config.alpha_second_pass.ps);
+		bind_selector(alpha_sel);
+		bind_pass_shader(alpha_sel);
 		SendHWDraw(config, primitive, config.alpha_second_pass.require_one_barrier,
 			config.alpha_second_pass.require_full_barrier);
 	}
@@ -2039,8 +2308,12 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	}
 	dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
 
-	// The PrimID prepass needs the ubershader sadly
-	const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh[TfxVariantUber]};
+	// The prepass has to compute the same alpha as the main draw, so it wants the same selector.
+	// A specialisation for it is the same shader with the branches gone; otherwise it is the
+	// ubershader, since none of the folded variants cover every selector this may carry.
+	const DKTfxSelector pre_sel = MakeTfxSelector(config.ps, config.tex != nullptr);
+	const DkShader* const pre_specialized = GetSpecializedTfxFragmentShader(pre_sel);
+	const DkShader* shaders[] = {&m_tfx_vsh, pre_specialized ? pre_specialized : &m_tfx_fsh[TfxVariantUber]};
 	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
@@ -2065,7 +2338,6 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	const DkGpuAddr ps_addr = StreamUniform(&config.cb_ps, sizeof(config.cb_ps));
 	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Fragment, 1, ps_addr,
 		AlignUp(sizeof(config.cb_ps), DK_UNIFORM_BUF_ALIGNMENT));
-	const DKTfxSelector pre_sel = MakeTfxSelector(config.ps, tex != nullptr);
 	const DkGpuAddr sel_addr = StreamUniform(&pre_sel, sizeof(pre_sel));
 	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 0, sel_addr, AlignUp(sizeof(pre_sel), DK_UNIFORM_BUF_ALIGNMENT));
 	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Fragment, 0, sel_addr, AlignUp(sizeof(pre_sel), DK_UNIFORM_BUF_ALIGNMENT));
@@ -2074,6 +2346,12 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	const u32 idx_size = config.nindices * sizeof(u16);
 	const DkGpuAddr vtx_addr = StreamVertices(config.verts, vtx_size);
 	const DkGpuAddr idx_addr = StreamIndices(config.indices, idx_size);
+	// Geometry too big for the ring; the caller aborts the draw on a null return.
+	if (!vtx_addr || !idx_addr) [[unlikely]]
+	{
+		Recycle(image);
+		return nullptr;
+	}
 	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
 	dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
 
