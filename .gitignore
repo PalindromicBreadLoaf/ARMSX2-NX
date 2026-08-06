@@ -5,6 +5,7 @@ build/
 .idea/
 .project
 .settings/
+.cache
 local.properties
 node_modules/
 bun.lockb
