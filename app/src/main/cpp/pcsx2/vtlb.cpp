@@ -1425,6 +1425,19 @@ bool vtlb_Core_Alloc()
 			vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
 	}
 
+#if defined(__SWITCH__)
+	if (s_fastmem_area)
+	{
+		INFO_LOG("EE fastmem active: arena 0x{:x}-0x{:x}",
+			vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
+	}
+	else
+	{
+		INFO_LOG("EE fastmem inactive: {}",
+			requested_fastmem ? "arena allocation failed" : "disabled in settings");
+	}
+#endif
+
 	Error error;
 	if (!PageFaultHandler::Install(&error))
 	{

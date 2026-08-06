@@ -546,14 +546,6 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(fpuOverflow);
 	SettingsWrapBitBool(fpuExtraOverflow);
 	SettingsWrapBitBool(fpuFullMode);
-
-#if defined(__SWITCH__)
-	// The Switch most certainly doesn't have a solid 4GB chunk of RAM to
-	// allocate at once. Never gonna happen.
-	// TODO: I have seen 8GB RAM mods, so maybe allow fastmem as an option
-	// on those systems? Would that ever work?
-	EnableFastmem = false;
-#endif
 }
 
 u32 Pcsx2Config::RecompilerOptions::GetEEClampMode() const
