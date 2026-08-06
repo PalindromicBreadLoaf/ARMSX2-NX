@@ -20,6 +20,7 @@
 #include "common/HostSys.h"
 #include "common/Path.h"
 #include "common/ScopedGuard.h"
+#include "common/Timer.h"
 
 #ifdef __SWITCH__
 #include "common/Horizon/Horizon.h"
