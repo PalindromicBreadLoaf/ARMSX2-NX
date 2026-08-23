@@ -88,6 +88,12 @@ if(USE_VULKAN)
 		-Wl,--end-group)
 endif()
 
+# uam compiled into the NRO
+if(DK3D_RUNTIME_SHADERS)
+	include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Uam.cmake")
+	target_link_libraries(armsx2 PRIVATE uam)
+endif()
+
 # Pre-compile deko3d shaders with uam
 find_program(UAM_EXE NAMES uam PATHS "$ENV{DEVKITPRO}/tools/bin" "${DEVKITPRO}/tools/bin" "/opt/devkitpro/tools/bin")
 if(NOT UAM_EXE)
@@ -188,6 +194,18 @@ add_custom_command(
 	VERBATIM
 )
 list(APPEND DK3D_DKSH_FILES "${DK3D_ROMFS_SHADER_DIR}/cas_csh.dksh")
+
+if(DK3D_RUNTIME_SHADERS)
+	add_custom_command(
+		OUTPUT "${DK3D_ROMFS_SHADER_DIR}/tfx_fsh.glsl"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+			"${DK3D_SHADER_SRC_DIR}/tfx_fsh.glsl" "${DK3D_ROMFS_SHADER_DIR}/tfx_fsh.glsl"
+		DEPENDS "${DK3D_SHADER_SRC_DIR}/tfx_fsh.glsl"
+		COMMENT "Staging tfx_fsh.glsl for runtime compilation"
+		VERBATIM
+	)
+	list(APPEND DK3D_DKSH_FILES "${DK3D_ROMFS_SHADER_DIR}/tfx_fsh.glsl")
+endif()
 
 add_custom_target(armsx2_shaders DEPENDS ${DK3D_DKSH_FILES})
 
