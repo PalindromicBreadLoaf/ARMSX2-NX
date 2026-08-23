@@ -6,6 +6,7 @@
 
 #include "common/Console.h"
 #include "common/Error.h"
+#include "common/Horizon/Horizon.h"
 #include "common/ProgressCallback.h"
 #include "common/WindowInfo.h"
 
@@ -76,12 +77,16 @@ bool HorizonHost::IsExitRequested()
 	return s_exit_requested.load(std::memory_order_acquire);
 }
 
-// Stubbed render window
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
 {
-	// GSDeviceNull owns the libnx framebuffer and presents itself.
+	(void)recreate_window;
 	WindowInfo wi;
-	wi.type = WindowInfo::Type::Surfaceless;
+	wi.type = WindowInfo::Type::VI;
+	wi.window_handle = nwindowGetDefault();
+	wi.surface_width = 1280;
+	wi.surface_height = 720;
+	wi.surface_scale = 1.0f;
+	wi.surface_refresh_rate = 60.0f;
 	return wi;
 }
 

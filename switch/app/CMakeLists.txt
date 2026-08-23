@@ -26,12 +26,15 @@ target_link_libraries(armsx2 PRIVATE
 	deko3d
 )
 
-# Vulkan (via NXVK) backend
-if(USE_VULKAN)
+if(USE_VULKAN OR USE_OPENGL)
 	find_package(PkgConfig REQUIRED)
-	pkg_check_modules(NXVK REQUIRED nxvk)
+	if(USE_OPENGL)
+		pkg_check_modules(NXVK REQUIRED nxvk-gl)
+	else()
+		pkg_check_modules(NXVK REQUIRED nxvk)
+	endif()
 
-	# newlib shims required by NVK.
+	# newlib shims required by NXVK.
 	target_sources(armsx2 PRIVATE nvk_compat.cpp)
 	target_include_directories(armsx2 PRIVATE ${NXVK_INCLUDE_DIRS})
 	target_compile_options(armsx2 PRIVATE ${NXVK_CFLAGS_OTHER})

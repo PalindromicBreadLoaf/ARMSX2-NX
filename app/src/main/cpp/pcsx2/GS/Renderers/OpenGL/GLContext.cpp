@@ -8,6 +8,9 @@
 #elif defined(__APPLE__)
 #include "GS/Renderers/OpenGL/GLContextAGL.h"
 #else // Linux
+#ifdef __SWITCH__
+#include "GS/Renderers/OpenGL/GLContextEGL.h"
+#endif
 #ifdef X11_API
 #include "GS/Renderers/OpenGL/GLContextEGLX11.h"
 #endif
@@ -18,8 +21,12 @@
 
 #include "common/Console.h"
 
+#include <cstring>
+
 #include "glad.h"
+#ifdef ANDROID
 #include "GS/Renderers/OpenGL/GLContextEGLAndroid.h"
+#endif
 
 static bool ShouldPreferESContext()
 {
@@ -82,8 +89,14 @@ std::unique_ptr<GLContext> GLContext::Create(const WindowInfo& wi, const Version
 	}
 
 	std::unique_ptr<GLContext> context;
-	if(wi.type == WindowInfo::Type::Android)
+#ifdef ANDROID
+	if (wi.type == WindowInfo::Type::Android)
 		context = GLContextEGLAndroid::Create(wi, versions_to_try, num_versions_to_try);
+#endif
+#ifdef __SWITCH__
+	if (!context && wi.type == WindowInfo::Type::VI)
+		context = GLContextEGL::Create(wi, versions_to_try, num_versions_to_try);
+#endif
 	if (!context)
 		return nullptr;
 

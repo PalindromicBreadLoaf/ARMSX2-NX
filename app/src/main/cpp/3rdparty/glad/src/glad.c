@@ -809,6 +809,7 @@
 
 static void* get_proc(const char *namez);
 
+#if !defined(__SWITCH__)
 #if defined(_WIN32) || defined(__CYGWIN__)
 #include <windows.h>
 static HMODULE libGL;
@@ -935,6 +936,11 @@ int gladLoadGL(void) {
 
     return status;
 }
+#else
+int gladLoadGL(void) {
+    return 0;
+}
+#endif
 
 struct gladGLversionStruct GLVersion;
 
@@ -11031,4 +11037,3 @@ int gladLoadGLES2Loader(GLADloadproc load) {
 	load_GL_QCOM_tiled_rendering(load);
 	return GLVersion.major != 0 || GLVersion.minor != 0;
 }
-

@@ -7,6 +7,7 @@
 #include "GS/GS.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -34,6 +35,10 @@ std::unique_ptr<GLContext> GLContextEGL::Create(const WindowInfo& wi, const Vers
 
 bool GLContextEGL::Initialize(const Version* versions_to_try, size_t num_versions_to_try)
 {
+#ifdef __SWITCH__
+	setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+#endif
+
 	if (!gladLoadEGL())
 	{
 		Console.Error("Loading GLAD EGL functions failed");
@@ -175,7 +180,13 @@ std::unique_ptr<GLContext> GLContextEGL::CreateSharedContext(const WindowInfo& w
 
 EGLNativeWindowType GLContextEGL::GetNativeWindow(EGLConfig config)
 {
+#ifdef __SWITCH__
+	(void)config;
+	return static_cast<EGLNativeWindowType>(m_wi.window_handle);
+#else
+	(void)config;
 	return {};
+#endif
 }
 
 bool GLContextEGL::CreateSurface()
