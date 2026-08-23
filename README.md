@@ -53,8 +53,17 @@ cmake --build build/switch-core --target armsx2_nro -j$(nproc)
 
 The output binary will be located at `build/switch-core/switch-app/armsx2nx.nro`
 
-The Vulkan/NXVK backend is optional. If wanted, enable `DUSE_VULKAN=ON`.
-Build `app/src/main/cpp/3rdparty/nxvk` first using its documentation at `switch/README.md`
+The Vulkan/NXVK backend is optional. If wanted, enable `-DUSE_VULKAN=ON`.
+Install NXVK as a Switch portlib before configuring ARMSX2-NX:
+
+```shell
+git clone https://github.com/PalindromicBreadLoaf/nxvk
+cd nxvk
+make
+sudo make install
+```
+
+The Switch build discovers the installed `nxvk` package through devkitPro's target `pkg-config`.
 
 You will also need the resources from the releases page to properly display the fullscreen UI.
 
@@ -76,4 +85,4 @@ If you don't know/don't want to code, please just open issues for games not rend
 
 [PCSX2_ARM64](https://github.com/pontos2024/PCSX2_ARM64) - ARMSX2 originally started off as a fork of developer Pontos work. 
 
-Thank you to [@fffathur](https://github.com/fffathur) and [@Vivimagic](https://github.com/Vivimagic) for creating and working on the logo! 
+Thank you to [@fffathur](https://github.com/fffathur) and [@Vivimagic](https://github.com/Vivimagic) for creating and working on the logo!

@@ -27,65 +27,17 @@ target_link_libraries(armsx2 PRIVATE
 )
 
 # Vulkan (via NXVK) backend
-# Currently opt-in until Vulkan is tested to be more stable/performant
 if(USE_VULKAN)
-	set(NXVK_DIR "${CMAKE_SOURCE_DIR}/3rdparty/nxvk" CACHE PATH
-		"Path to the nxvk repository")
-	set(NXVK_CROSS "${NXVK_DIR}/switch/build/cross")
-	if(NOT EXISTS "${NXVK_DIR}/switch/README.md")
-		message(FATAL_ERROR
-			"USE_VULKAN=ON but the nxvk submodule was not found at ${NXVK_DIR}.\n"
-			"Run `git submodule update --init --recursive app/src/main/cpp/3rdparty/nxvk` or pass -DNXVK_DIR=/path/to/nxvk.")
-	endif()
-	if(NOT EXISTS "${NXVK_CROSS}/src/nouveau/vulkan/libnvk.a")
-		message(FATAL_ERROR
-			"USE_VULKAN=ON but ${NXVK_CROSS}/src/nouveau/vulkan/libnvk.a was not found.\n"
-			"Build the nxvk driver first (see ${NXVK_DIR}/switch/README.md) or pass -DNXVK_DIR=/path/to/nxvk.")
-	endif()
+	find_package(PkgConfig REQUIRED)
+	pkg_check_modules(NXVK REQUIRED nxvk)
 
 	# newlib shims required by NVK.
 	target_sources(armsx2 PRIVATE nvk_compat.cpp)
+	target_include_directories(armsx2 PRIVATE ${NXVK_INCLUDE_DIRS})
+	target_compile_options(armsx2 PRIVATE ${NXVK_CFLAGS_OTHER})
 
-	# NVK support archives.
-	set(_nxvk_support
-		src/util/libmesa_util.a src/util/libmesa_util_simd.a src/util/blake3/libblake3.a
-		src/c11/impl/libmesa_util_c11.a
-		src/nouveau/compiler/libnak.a src/nouveau/compiler/libnak_rs.a
-		src/compiler/rust/libcompiler_c_helpers.a
-		src/nouveau/headers/libnvidia_headers_c.a
-		src/nouveau/nil/libnil.a src/nouveau/nil/liblibnil_format_table.a
-		src/compiler/nir/libnir.a src/compiler/libcompiler.a
-		src/nouveau/mme/libnouveau_mme.a src/nouveau/winsys/libnouveau_ws.a
-		src/vulkan/util/libvulkan_util.a src/compiler/spirv/libvtn.a
-		src/util/libxmlconfig.a)
-	set(NXVK_SUPPORT_ARCHIVES "")
-	foreach(_a IN LISTS _nxvk_support)
-		list(APPEND NXVK_SUPPORT_ARCHIVES "${NXVK_CROSS}/${_a}")
-	endforeach()
-
-	# Portlibs referenced by Mesa util/xmlconfig.
-	set(_dkp_portlib "$ENV{DEVKITPRO}/portlibs/switch/lib")
-	foreach(_p libz.a libexpat.a)
-		if(NOT EXISTS "${_dkp_portlib}/${_p}")
-			message(FATAL_ERROR
-				"USE_VULKAN=ON needs ${_dkp_portlib}/${_p}.\n"
-				"Install the devkitPro portlibs: dkp-pacman -S switch-zlib switch-libexpat")
-		endif()
-	endforeach()
-
-	# Keep the ICD entrypoint.
-	target_link_options(armsx2 PRIVATE
-		-Wl,-u,vk_icdGetInstanceProcAddr
-		-Wl,--gc-sections)
-
-	# Keep libnvk's ICD entrypoint and group recursive support archives.
 	target_link_libraries(armsx2 PRIVATE
-		-Wl,--whole-archive "${NXVK_CROSS}/src/nouveau/vulkan/libnvk.a" -Wl,--no-whole-archive
-		-Wl,--start-group
-		${NXVK_SUPPORT_ARCHIVES}
-		"${_dkp_portlib}/libz.a"
-		"${_dkp_portlib}/libexpat.a"
-		-Wl,--end-group)
+		${NXVK_LDFLAGS})
 endif()
 
 # uam compiled into the NRO

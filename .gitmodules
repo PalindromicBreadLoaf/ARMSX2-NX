@@ -4,6 +4,3 @@
 [submodule "app/src/main/cpp/3rdparty/libadrenotools"]
 	path = app/src/main/cpp/3rdparty/libadrenotools
 	url = https://github.com/bylaws/libadrenotools
-[submodule "app/src/main/cpp/3rdparty/nxvk"]
-	path = app/src/main/cpp/3rdparty/nxvk
-	url = https://github.com/PalindromicBreadLoaf/nxvk.git
