@@ -133,6 +133,8 @@ private:
 	// Submit and wait for everything recorded so far, so the stream rings can be rewound
 	// without overwriting data that already-recorded commands still reference.
 	void SyncStreamRings();
+	// Store a descriptor in the current frame's private descriptor arena.
+	u32 PushImageDescriptor(const DkImageDescriptor& descriptor);
 	u32 PushImage(const GSTextureDK* tex);
 	// Draw tfx geometry, splitting barriers for feedback-loop reads.
 	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
@@ -290,6 +292,8 @@ private:
 	bool m_cas_shader_ok = false;
 
 	DkMemBlock m_descriptor_memblock = nullptr;
+	void* m_descriptor_cpu_addr = nullptr;
+	DkGpuAddr m_image_descriptor_base = 0;
 	DkGpuAddr m_image_descriptor_set = 0;
 	DkGpuAddr m_sampler_descriptor_set = 0;
 	u32 m_next_image_slot = 0;

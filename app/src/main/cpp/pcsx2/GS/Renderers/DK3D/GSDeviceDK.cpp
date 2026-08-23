@@ -302,17 +302,19 @@ bool GSDeviceDK::CreateDeviceObjects()
 		return false;
 
 	// Descriptor ring
-	const u32 descriptor_size = AlignUp(
-		NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor) + NUM_SAMPLERS * sizeof(DkSamplerDescriptor),
-		DK_MEMBLOCK_ALIGNMENT);
+	const u32 image_descriptor_arena_size = NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
+	const u32 descriptor_size = AlignUp(NUM_FRAMES_IN_FLIGHT * image_descriptor_arena_size +
+		NUM_SAMPLERS * sizeof(DkSamplerDescriptor), DK_MEMBLOCK_ALIGNMENT);
 	dkMemBlockMakerDefaults(&memblock_maker, m_device, descriptor_size);
 	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
 	m_descriptor_memblock = dkMemBlockCreate(&memblock_maker);
 	if (!m_descriptor_memblock)
 		return false;
 	const DkGpuAddr descriptor_base = dkMemBlockGetGpuAddr(m_descriptor_memblock);
+	m_descriptor_cpu_addr = dkMemBlockGetCpuAddr(m_descriptor_memblock);
+	m_image_descriptor_base = descriptor_base;
 	m_image_descriptor_set = descriptor_base;
-	m_sampler_descriptor_set = descriptor_base + NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
+	m_sampler_descriptor_set = descriptor_base + NUM_FRAMES_IN_FLIGHT * image_descriptor_arena_size;
 
 	// GPU-timing report buffer
 	dkMemBlockMakerDefaults(&memblock_maker, m_device, DK_MEMBLOCK_ALIGNMENT);
@@ -366,14 +368,9 @@ bool GSDeviceDK::SetupSamplers()
 		dkSamplerDescriptorInitialize(&descriptors[i], &sampler);
 	}
 
-	// Samplers never change
-	dkCmdBufClear(m_cmdbuf);
-	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SLICE_SIZE);
-	m_cmdbuf_slice = 1;
-	dkCmdBufPushData(m_cmdbuf, m_sampler_descriptor_set, descriptors, sizeof(descriptors));
-	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
-	dkQueueWaitIdle(m_queue);
-	dkCmdBufClear(m_cmdbuf);
+	// Samplers never change and nothing can have cached this descriptor range yet.
+	const size_t sampler_offset = NUM_FRAMES_IN_FLIGHT * NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
+	std::memcpy(static_cast<u8*>(m_descriptor_cpu_addr) + sampler_offset, descriptors, sizeof(descriptors));
 	return true;
 }
 
@@ -449,6 +446,8 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	m_uniform_offset = 0;
 	m_staging_offset = 0;
 	m_next_image_slot = 0;
+	m_image_descriptor_set = m_image_descriptor_base +
+		m_frame_index * NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
 	// Refresh command buffer
 	InvalidateHWStateCache();
 
@@ -590,24 +589,27 @@ DkGpuAddr GSDeviceDK::StreamUniform(const void* data, u32 size)
 	return addr;
 }
 
+u32 GSDeviceDK::PushImageDescriptor(const DkImageDescriptor& descriptor)
+{
+	if (m_next_image_slot == NUM_IMAGE_DESCRIPTORS) [[unlikely]]
+	{
+		SyncStreamRings();
+		m_next_image_slot = 0;
+		m_hw_tex_valid = false;
+		dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+	}
+
+	const u32 slot = m_next_image_slot;
+	m_next_image_slot++;
+	const size_t frame_offset = m_frame_index * NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
+	std::memcpy(static_cast<u8*>(m_descriptor_cpu_addr) + frame_offset + slot * sizeof(DkImageDescriptor),
+		&descriptor, sizeof(descriptor));
+	return slot;
+}
+
 u32 GSDeviceDK::PushImage(const GSTextureDK* tex)
 {
-	const u32 slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
-	// On wrap a previously cached tex/pal slot is about to be overwritten before it could be reused
-	// Drop the bind cache to force a fresh push next draw.
-	if (m_next_image_slot == 0)
-	{
-		m_hw_tex_valid = false;
-		// deko3d only invalidates the descriptor cache when the queue flushes, so without this the
-		// GPU can keep serving slots from the copies it cached before the ring came back around.
-		IssueBarrier(DkBarrier_Primitives, DkInvalidateFlags_Descriptors);
-		g_perfmon.Put(GSPerfMon::Barriers, 1);
-	}
-	const DkImageDescriptor descriptor = tex->GetDescriptor();
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + slot * sizeof(DkImageDescriptor), &descriptor,
-		sizeof(descriptor));
-	return slot;
+	return PushImageDescriptor(tex->GetDescriptor());
 }
 
 void GSDeviceDK::CommitClear(GSTextureDK* tex)
@@ -727,11 +729,7 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
 	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
 
-	const u32 image_slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
-	const DkImageDescriptor src_descriptor = sTex->GetDescriptor();
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + image_slot * sizeof(DkImageDescriptor), &src_descriptor,
-		sizeof(src_descriptor));
+	const u32 image_slot = PushImage(sTex);
 	const DkResHandle texture_handle = dkMakeTextureHandle(image_slot, linear ? SAMPLER_LINEAR : SAMPLER_POINT);
 	dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 0, &texture_handle, 1);
 
@@ -1070,6 +1068,10 @@ void GSDeviceDK::DestroyDeviceObjects()
 	{
 		dkMemBlockDestroy(m_descriptor_memblock);
 		m_descriptor_memblock = nullptr;
+		m_descriptor_cpu_addr = nullptr;
+		m_image_descriptor_base = 0;
+		m_image_descriptor_set = 0;
+		m_sampler_descriptor_set = 0;
 	}
 	if (m_timestamp_memblock)
 	{
@@ -2608,23 +2610,16 @@ bool GSDeviceDK::DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only,
 	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
 
 	// Source bound as a sampled texture
-	const u32 src_slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
-	const DkImageDescriptor src_descriptor = sTexDK->GetDescriptor();
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + src_slot * sizeof(DkImageDescriptor), &src_descriptor,
-		sizeof(src_descriptor));
+	const u32 src_slot = PushImage(sTexDK);
 	const DkResHandle src_handle = dkMakeTextureHandle(src_slot, SAMPLER_POINT);
 	dkCmdBufBindTextures(m_cmdbuf, DkStage_Compute, 0, &src_handle, 1);
 
 	// Destination bound as a load/store image
-	const u32 dst_slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
 	DkImageView dst_view;
 	dTexDK->GetImageView(&dst_view);
 	DkImageDescriptor dst_descriptor;
 	dkImageDescriptorInitialize(&dst_descriptor, &dst_view, true, false);
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + dst_slot * sizeof(DkImageDescriptor), &dst_descriptor,
-		sizeof(dst_descriptor));
+	const u32 dst_slot = PushImageDescriptor(dst_descriptor);
 	const DkResHandle dst_handle = dkMakeImageHandle(dst_slot);
 	dkCmdBufBindImages(m_cmdbuf, DkStage_Compute, 0, &dst_handle, 1);
 
