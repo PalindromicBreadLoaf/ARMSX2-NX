@@ -4,3 +4,6 @@
 [submodule "app/src/main/cpp/3rdparty/libadrenotools"]
 	path = app/src/main/cpp/3rdparty/libadrenotools
 	url = https://github.com/bylaws/libadrenotools
+[submodule "switch/externals/libusbhsfs"]
+	path = switch/externals/libusbhsfs
+	url = https://github.com/DarkMatterCore/libusbhsfs.git

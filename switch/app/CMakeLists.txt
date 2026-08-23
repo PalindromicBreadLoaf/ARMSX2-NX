@@ -3,9 +3,12 @@
 add_executable(armsx2
 	main.cpp
 	HorizonHost.cpp
+	HorizonUsbStorage.cpp
 	HorizonException.cpp
 	HorizonExceptionEntry.S
 )
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/UsbHsFs.cmake")
 
 set_source_files_properties(HorizonException.cpp HorizonExceptionEntry.S
 	PROPERTIES COMPILE_OPTIONS "-fno-lto")
@@ -24,6 +27,7 @@ target_link_libraries(armsx2 PRIVATE
 	-Wl,--end-group
 	# Must precede the toolchain's -lnx
 	deko3d
+	usbhsfs
 )
 
 if(USE_VULKAN OR USE_OPENGL)

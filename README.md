@@ -32,7 +32,7 @@ ARMSX2-NX can be downloaded from [Github Releases](https://github.com/Palindromi
 This assumes you have DevkitPro installed. Install it if you don't.
 
 ```shell
-dkp-pacman -S switch-dev switch-libpng switch-libjpeg-turbo
+(dkp-)pacman -S switch-dev switch-libpng switch-libjpeg-turbo switch-ntfs-3g switch-lwext4
 ```
 
 Initialize the submodules after cloning:
@@ -64,6 +64,17 @@ sudo make install
 ```
 
 The Switch build discovers the installed `nxvk` package through devkitPro's target `pkg-config`.
+
+## USB game loading
+
+USB mass-storage drives are mounted automatically and their roots are scanned for games. Supported
+filesystesm are FAT12/16/32, exFAT, NTFS, and EXT2/3/4. USB volumes are mounted read-only to prevent
+corruption if they are unexpectedly unplugged.
+
+Do not unplug a drive while a game is running from it. Return to the game list first so ARMSX2 has
+closed the image file.
+
+## UI
 
 You will also need the resources from the releases page to properly display the fullscreen UI.
 
