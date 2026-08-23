@@ -53,8 +53,8 @@ cmake --build build/switch-core --target armsx2_nro -j$(nproc)
 
 The output binary will be located at `build/switch-core/switch-app/armsx2nx.nro`
 
-The Vulkan/NXVK backend is optional. If wanted, enable `-DUSE_VULKAN=ON`.
-Install NXVK as a Switch portlib before configuring ARMSX2-NX:
+The Vulkan backend is enabled by default. Install NXVK as a Switch portlib
+before configuring ARMSX2-NX:
 
 ```shell
 git clone https://github.com/PalindromicBreadLoaf/nxvk
