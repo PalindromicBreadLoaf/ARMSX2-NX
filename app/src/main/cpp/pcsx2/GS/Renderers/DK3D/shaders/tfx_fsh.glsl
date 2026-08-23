@@ -301,9 +301,9 @@ vec4 fetch_gXbY(ivec2 xy)
 		int bg = (depth >> (8 + ChannelShuffle.w)) & 0xFF;
 		return vec4(float(bg));
 	}
-	uvec4 rt = uvec4(fetch_raw_color(xy) * 255.5f);
+	uvec4 rt = uvec4(fetch_raw_color(xy) * 255.0f);
 	uint green = (rt.g >> uint(ChannelShuffle.w)) & uint(ChannelShuffle.z);
-	uint blue = (rt.b >> uint(ChannelShuffle.y)) & uint(ChannelShuffle.x);
+	uint blue = (rt.b << uint(ChannelShuffle.y)) & uint(ChannelShuffle.x);
 	return vec4(float(green | blue));
 }
 
