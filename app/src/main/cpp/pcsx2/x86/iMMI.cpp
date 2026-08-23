@@ -18,6 +18,12 @@ namespace Dynarec {
 namespace OpcodeImpl {
 namespace MMI {
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+
+#include "arm64/aR5900MMI.inl"
+
+#else
+
 #ifndef MMI_RECOMPILE
 
 REC_FUNC_DEL(PLZCW, _Rd_);
@@ -3025,6 +3031,8 @@ void recPCPYH()
 }
 
 #endif // else MMI3_RECOMPILE
+
+#endif // defined(__aarch64__) || defined(_M_ARM64)
 
 } // namespace MMI
 } // namespace OpcodeImpl
