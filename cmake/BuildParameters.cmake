@@ -16,7 +16,11 @@ option(ENABLE_VURUNNER "Enables building pcsx2-vurunner (headless VU microprogra
 option(ENABLE_EERUNNER "Enables building pcsx2-eerunner (headless EE JIT-vs-interpreter divergence localizer) by default.  It can still be built with `make pcsx2-eerunner` otherwise." OFF)
 option(ENABLE_SDL_FRONTEND "Enables building the SDL3 / kmsdrm frontend (pcsx2-sdl) by default.  It can still be built with `make pcsx2-sdl` otherwise." OFF)
 option(ENABLE_LIBRETRO "Build the libretro core (pcsx2-libretro / armsx2_libretro.so). Opt-in: when OFF the subdirectory is not added at all, so it never gets built or installed alongside the Qt/SDL frontends. Reconfigure with -DENABLE_LIBRETRO=ON to build it." OFF)
-option(LTO_PCSX2_CORE "Enable LTO/IPO/LTCG on the subset of pcsx2 that benefits most from it but not anything else")
+set(_LTO_PCSX2_CORE_DEFAULT OFF)
+if(HORIZON)
+	set(_LTO_PCSX2_CORE_DEFAULT ON)
+endif()
+option(LTO_PCSX2_CORE "Enable LTO/IPO/LTCG on the subset of pcsx2 that benefits most from it but not anything else" ${_LTO_PCSX2_CORE_DEFAULT})
 option(USE_VTUNE "Plug VTUNE to profile GS JIT.")
 option(USE_PERF_JITDUMP "Emit Linux perf jitdump (jit-<pid>.dump) for recompiled JIT blocks; use with perf record/inject." OFF)
 option(USE_PERF_MAP "Emit simple /tmp/perf-<pid>.map symbol table for recompiled JIT blocks." OFF)
@@ -28,7 +32,7 @@ option(POSITION_INDEPENDENT_CODE "Generate position-independent code. It is reco
 #-------------------------------------------------------------------------------
 # Graphical option
 #-------------------------------------------------------------------------------
-if(NOT APPLE)
+if(NOT APPLE AND NOT HORIZON)
 	option(USE_OPENGL "Enable OpenGL GS renderer" ON)
 endif()
 option(USE_VULKAN "Enable Vulkan GS renderer" ON)
@@ -64,7 +68,11 @@ option(USE_COVERAGE "Instrument the build with clang source-based coverage (-fpr
 # Ensure that the value set by the User is correct to avoid some bad behavior later
 #-------------------------------------------------------------------------------
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug|Devel|MinSizeRel|RelWithDebInfo|Release")
-	set(CMAKE_BUILD_TYPE Devel)
+	if(HORIZON)
+		set(CMAKE_BUILD_TYPE Release)
+	else()
+		set(CMAKE_BUILD_TYPE Devel)
+	endif()
 	message(STATUS "BuildType set to ${CMAKE_BUILD_TYPE} by default")
 endif()
 # Add Devel build type
@@ -128,11 +136,18 @@ if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64" OR "${CMAKE_SYSTEM_PROCESSOR}" 
 elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "ARM64" OR
        "${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "aarch64" OR "${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "AARCH64" OR
        "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "arm64")
-	message(STATUS "Building for ARM64.")
+	if(HORIZON)
+		message(STATUS "Building for Nintendo Switch (ARM64).")
+	else()
+		message(STATUS "Building for ARM64.")
+	endif()
 	set(ARCH_ARM64 TRUE)
 	if(APPLE)
 		# Min spec is an M1
 		add_compile_options("-march=armv8.4-a" "-mcpu=apple-m1")
+	elseif(HORIZON)
+		set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+		add_compile_options("-march=armv8-a+crc" "-mtune=cortex-a57" -flax-vector-conversions)
 	elseif(NOT MSVC)
 		# Require atomic rmw instructions (LSE, ARMv8.1+). This is the upstream
 		# default and targets the broad arm64 ecosystem. MSVC (and clang-cl)
@@ -156,7 +171,7 @@ elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR
 		detect_cache_line_size()
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=${HOST_CACHE_LINE_SIZE})
 	endif()
-	
+
 	# Windows page size matches x86-64 (4K).
 	if(WIN32)
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x1000)
@@ -169,6 +184,14 @@ elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR
 		# sharing when run on a 128-byte host (e.g. Windows-on-ARM in an Apple
 		# Silicon VM), so we always target the larger line size here.
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=128)
+	endif()
+
+	if(HORIZON)
+		list(APPEND PCSX2_DEFS
+			OVERRIDE_HOST_PAGE_SIZE=0x1000
+			OVERRIDE_HOST_CACHE_LINE_SIZE=64
+			__SWITCH__=1
+			__LINUX_ERRNO_EXTENSIONS__=1)
 	endif()
 else()
 	message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
