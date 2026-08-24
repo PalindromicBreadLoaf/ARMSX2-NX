@@ -95,28 +95,11 @@ extern bool vtlb_IsFaultingPC(u32 guest_pc);
 
 //Memory functions
 
-// On arm64, the EE JIT keeps guest values live in caller-saved host
-// registers across its vtlb slow paths (the EE-SRA x12/x13 pins; see
-// iR5900-arm64.h). preserve_most makes these dispatchers preserve x9-x15,
-// so the fastmem backpatch thunk and inline softmem slow paths need no
-// pin spill/reload around their calls. Cost lands inside the callee
-// (a prologue/epilogue x9-x15 save) — MMIO-dispatch-only, never on the
-// direct-RAM fast path. Return/argument registers are unaffected, so
-// C++ callers (interpreter memory ops) behave identically.
-#ifdef ARCH_ARM64
-#if defined(__has_attribute) && __has_attribute(preserve_most)
+// On arm64, clang's preserve_most ABI makes these dispatchers save x9-x15 in
+// their prologue/epilogue. GCC lacks that ABI, so the ARM64 recompiler spills
+// and reloads its caller-saved pins at the vtlb call seams instead.
+#if PCSX2_ARM64_HAS_PRESERVE_MOST
 #define VTLB_PRESERVE_MOST __attribute__((preserve_most))
-#else
-// Hard requirement, not an optimization: the arm64 recompiler emits calls to
-// these dispatchers assuming the preserve_most contract (x9-x15 spared) and
-// skips pin spill/reload around them (recVTLB-arm64.cpp, RecStubs.cpp). A
-// compiler that drops the attribute (GCC warns and ignores unknown
-// attributes; MSVC has no equivalent) would build a binary whose emitted
-// code silently corrupts the EE pin registers at every MMIO slow path.
-// Build arm64 targets with clang (works for linux, windows-msvc, android,
-// and apple targets) until a no-preserve_most emitter fallback exists.
-#error "ARCH_ARM64 requires a compiler with __attribute__((preserve_most)) - build with clang"
-#endif
 #else
 #define VTLB_PRESERVE_MOST
 #endif

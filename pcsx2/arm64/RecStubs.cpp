@@ -140,7 +140,7 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 		// events and cause cascading mid-block timing bugs. Matches the
 		// pattern at recVTLB-arm64.cpp:112+120.
 		armFlushCycleDelta();
-		armFlushEEPinsBeforePreserveMostCall(); // emits nothing for the current table
+		armFlushEEPinsBeforeVtlbCall();
 		if (is_load)
 		{
 			armEmitCall((void*)vtlb_memRead128);
@@ -150,11 +150,7 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 			armEmitCall((void*)vtlb_memWrite128);
 		}
 		armReloadCycleDelta();
-		// vtlb_memRead/Write128 are preserve_most: x9-x15 covers every
-		// caller-saved pin (tier-2 x11/x12/x13), so this emits nothing (pins
-		// are not allocator state, so the gpr_bitmask save/restore never
-		// covers them either; q0 untouched).
-		armReloadEEPinsAfterPreserveMostCall();
+		armReloadEEPinsAfterVtlbCall();
 		// Land the read result in the resident dest slot (excluded from the
 		// save set above, so the restores below can't clobber it).
 		if (is_load && data_register != 0)
@@ -210,7 +206,7 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 		armAsm->Mov(a64::w0, a64::w9);
 		// Spill/reload RECCYCLE — see 128-bit slow_path above for rationale.
 		armFlushCycleDelta();
-		armFlushEEPinsBeforePreserveMostCall(); // emits nothing for the current table
+		armFlushEEPinsBeforeVtlbCall();
 		switch (size_in_bits)
 		{
 			case 8:  armEmitCall((void*)vtlb_memRead<mem8_t>);  break;
@@ -220,11 +216,9 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 			default: break;
 		}
 		armReloadCycleDelta();
-		// preserve_most seam — emits nothing; see the 128-bit slow path above.
 		// When data_register below is itself a pin (WS-C4 pinned dest), it
-		// rides the call spared and the Mov lands the fresh result (x0
-		// untouched here).
-		armReloadEEPinsAfterPreserveMostCall();
+		// is reloaded before the Mov lands the fresh result.
+		armReloadEEPinsAfterVtlbCall();
 		// Extend the handler return into x0 for the 64-bit cpuRegs.GPR store.
 		// AAPCS64 leaves the upper bits of x0 unspecified for sub-word returns,
 		// so UNSIGNED sub-64-bit loads must Uxtw too — otherwise the garbage
@@ -310,7 +304,7 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 
 		// Spill/reload RECCYCLE — see 128-bit slow_path above for rationale.
 		armFlushCycleDelta();
-		armFlushEEPinsBeforePreserveMostCall(); // emits nothing for the current table
+		armFlushEEPinsBeforeVtlbCall();
 		switch (size_in_bits)
 		{
 			case 8:  armEmitCall((void*)vtlb_memWrite<mem8_t>);  break;
@@ -320,8 +314,7 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 			default: pxFailRel("Unsupported store size in backpatch"); break;
 		}
 		armReloadCycleDelta();
-		// preserve_most seam — emits nothing; see the 128-bit slow path above.
-		armReloadEEPinsAfterPreserveMostCall();
+		armReloadEEPinsAfterVtlbCall();
 
 		armAsm->Bind(&done);
 	}

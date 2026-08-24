@@ -31,6 +31,16 @@ static constexpr bool IsDebugBuild = false;
 	#error Unsupported Platform
 #endif
 
+// Clang supports this AArch64 calling convention, GCC does not.
+#if defined(ARCH_ARM64) && defined(__has_attribute)
+	#if __has_attribute(preserve_most)
+		#define PCSX2_ARM64_HAS_PRESERVE_MOST 1
+	#endif
+#endif
+#ifndef PCSX2_ARM64_HAS_PRESERVE_MOST
+	#define PCSX2_ARM64_HAS_PRESERVE_MOST 0
+#endif
+
 // Defines the memory page size for the target platform at compilation.
 #if defined(OVERRIDE_HOST_PAGE_SIZE)
 	static constexpr unsigned int __pagesize = OVERRIDE_HOST_PAGE_SIZE;

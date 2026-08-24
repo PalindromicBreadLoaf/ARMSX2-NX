@@ -329,22 +329,19 @@ static __fi bool armIsPreserveMostSparedRegister(int reg)
 	return reg >= 9 && reg <= 15;
 }
 
-// Reload only the pins a preserve_most callee can actually clobber:
-// caller-saved AND outside the spared x9-x15 range. For the current table
-// (tier-2 pins in x11/x12/x13) this emits NOTHING — warm vtlb seams carry
-// zero pin traffic. ONLY valid after calls to preserve_most-annotated
-// callees (vtlb_memRead/Write<T>/128); plain-AAPCS callees (raw registered
-// MMIO handlers, everything else) need armReloadEEClobberedPins. A future
-// pin homed outside x9-x15 joins the reload automatically via the table
-// walk.
-static __fi void armReloadEEPinsAfterPreserveMostCall()
+// Reload caller-saved pins after a vtlb dispatcher.
+static __fi void armReloadEEPinsAfterVtlbCall()
 {
+#if PCSX2_ARM64_HAS_PRESERVE_MOST
 	for (const EEPinnedGPR& pin : kEEPinTable)
 	{
 		const int reg = static_cast<int>(pin.host.GetCode());
 		if (!armIsCalleeSavedRegister(reg) && !armIsPreserveMostSparedRegister(reg))
 			armAsm->Ldr(pin.host, armCpuRegMem(&cpuRegs.GPR.r[pin.gpr].UD[0]));
 	}
+#else
+	armReloadEEClobberedPins();
+#endif
 }
 // Pin write policy (lazy-dirty, shipping since EE-SRA 3 Arm E). Guest writes
 // to pinned GPRs update the PIN ONLY — the canonical store is elided, and
@@ -393,20 +390,19 @@ static __fi void armFlushEEClobberedPins()
 	}
 }
 
-// Lazy-dirty twin of armReloadEEPinsAfterPreserveMostCall: pins the callee
-// spares ride through the call in their registers (still newest), so they
-// need neither flush nor reload — the same treatment callee-saved pins
-// already get at these seams. That is sound for exactly the reason the
-// callee-saved treatment is: the preserve_most vtlb dispatchers never READ
-// guest GPR memory. Emits nothing for the current table.
-static __fi void armFlushEEPinsBeforePreserveMostCall()
+// Flush caller-saved pins before a vtlb dispatcher.
+static __fi void armFlushEEPinsBeforeVtlbCall()
 {
+#if PCSX2_ARM64_HAS_PRESERVE_MOST
 	for (const EEPinnedGPR& pin : kEEPinTable)
 	{
 		const int reg = static_cast<int>(pin.host.GetCode());
 		if (!armIsCalleeSavedRegister(reg) && !armIsPreserveMostSparedRegister(reg))
 			armAsm->Str(pin.host, armCpuRegMem(&cpuRegs.GPR.r[pin.gpr].UD[0]));
 	}
+#else
+	armFlushEEClobberedPins();
+#endif
 }
 
 // Lazy-dirty read-site merge: a 128-bit guest-GPR read from canonical memory
