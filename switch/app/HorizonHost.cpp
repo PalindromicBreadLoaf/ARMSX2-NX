@@ -18,11 +18,14 @@
 #include "pcsx2/ImGui/ImGuiFullscreen.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/Input/InputManager.h"
+#include "pcsx2/MTGS.h"
 #include "pcsx2/VMManager.h"
 
 #include "HorizonHost.h"
 
+#include <algorithm>
 #include <atomic>
+#include <array>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -46,6 +49,69 @@ namespace
 
 	std::mutex s_gamelist_refresh_mutex;
 	std::thread s_gamelist_refresh_thread;
+	constexpr size_t RETROACHIEVEMENTS_INPUT_MAX_LENGTH = 256;
+
+	bool GetRetroAchievementsKeyboardInput(const char* guide_text, bool password, std::string* output)
+	{
+		std::array<char, RETROACHIEVEMENTS_INPUT_MAX_LENGTH> buffer{};
+		SwkbdConfig keyboard;
+		if (R_FAILED(swkbdCreate(&keyboard, 0)))
+		{
+			ERROR_LOG("Failed to create the software keyboard");
+			return false;
+		}
+
+		if (password)
+			swkbdConfigMakePresetPassword(&keyboard);
+		else
+			swkbdConfigMakePresetDefault(&keyboard);
+		swkbdConfigSetGuideText(&keyboard, guide_text);
+		swkbdConfigSetOkButtonText(&keyboard, password ? "Login" : "Next");
+		swkbdConfigSetStringLenMax(&keyboard, RETROACHIEVEMENTS_INPUT_MAX_LENGTH - 1);
+
+		const Result result = swkbdShow(&keyboard, buffer.data(), buffer.size());
+		swkbdClose(&keyboard);
+		if (R_FAILED(result) || buffer.front() == '\0')
+		{
+			std::fill(buffer.begin(), buffer.end(), '\0');
+			return false;
+		}
+
+		*output = buffer.data();
+		std::fill(buffer.begin(), buffer.end(), '\0');
+		return true;
+	}
+
+	void ShowRetroAchievementsLoginError(std::string message)
+	{
+		MTGS::RunOnGSThread([message = std::move(message)]() {
+			if (ImGuiManager::InitializeFullscreenUI())
+				ImGuiFullscreen::OpenInfoMessageDialog("RetroAchievements Login", std::move(message));
+		});
+	}
+
+	void PromptForRetroAchievementsLogin(Achievements::LoginRequestReason reason)
+	{
+		Host::RunOnCPUThread([reason]() {
+			std::string username;
+			const char* username_prompt = (reason == Achievements::LoginRequestReason::TokenInvalid) ?
+				"Saved login expired. Enter your RetroAchievements username." : "Enter your RetroAchievements username.";
+			if (!GetRetroAchievementsKeyboardInput(username_prompt, false, &username))
+				return;
+
+			std::string password;
+			if (!GetRetroAchievementsKeyboardInput("Enter your RetroAchievements password.", true, &password))
+				return;
+
+			Error error;
+			const bool logged_in = Achievements::Login(username.c_str(), password.c_str(), &error);
+			std::fill(password.begin(), password.end(), '\0');
+			if (!logged_in)
+			{
+				ShowRetroAchievementsLoginError(error.IsValid() ? error.GetDescription() : "Login failed.");
+			}
+		}, false);
+	}
 } // namespace
 
 void HorizonHost::SetCPUThread()
@@ -358,17 +424,20 @@ const char* InputManager::ConvertHostKeyboardCodeToIcon(u32 code)
 	return nullptr;
 }
 
-// Achievement no-ops
 void Host::OnAchievementsLoginSuccess(const char* username, u32 points, u32 sc_points, u32 unread_messages)
 {
+	INFO_LOG("RetroAchievements login succeeded for '{}' ({} hardcore, {} softcore points, {} unread messages)",
+		username ? username : "", points, sc_points, unread_messages);
 }
 
 void Host::OnAchievementsLoginRequested(Achievements::LoginRequestReason reason)
 {
+	PromptForRetroAchievementsLogin(reason);
 }
 
 void Host::OnAchievementsHardcoreModeChanged(bool enabled)
 {
+	INFO_LOG("RetroAchievements hardcore mode {}", enabled ? "enabled" : "disabled");
 }
 
 void Host::OnAchievementsRefreshed()

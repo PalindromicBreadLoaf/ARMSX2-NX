@@ -5,13 +5,9 @@
 // Definitions of things the compiler complained about
 
 #include "common/FileSystem.h"
-#include "common/HTTPDownloader.h"
-
 #include <cerrno>
 #include <cstddef>
 #include <malloc.h>
-#include <memory>
-#include <string>
 
 extern "C" int posix_memalign(void** memptr, size_t alignment, size_t size)
 {
@@ -34,10 +30,4 @@ int FileSystem::OpenFDFileContent(const char* filename)
 {
 	(void)filename;
 	return -1;
-}
-
-std::unique_ptr<HTTPDownloader> HTTPDownloader::Create(std::string user_agent)
-{
-	(void)user_agent;
-	return nullptr;
 }

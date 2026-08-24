@@ -365,6 +365,12 @@ int main(int argc, char** argv)
 
 	while (!HorizonHost::IsExitRequested())
 	{
+		if (!appletMainLoop())
+		{
+			HorizonHost::RequestExit();
+			break;
+		}
+
 		Host::PumpMessagesOnCPUThread();
 		if (HorizonUsbStorage::ConsumeChange())
 		{

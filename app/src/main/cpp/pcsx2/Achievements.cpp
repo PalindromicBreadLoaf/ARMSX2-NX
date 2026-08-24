@@ -47,6 +47,8 @@
 #include <thread>
 #include <vector>
 
+#include <pthread.h>
+
 #ifdef ENABLE_RAINTEGRATION
 // RA_Interface ends up including windows.h, with its silly macros.
 #include "common/RedtapeWindows.h"
@@ -130,6 +132,7 @@ namespace Achievements
 	static void UpdateGameSummary();
 	static void DownloadImage(std::string url, std::string cache_filename);
 	static void EnsureAsyncRequestPoller();
+	static void* AsyncRequestPollerThreadFunc(void*);
 
 	// Size of the EE physical memory exposed to RetroAchievements.
 	static u32 GetExposedEEMemorySize();
@@ -683,6 +686,48 @@ uint32_t Achievements::ClientReadMemory(uint32_t address, uint8_t* buffer, uint3
 	return num_bytes;
 }
 
+void* Achievements::AsyncRequestPollerThreadFunc(void*)
+{
+	for (;;)
+	{
+		bool has_pending = false;
+
+		{
+			auto lock = GetLock();
+
+			if (!s_client || !s_http_downloader)
+			{
+				s_async_request_poller_running.store(false, std::memory_order_release);
+				return nullptr;
+			}
+
+			s_http_downloader->PollRequests();
+			rc_client_idle(s_client);
+
+			has_pending = (s_login_request != nullptr) || s_http_downloader->HasAnyRequests();
+		}
+
+		if (!has_pending)
+		{
+			s_async_request_poller_running.store(false, std::memory_order_release);
+
+			bool needs_restart = false;
+			{
+				auto lock = GetLock();
+				if (s_client && s_http_downloader)
+					needs_restart = (s_login_request != nullptr) || s_http_downloader->HasAnyRequests();
+			}
+
+			if (needs_restart)
+				Achievements::EnsureAsyncRequestPoller();
+
+			return nullptr;
+		}
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(16));
+	}
+}
+
 void Achievements::EnsureAsyncRequestPoller()
 {
 	if (!s_client || !s_http_downloader)
@@ -692,46 +737,16 @@ void Achievements::EnsureAsyncRequestPoller()
 	if (!s_async_request_poller_running.compare_exchange_strong(expected, true))
 		return;
 
-	std::thread([]() {
-		for (;;)
-		{
-			bool has_pending = false;
+	pthread_t thread;
+	const int err = pthread_create(&thread, nullptr, &Achievements::AsyncRequestPollerThreadFunc, nullptr);
+	if (err != 0)
+	{
+		s_async_request_poller_running.store(false, std::memory_order_release);
+		Console.Error(fmt::format("Achievements: failed to start async request poller thread (error {})", err));
+		return;
+	}
 
-			{
-				auto lock = GetLock();
-
-				if (!s_client || !s_http_downloader)
-				{
-					s_async_request_poller_running.store(false, std::memory_order_release);
-					return;
-				}
-
-				s_http_downloader->PollRequests();
-				rc_client_idle(s_client);
-
-				has_pending = (s_login_request != nullptr) || s_http_downloader->HasAnyRequests();
-			}
-
-			if (!has_pending)
-			{
-				s_async_request_poller_running.store(false, std::memory_order_release);
-
-				bool needs_restart = false;
-				{
-					auto lock = GetLock();
-					if (s_client && s_http_downloader)
-						needs_restart = (s_login_request != nullptr) || s_http_downloader->HasAnyRequests();
-				}
-
-				if (needs_restart)
-					Achievements::EnsureAsyncRequestPoller();
-
-				return;
-			}
-
-			std::this_thread::sleep_for(std::chrono::milliseconds(16));
-		}
-	}).detach();
+	pthread_detach(thread);
 }
 
 void Achievements::ClientServerCall(

@@ -209,14 +209,15 @@ if (USE_GCC AND CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 	set_source_files_properties(FastJmp.cpp PROPERTIES COMPILE_FLAGS -fno-lto)
 endif()
 
-if(NOT WIN32 AND NOT HORIZON)
-	# TODO: Figure out Horizon networking
+if(NOT WIN32)
 	target_sources(common PRIVATE
 		HTTPDownloaderCurl.cpp
 		HTTPDownloaderCurl.h
 	)
 	if(ANDROID)
 		target_link_libraries(common PRIVATE curl ssl crypto nghttp2 pcap)
+	elseif(HORIZON)
+		target_link_libraries(common PRIVATE curl)
 	else()
 		target_link_libraries(common PRIVATE
 			CURL::libcurl
