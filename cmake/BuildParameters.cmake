@@ -6,11 +6,24 @@ include(GNUInstallDirs)
 #-------------------------------------------------------------------------------
 # Misc option
 #-------------------------------------------------------------------------------
-option(ENABLE_TESTS "Enables building the unit tests" ON)
+set(_ENABLE_TESTS_DEFAULT ON)
+set(_ENABLE_QT_UI_DEFAULT ON)
+set(_X11_API_DEFAULT ON)
+set(_WAYLAND_API_DEFAULT ON)
+set(_USE_BACKTRACE_DEFAULT ON)
+if(HORIZON)
+	set(_ENABLE_TESTS_DEFAULT OFF)
+	set(_ENABLE_QT_UI_DEFAULT OFF)
+	set(_X11_API_DEFAULT OFF)
+	set(_WAYLAND_API_DEFAULT OFF)
+	set(_USE_BACKTRACE_DEFAULT OFF)
+endif()
+
+option(ENABLE_TESTS "Enables building the unit tests" ${_ENABLE_TESTS_DEFAULT})
 option(ENABLE_RECOMPILER_TEST_HOOKS
 	"Compile harness hooks (recEeExecuteBlock, recEeIsBlockLinked, etc.) into the EE recompiler. Required by tests/ctest/core/recompilers; release builds should turn this off."
 	${ENABLE_TESTS})
-option(ENABLE_QT_UI "Enables building the PCSX2 Qt interface." ON)
+option(ENABLE_QT_UI "Enables building the PCSX2 Qt interface." ${_ENABLE_QT_UI_DEFAULT})
 option(ENABLE_GSRUNNER "Enables building the GSRunner by default.  It can still be built with `make pcsx2-gsrunner` otherwise." OFF)
 option(ENABLE_VURUNNER "Enables building pcsx2-vurunner (headless VU microprogram replayer for codegen iteration). Requires ENABLE_RECOMPILER_TEST_HOOKS=ON." OFF)
 option(ENABLE_EERUNNER "Enables building pcsx2-eerunner (headless EE JIT-vs-interpreter divergence localizer) by default.  It can still be built with `make pcsx2-eerunner` otherwise." OFF)
@@ -42,9 +55,9 @@ option(USE_VULKAN "Enable Vulkan GS renderer" ON)
 #-------------------------------------------------------------------------------
 if(UNIX AND NOT APPLE)
 	option(ENABLE_SETCAP "Enable networking capability for DEV9" OFF)
-	option(X11_API "Enable X11 support" ON)
-	option(WAYLAND_API "Enable Wayland support" ON)
-	option(USE_BACKTRACE "Enable libbacktrace support" ON)
+	option(X11_API "Enable X11 support" ${_X11_API_DEFAULT})
+	option(WAYLAND_API "Enable Wayland support" ${_WAYLAND_API_DEFAULT})
+	option(USE_BACKTRACE "Enable libbacktrace support" ${_USE_BACKTRACE_DEFAULT})
 endif()
 
 if(UNIX)

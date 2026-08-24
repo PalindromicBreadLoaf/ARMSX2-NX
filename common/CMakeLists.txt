@@ -190,6 +190,19 @@ elseif(ANDROID)
 		HTTPDownloaderAndroid.cpp
 		HTTPDownloaderAndroid.h
 	)
+elseif(HORIZON)
+	target_sources(common PRIVATE
+		Horizon/Horizon.h
+		Horizon/HorizonCompat.cpp
+		Horizon/HorizonHostSys.cpp
+		Horizon/HorizonMisc.cpp
+		Horizon/HorizonNet.cpp
+		Horizon/HorizonThreads.cpp
+		Horizon/HorizonTime.h
+		Horizon/compat/ifaddrs.h
+		Horizon/compat/netinet/ip.h
+	)
+	target_include_directories(common PUBLIC Horizon/compat)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp
@@ -226,7 +239,7 @@ if (USE_GCC AND CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 	set_source_files_properties(FastJmp.cpp PROPERTIES COMPILE_FLAGS -fno-lto)
 endif()
 
-if(NOT WIN32 AND NOT ANDROID AND NOT IOS)
+if(NOT WIN32 AND NOT ANDROID AND NOT IOS AND NOT HORIZON)
 	# libcurl-based HTTPDownloader (Android uses HTTPDownloaderAndroid instead)
 	target_sources(common PRIVATE
 		HTTPDownloaderCurl.cpp
