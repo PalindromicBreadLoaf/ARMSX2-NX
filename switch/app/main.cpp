@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -45,6 +46,9 @@ namespace
 	constexpr u64 IDLE_POLL_NS = 8'000'000ULL;
 
 	constexpr float STICK_DEADZONE = 0.15f;
+	constexpr u32 NUM_LOCAL_PLAYERS = 2;
+	constexpr const char* MULTIPLAYER_INPUT_VERSION_KEY = "MultiplayerInputVersion";
+	constexpr int MULTIPLAYER_INPUT_VERSION = 1;
 
 	// Hold '+' and '-' together to open the FullscreenUI pause menu
 	constexpr u64 MENU_COMBO = HidNpadButton_Plus | HidNpadButton_Minus;
@@ -108,25 +112,25 @@ namespace
 		return (v < 0.0f) ? -scaled : scaled;
 	}
 
-	void ApplyStick(const HidAnalogStickState& s, PadDualshock2::Inputs left, PadDualshock2::Inputs right,
+	void ApplyStick(u32 player, const HidAnalogStickState& s, PadDualshock2::Inputs left, PadDualshock2::Inputs right,
 		PadDualshock2::Inputs up, PadDualshock2::Inputs down)
 	{
 		const float x = ApplyDeadzone(s.x);
 		const float y = ApplyDeadzone(s.y);
-		Pad::SetControllerState(0, static_cast<u32>(right), x > 0.0f ? x : 0.0f);
-		Pad::SetControllerState(0, static_cast<u32>(left), x < 0.0f ? -x : 0.0f);
-		Pad::SetControllerState(0, static_cast<u32>(up), y > 0.0f ? y : 0.0f);
-		Pad::SetControllerState(0, static_cast<u32>(down), y < 0.0f ? -y : 0.0f);
+		Pad::SetControllerState(player, static_cast<u32>(right), x > 0.0f ? x : 0.0f);
+		Pad::SetControllerState(player, static_cast<u32>(left), x < 0.0f ? -x : 0.0f);
+		Pad::SetControllerState(player, static_cast<u32>(up), y > 0.0f ? y : 0.0f);
+		Pad::SetControllerState(player, static_cast<u32>(down), y < 0.0f ? -y : 0.0f);
 	}
 
-	void FeedGamePad(PadState& pad, u64 held)
+	void FeedGamePad(u32 player, PadState& pad, u64 held)
 	{
 		for (const ButtonMap& m : BUTTON_MAP)
-			Pad::SetControllerState(0, static_cast<u32>(m.ps2), (held & m.nx) ? 1.0f : 0.0f);
+			Pad::SetControllerState(player, static_cast<u32>(m.ps2), (held & m.nx) ? 1.0f : 0.0f);
 
-		ApplyStick(padGetStickPos(&pad, 0), PadDualshock2::Inputs::PAD_L_LEFT, PadDualshock2::Inputs::PAD_L_RIGHT,
+		ApplyStick(player, padGetStickPos(&pad, 0), PadDualshock2::Inputs::PAD_L_LEFT, PadDualshock2::Inputs::PAD_L_RIGHT,
 			PadDualshock2::Inputs::PAD_L_UP, PadDualshock2::Inputs::PAD_L_DOWN);
-		ApplyStick(padGetStickPos(&pad, 1), PadDualshock2::Inputs::PAD_R_LEFT, PadDualshock2::Inputs::PAD_R_RIGHT,
+		ApplyStick(player, padGetStickPos(&pad, 1), PadDualshock2::Inputs::PAD_R_LEFT, PadDualshock2::Inputs::PAD_R_RIGHT,
 			PadDualshock2::Inputs::PAD_R_UP, PadDualshock2::Inputs::PAD_R_DOWN);
 	}
 
@@ -165,6 +169,13 @@ namespace
 			s_settings_interface->SetBoolValue("Logging", "EnableSystemConsole", true);
 			s_settings_interface->SetBoolValue("Logging", "EnableFileLogging", true);
 			s_settings_interface->SetBoolValue("Logging", "EnableVerbose", false);
+			s_settings_interface->Save();
+		}
+
+		if (s_settings_interface->GetIntValue("Horizon", MULTIPLAYER_INPUT_VERSION_KEY, 0) < MULTIPLAYER_INPUT_VERSION)
+		{
+			s_settings_interface->SetStringValue("Pad2", "Type", "DualShock2");
+			s_settings_interface->SetIntValue("Horizon", MULTIPLAYER_INPUT_VERSION_KEY, MULTIPLAYER_INPUT_VERSION);
 			s_settings_interface->Save();
 		}
 
@@ -317,9 +328,10 @@ int main(int argc, char** argv)
 		Host::RefreshGameListAsync(false);
 	}
 
-	padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-	PadState pad;
-	padInitializeDefault(&pad);
+	padConfigureInput(NUM_LOCAL_PLAYERS, HidNpadStyleSet_NpadStandard);
+	std::array<PadState, NUM_LOCAL_PLAYERS> pads;
+	padInitializeDefault(&pads[0]);
+	padInitialize(&pads[1], HidNpadIdType_No2);
 
 	std::string boot_image;
 	if (argc > 1 && argv[1] && argv[1][0])
@@ -334,22 +346,30 @@ int main(int argc, char** argv)
 
 	std::atomic_bool stop_loop{false};
 	std::thread input_thread([&]() {
-		u64 prev_held = 0;
+		std::array<u64, NUM_LOCAL_PLAYERS> prev_held{};
 		bool prev_menu_combo = false;
 		while (!stop_loop.load(std::memory_order_relaxed))
 		{
-			padUpdate(&pad);
-			const u64 held = padGetButtons(&pad);
-			const u64 changed = held ^ prev_held;
-			prev_held = held;
+			std::array<u64, NUM_LOCAL_PLAYERS> held{};
+			std::array<u64, NUM_LOCAL_PLAYERS> changed{};
+			for (u32 player = 0; player < NUM_LOCAL_PLAYERS; player++)
+			{
+				padUpdate(&pads[player]);
+				held[player] = padGetButtons(&pads[player]);
+				changed[player] = held[player] ^ prev_held[player];
+				prev_held[player] = held[player];
+			}
 
 			const bool fsui_active = FullscreenUI::HasActiveWindow();
 			if (fsui_active)
-				FeedNav(held, changed);
+				FeedNav(held[0], changed[0]);
 			else if (VMManager::HasValidVM())
-				FeedGamePad(pad, held);
+			{
+				for (u32 player = 0; player < NUM_LOCAL_PLAYERS; player++)
+					FeedGamePad(player, pads[player], held[player]);
+			}
 
-			const bool menu_combo = (held & MENU_COMBO) == MENU_COMBO;
+			const bool menu_combo = (held[0] & MENU_COMBO) == MENU_COMBO;
 			if (menu_combo && !prev_menu_combo)
 			{
 				if (FullscreenUI::IsInitialized() && VMManager::HasValidVM())
