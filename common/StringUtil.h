@@ -14,6 +14,10 @@
 #include <string_view>
 #include <vector>
 
+#ifndef _MSC_VER
+#include <strings.h>
+#endif
+
 #include "fast_float/fast_float.h"
 
 // Older versions of libstdc++ are missing support for from_chars() with floats, and was only recently

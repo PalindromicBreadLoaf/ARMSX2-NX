@@ -15,7 +15,7 @@
 
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
-#else
+#elif !defined(__SWITCH__)
 #include <dlfcn.h>
 #ifdef __APPLE__
 #include "common/CocoaTools.h"
@@ -92,6 +92,9 @@ bool DynamicLibrary::Open(const char* filename, Error* error)
 	}
 
 	return true;
+#elif defined(__SWITCH__)
+	Error::SetStringFmt(error, "Loading {} failed: dynamic libraries are unsupported on Horizon.", filename);
+	return false;
 #else
 	m_handle = dlopen(filename, RTLD_NOW);
 	if (!m_handle)
@@ -142,7 +145,7 @@ void DynamicLibrary::Close()
 
 #ifdef _WIN32
 	FreeLibrary(reinterpret_cast<HMODULE>(m_handle));
-#else
+#elif !defined(__SWITCH__)
 	dlclose(m_handle);
 #endif
 	m_handle = nullptr;
@@ -152,6 +155,9 @@ void* DynamicLibrary::GetSymbolAddress(const char* name) const
 {
 #ifdef _WIN32
 	return reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(m_handle), name));
+#elif defined(__SWITCH__)
+	(void)name;
+	return nullptr;
 #else
 	return reinterpret_cast<void*>(dlsym(m_handle, name));
 #endif
