@@ -14,18 +14,59 @@ set(CMAKE_FIND_FRAMEWORK NEVER)
 find_package(PNG 1.6.40 REQUIRED)
 find_package(JPEG REQUIRED) # No version because flatpak uses libjpeg-turbo.
 find_package(ZLIB REQUIRED) # v1.3, but Mac uses the SDK version.
-find_package(Zstd 1.5.5 REQUIRED)
-find_package(LZ4 REQUIRED)
-find_package(WebP REQUIRED) # v1.3.2, spews an error on Linux because no pkg-config.
-find_package(SDL3 3.2.6 REQUIRED)
 find_package(Freetype 2.10 REQUIRED) # 2.10 is the first with COLRv0 support, which we need for rendering emoji
-find_package(plutovg 1.1.0 REQUIRED)
-find_package(plutosvg 0.0.7 REQUIRED)
+if(HORIZON)
+	# Reuse the copies already vendored for the Android build rather than searching
+	# the host system while cross-compiling.
+	include("${CMAKE_SOURCE_DIR}/switch/cmake/Zstd.cmake")
+
+	set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
+	add_subdirectory(platforms/android/app/src/main/cpp/3rdparty/lz4/build/cmake
+		"${CMAKE_BINARY_DIR}/horizon-deps/lz4" EXCLUDE_FROM_ALL)
+	add_library(LZ4::LZ4 ALIAS lz4_static)
+
+	set(WEBP_BUILD_ANIM_UTILS OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_CWEBP OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_DWEBP OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_GIF2WEBP OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_IMG2WEBP OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_VWEBP OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_WEBPINFO OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_LIBWEBPMUX OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_WEBPMUX OFF CACHE BOOL "" FORCE)
+	set(WEBP_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
+	add_subdirectory(platforms/android/app/src/main/cpp/3rdparty/libwebp
+		"${CMAKE_BINARY_DIR}/horizon-deps/libwebp" EXCLUDE_FROM_ALL)
+	add_library(WebP::libwebp ALIAS webp)
+
+	set(PLUTOSVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+	add_subdirectory(3rdparty/plutovg EXCLUDE_FROM_ALL)
+	add_subdirectory(3rdparty/plutosvg EXCLUDE_FROM_ALL)
+
+	set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+	set(SDL_STATIC ON CACHE BOOL "" FORCE)
+	set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+	set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+	set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+	set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+	set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+	set(SDL_HIDAPI OFF CACHE BOOL "" FORCE)
+	set(NINTENDO_SWITCH TRUE)
+	add_subdirectory(platforms/android/app/src/main/cpp/3rdparty/sdl3
+		"${CMAKE_BINARY_DIR}/horizon-deps/sdl3" EXCLUDE_FROM_ALL)
+else()
+	find_package(Zstd 1.5.5 REQUIRED)
+	find_package(LZ4 REQUIRED)
+	find_package(WebP REQUIRED) # v1.3.2, spews an error on Linux because no pkg-config.
+	find_package(SDL3 3.2.6 REQUIRED)
+	find_package(plutovg 1.1.0 REQUIRED)
+	find_package(plutosvg 0.0.7 REQUIRED)
+endif()
 if (WIN32)
 	find_package(DirectX-Headers 1.618.1 REQUIRED)
 endif()
 
-if(USE_VULKAN)
+if(USE_VULKAN AND NOT HORIZON)
 	find_package(Shaderc REQUIRED)
 endif()
 
@@ -36,7 +77,7 @@ if (WIN32)
 	add_subdirectory(3rdparty/winwil EXCLUDE_FROM_ALL)
 	set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
 	find_package(Vtune)
-else()
+elseif(NOT HORIZON)
 	find_package(CURL REQUIRED)
 	if(NOT IOS)
 		find_package(PCAP REQUIRED)
@@ -100,7 +141,9 @@ disable_compiler_warnings_for_target(cpuinfo)
 add_subdirectory(3rdparty/libzip EXCLUDE_FROM_ALL)
 add_subdirectory(3rdparty/rcheevos EXCLUDE_FROM_ALL)
 add_subdirectory(3rdparty/rapidjson EXCLUDE_FROM_ALL)
-add_subdirectory(3rdparty/discord-rpc EXCLUDE_FROM_ALL)
+if(NOT HORIZON)
+	add_subdirectory(3rdparty/discord-rpc EXCLUDE_FROM_ALL)
+endif()
 add_subdirectory(3rdparty/freesurround EXCLUDE_FROM_ALL)
 
 if(USE_OPENGL)

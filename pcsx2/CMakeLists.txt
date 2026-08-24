@@ -346,7 +346,7 @@ set(pcsx2DEV9Sources
 # LTO release builds surface even though a debug build's --gc-sections hides it).
 # iOS also skips find_package(PCAP) in SearchForStuff.cmake, so PCAP::PCAP doesn't
 # even exist to link against there.
-if(NOT ANDROID AND NOT IOS)
+if(NOT ANDROID AND NOT IOS AND NOT HORIZON)
 	list(APPEND pcsx2DEV9Sources DEV9/pcap_io.cpp)
 endif()
 
@@ -1371,11 +1371,10 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	cpuinfo
 	cubeb
 	rcheevos
-	discord-rpc
+	SDL3::SDL3
 	simpleini
 	freesurround
 	Freetype::Freetype
-	SDL3::SDL3
 	ZLIB::ZLIB
 	LZ4::LZ4
 	SoundTouch::SoundTouch
@@ -1389,6 +1388,12 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	plutosvg::plutosvg
 	${LIBC_LIBRARIES}
 )
+
+if(NOT HORIZON)
+	target_link_libraries(PCSX2_FLAGS INTERFACE
+		discord-rpc
+	)
+endif()
 
 if(WIN32)
 	target_link_libraries(PCSX2_FLAGS INTERFACE
@@ -1413,7 +1418,7 @@ if(WIN32)
 		dwmapi.lib
 		OneCore.lib
 	)
-elseif(NOT ANDROID AND NOT IOS)
+elseif(NOT ANDROID AND NOT IOS AND NOT HORIZON)
 	# Android and iOS have no system libpcap; DEV9 uses Android/AndroidPcapStubs.cpp
 	# instead, so they must NOT link PCAP::PCAP. iOS additionally skips
 	# find_package(PCAP) (SearchForStuff.cmake), so the PCAP::PCAP target doesn't

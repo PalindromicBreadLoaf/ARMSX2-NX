@@ -473,6 +473,10 @@
 #define SDL_PLATFORM_3DS 1
 #endif
 
+#ifdef __SWITCH__
+#define SDL_PLATFORM_SWITCH 1
+#endif
+
 #ifdef __NGAGE__
 
 /**

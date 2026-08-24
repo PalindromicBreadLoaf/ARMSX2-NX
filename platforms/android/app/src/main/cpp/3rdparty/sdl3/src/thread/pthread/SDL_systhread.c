@@ -57,7 +57,11 @@
 #include <kernel/OS.h>
 #endif
 
-#ifdef HAVE_SIGNAL_H
+#ifdef SDL_PLATFORM_SWITCH
+#include <switch.h>
+#endif
+
+#if defined(HAVE_SIGNAL_H) && !defined(SDL_PLATFORM_SWITCH)
 // List of signals to mask in the subthreads
 static const int sig_list[] = {
     SIGHUP, SIGINT, SIGQUIT, SIGPIPE, SIGALRM, SIGTERM, SIGWINCH,
@@ -121,7 +125,7 @@ bool SDL_SYS_CreateThread(SDL_Thread *thread,
 
 void SDL_SYS_SetupThread(const char *name)
 {
-#ifdef HAVE_SIGNAL_H
+#if defined(HAVE_SIGNAL_H) && !defined(SDL_PLATFORM_SWITCH)
     int i;
     sigset_t mask;
 #endif
@@ -160,7 +164,7 @@ void SDL_SYS_SetupThread(const char *name)
 #endif
     }
 
-#ifdef HAVE_SIGNAL_H
+#if defined(HAVE_SIGNAL_H) && !defined(SDL_PLATFORM_SWITCH)
     // Mask asynchronous signals for this thread
     sigemptyset(&mask);
     for (i = 0; sig_list[i]; ++i) {
@@ -185,8 +189,15 @@ SDL_ThreadID SDL_GetCurrentThreadID(void)
 
 bool SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
 {
-#ifdef SDL_PLATFORM_RISCOS
+#if defined(SDL_PLATFORM_RISCOS)
     // FIXME: Setting thread priority does not seem to be supported
+    return true;
+#elif defined(SDL_PLATFORM_SWITCH)
+    const Result result = svcSetThreadPriority(CUR_THREAD_HANDLE,
+        priority == SDL_THREAD_PRIORITY_HIGH ? 0x2B : 0x3B);
+    if (R_FAILED(result)) {
+        return SDL_SetError("svcSetThreadPriority failed (%x)", result);
+    }
     return true;
 #else
     struct sched_param sched;

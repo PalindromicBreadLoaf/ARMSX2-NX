@@ -148,13 +148,13 @@ endif()
 #  for the time being. This default will change to ON once this becomes
 #  commonly supported in browsers or the Emscripten team makes a single
 #  binary work everywhere.
-if (UNIX_OR_MAC_SYS AND NOT EMSCRIPTEN)
+if ((UNIX_OR_MAC_SYS OR NINTENDO_SWITCH) AND NOT EMSCRIPTEN)
   set(SDL_PTHREADS_DEFAULT ON)
 else()
   set(SDL_PTHREADS_DEFAULT OFF)
 endif()
 
-if(UNIX_SYS OR ANDROID)
+if(UNIX_SYS OR ANDROID OR NINTENDO_SWITCH)
   set(SDL_CLOCK_GETTIME_DEFAULT ON)
 else()
   set(SDL_CLOCK_GETTIME_DEFAULT OFF)
@@ -207,7 +207,7 @@ if(EMSCRIPTEN)
   set(SDL_SHARED_AVAILABLE OFF)
 endif()
 
-if(VITA OR PSP OR PS2 OR N3DS OR RISCOS OR NGAGE)
+if(VITA OR PSP OR PS2 OR N3DS OR NINTENDO_SWITCH OR RISCOS OR NGAGE)
   set(SDL_SHARED_AVAILABLE OFF)
 endif()
 
@@ -3330,6 +3330,44 @@ elseif(N3DS)
     "${SDL3_SOURCE_DIR}/src/io/n3ds/*.c"
     "${SDL3_SOURCE_DIR}/src/io/n3ds/*.h"
   )
+
+elseif(NINTENDO_SWITCH)
+  sdl_link_dependency(nx LIBS nx)
+
+  if(SDL_AUDIO)
+    set(SDL_AUDIO_DRIVER_SWITCH 1)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/audio/switch/*.c"
+      "${SDL3_SOURCE_DIR}/src/audio/switch/*.h"
+    )
+    set(HAVE_SDL_AUDIO TRUE)
+  endif()
+
+  set(SDL_FILESYSTEM_SWITCH 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/filesystem/switch/*.c")
+  set(HAVE_SDL_FILESYSTEM TRUE)
+
+  if(SDL_JOYSTICK)
+    set(SDL_JOYSTICK_SWITCH 1)
+    sdl_glob_sources("${SDL3_SOURCE_DIR}/src/joystick/switch/*.c")
+    set(HAVE_SDL_JOYSTICK TRUE)
+  endif()
+
+  if(SDL_POWER)
+    set(SDL_POWER_SWITCH 1)
+    sdl_glob_sources("${SDL3_SOURCE_DIR}/src/power/switch/*.c")
+    set(HAVE_SDL_POWER TRUE)
+  endif()
+
+  CheckPTHREAD()
+
+  set(SDL_TIMER_SWITCH 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/switch/*.c")
+  set(HAVE_SDL_TIMERS TRUE)
+
+  set(SDL_FSOPS_POSIX 1)
+  sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/posix/SDL_sysfsops.c")
+  set(HAVE_SDL_FSOPS TRUE)
 
 elseif(NGAGE)
 
