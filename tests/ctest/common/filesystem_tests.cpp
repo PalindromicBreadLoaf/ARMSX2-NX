@@ -5,6 +5,9 @@
 #include "common/Path.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+
 #ifdef __linux__
 
 static std::optional<std::string> create_test_directory()
@@ -52,6 +55,44 @@ TEST(FileSystem, RecursiveDeleteDirectoryDontFollowSymbolicLinks)
 	// Clean up.
 	ASSERT_TRUE(FileSystem::DeleteFilePath(file_path.c_str()));
 	ASSERT_TRUE(FileSystem::DeleteDirectory(target_dir.c_str()));
+	ASSERT_TRUE(FileSystem::DeleteDirectory(test_dir->c_str()));
+}
+
+TEST(FileSystem, MapsAndUnmapsBinaryFiles)
+{
+	std::optional<std::string> test_dir = create_test_directory();
+	ASSERT_TRUE(test_dir.has_value());
+
+	const std::array<u8, 5> contents = {0x00, 0x01, 0x7f, 0x80, 0xff};
+	const std::string file_path = Path::Combine(*test_dir, "mapped.bin");
+	ASSERT_TRUE(FileSystem::WriteBinaryFile(file_path.c_str(), contents.data(), contents.size()));
+
+	const std::span<const u8> mapped = FileSystem::MapBinaryFileForRead(file_path.c_str());
+	ASSERT_EQ(mapped.size(), contents.size());
+	EXPECT_TRUE(std::equal(mapped.begin(), mapped.end(), contents.begin()));
+	FileSystem::UnmapFile(mapped);
+
+	ASSERT_TRUE(FileSystem::DeleteFilePath(file_path.c_str()));
+	ASSERT_TRUE(FileSystem::DeleteDirectory(test_dir->c_str()));
+}
+
+TEST(FileSystem, RenamePathReplacesExistingFile)
+{
+	std::optional<std::string> test_dir = create_test_directory();
+	ASSERT_TRUE(test_dir.has_value());
+
+	const std::string source_path = Path::Combine(*test_dir, "source.txt");
+	const std::string destination_path = Path::Combine(*test_dir, "destination.txt");
+	ASSERT_TRUE(FileSystem::WriteStringToFile(source_path.c_str(), "source"));
+	ASSERT_TRUE(FileSystem::WriteStringToFile(destination_path.c_str(), "destination"));
+
+	ASSERT_TRUE(FileSystem::RenamePath(source_path.c_str(), destination_path.c_str()));
+	EXPECT_FALSE(FileSystem::FileExists(source_path.c_str()));
+	const std::optional<std::string> contents = FileSystem::ReadFileToString(destination_path.c_str());
+	ASSERT_TRUE(contents.has_value());
+	EXPECT_EQ(*contents, "source");
+
+	ASSERT_TRUE(FileSystem::DeleteFilePath(destination_path.c_str()));
 	ASSERT_TRUE(FileSystem::DeleteDirectory(test_dir->c_str()));
 }
 

@@ -203,6 +203,7 @@ elseif(HORIZON)
 		Horizon/compat/netinet/ip.h
 	)
 	target_include_directories(common PUBLIC Horizon/compat)
+	target_compile_definitions(common PRIVATE _GNU_SOURCE)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp

@@ -56,6 +56,12 @@ namespace Log
 	static std::string s_file_path;
 	static std::mutex s_file_mutex;
 
+#if defined(__SWITCH__)
+	static constexpr double SWITCH_FILE_FLUSH_INTERVAL_MS = 2000.0;
+	static constexpr size_t SWITCH_FILE_BUFFER_SIZE = 1024 * 1024;
+	static Common::Timer::Value s_last_file_flush = 0;
+#endif
+
 	static HostCallbackType s_host_callback;
 
 #ifdef _WIN32
@@ -331,7 +337,16 @@ __ri void Log::WriteToFile(LOGLEVEL level, ConsoleColors color, std::string_view
 		}
 	}
 
+#if defined(__SWITCH__)
+	const Common::Timer::Value now = Common::Timer::GetCurrentValue();
+	if (Common::Timer::ConvertValueToMilliseconds(now - s_last_file_flush) >= SWITCH_FILE_FLUSH_INTERVAL_MS)
+	{
+		std::fflush(s_file_handle.get());
+		s_last_file_flush = now;
+	}
+#else
 	std::fflush(s_file_handle.get());
+#endif
 }
 
 bool Log::IsFileOutputEnabled()
@@ -356,6 +371,10 @@ bool Log::SetFileOutputLevel(LOGLEVEL level, std::string path)
 				if (s_file_handle)
 				{
 					s_file_path = std::move(path);
+#if defined(__SWITCH__)
+					std::setvbuf(s_file_handle.get(), nullptr, _IOFBF, SWITCH_FILE_BUFFER_SIZE);
+					s_last_file_flush = Common::Timer::GetCurrentValue();
+#endif
 				}
 				else
 				{

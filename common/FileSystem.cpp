@@ -2664,7 +2664,15 @@ bool FileSystem::RenamePath(const char* old_path, const char* new_path, Error* e
 
 #if defined(__SWITCH__)
 	if (FileExists(new_path))
-		unlink(new_path);
+	{
+		if (unlink(new_path) != 0)
+		{
+			const int err = errno;
+			Error::SetErrno(error, "unlink() failed: ", err);
+			Console.Error("unlink('%s') failed: %d", new_path, err);
+			return false;
+		}
+	}
 #endif
 
 	if (rename(old_path, new_path) != 0)
