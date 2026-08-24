@@ -42,7 +42,9 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(__SWITCH__)
 #include <sys/mman.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -1341,6 +1343,33 @@ static std::span<const u8> MapBinaryFileForRead(HANDLE handle)
 	CloseHandle(mapping);
 	return {static_cast<const u8*>(ptr), static_cast<size_t>(size.QuadPart)};
 }
+#elif defined(__SWITCH__)
+static std::span<const u8> MapBinaryFileForRead(int fd)
+{
+	struct stat s;
+	if (fstat(fd, &s) != 0 || s.st_size <= 0)
+		return {};
+
+	const size_t size = static_cast<size_t>(s.st_size);
+	u8* const buffer = static_cast<u8*>(std::malloc(size));
+	if (!buffer)
+		return {};
+
+	size_t done = 0;
+	while (done < size)
+	{
+		const ssize_t read_size = read(fd, buffer + done, size - done);
+		if (read_size <= 0)
+		{
+			std::free(buffer);
+			return {};
+		}
+
+		done += static_cast<size_t>(read_size);
+	}
+
+	return {buffer, size};
+}
 #else
 static std::span<const u8> MapBinaryFileForRead(int fd)
 {
@@ -1388,6 +1417,8 @@ void FileSystem::UnmapFile(std::span<const u8> file)
 {
 #ifdef _WIN32
 	UnmapViewOfFile(const_cast<u8*>(file.data()));
+#elif defined(__SWITCH__)
+	std::free(const_cast<u8*>(file.data()));
 #else
 	munmap(const_cast<u8*>(file.data()), file.size());
 #endif
@@ -2630,6 +2661,11 @@ bool FileSystem::RenamePath(const char* old_path, const char* new_path, Error* e
 		Error::SetStringView(error, "Path is empty.");
 		return false;
 	}
+
+#if defined(__SWITCH__)
+	if (FileExists(new_path))
+		unlink(new_path);
+#endif
 
 	if (rename(old_path, new_path) != 0)
 	{
