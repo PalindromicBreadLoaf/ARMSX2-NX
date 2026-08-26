@@ -19,6 +19,10 @@
 #include "common/Timer.h"
 #include "common/YAML.h"
 
+#ifdef __SWITCH__
+#include "common/Horizon/HorizonTime.h"
+#endif
+
 #include "fmt/format.h"
 
 #include <optional>
@@ -105,6 +109,8 @@ time_t MemoryCardFileEntryDateTime::ToTime() const
 
 #ifdef _MSC_VER
 	return _mkgmtime(&converted);
+#elif defined(__SWITCH__)
+	return Horizon::timegm_utc(converted);
 #else
 	return timegm(&converted);
 #endif

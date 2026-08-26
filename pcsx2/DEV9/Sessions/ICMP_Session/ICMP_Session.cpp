@@ -23,6 +23,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#if defined(__SWITCH__)
+#include <arpa/inet.h>
+#endif
 #ifdef __linux__
 #include <linux/errqueue.h>
 #endif

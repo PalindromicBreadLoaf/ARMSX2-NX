@@ -10,6 +10,9 @@
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
 #include <winioctl.h>
+#elif defined(__SWITCH__)
+#include <sys/types.h>
+#include <unistd.h>
 #else
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -140,6 +143,9 @@ s32 DEV9init()
 			}
 		}
 	}
+#elif defined(__SWITCH__)
+	hEeprom = -1;
+	dev9.eeprom = reinterpret_cast<u16*>(eeprom);
 #else
 	hEeprom = open("eeprom.dat", O_RDWR, 0);
 

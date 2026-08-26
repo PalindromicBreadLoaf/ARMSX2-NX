@@ -303,6 +303,11 @@ std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter)
 {
     return std::nullopt;
 }
+#elif defined(__SWITCH__)
+std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter)
+{
+	return std::nullopt;
+}
 #else
 std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter)
 {

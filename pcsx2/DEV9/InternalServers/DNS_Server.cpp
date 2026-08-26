@@ -16,7 +16,7 @@
 #include <netdb.h>
 #endif
 
-#if defined(__FreeBSD__)
+#if defined(__FreeBSD__) || defined(__SWITCH__)
 #include <netinet/in.h>
 #endif
 
