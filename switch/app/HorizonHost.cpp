@@ -60,12 +60,14 @@ void HorizonHost::RequestExit()
 	s_exit_requested.store(true, std::memory_order_release);
 	s_cpu_queue_cv.notify_all();
 
-	if (VMManager::HasValidVM())
-	{
+	Host::RunOnCPUThread([]() {
+		if (!VMManager::HasValidVM())
+			return;
+
 		const VMState state = VMManager::GetState();
 		if (state == VMState::Running || state == VMState::Paused)
 			VMManager::SetState(VMState::Stopping);
-	}
+	});
 }
 
 bool HorizonHost::IsExitRequested()
