@@ -15,15 +15,22 @@
 #include "pcsx2/ImGui/FullscreenUI.h"
 #include "pcsx2/ImGui/ImGuiFullscreen.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
+#include "pcsx2/Input/InputManager.h"
 #include "pcsx2/MTGS.h"
+#include "pcsx2/SIO/Pad/Pad.h"
+#include "pcsx2/SIO/Pad/PadDualshock2.h"
 #include "pcsx2/VMManager.h"
 
 #include "HorizonHost.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 
 namespace
 {
@@ -32,6 +39,11 @@ namespace
 	constexpr const char* LOGS_DIR = "sdmc:/switch/armsx2/logs";
 	constexpr const char* SETTINGS_PATH = "sdmc:/switch/armsx2/armsx2.ini";
 	constexpr u64 IDLE_POLL_NS = 8'000'000ULL;
+
+	constexpr u64 INPUT_POLL_NS = 16'000'000ULL;
+	constexpr float STICK_DEADZONE = 0.15f;
+	constexpr u32 NUM_LOCAL_PLAYERS = 2;
+	constexpr u64 MENU_COMBO = HidNpadButton_Plus | HidNpadButton_Minus;
 
 	std::unique_ptr<INISettingsInterface> s_settings_interface;
 	std::atomic_bool s_applet_backgrounded{false};
@@ -90,6 +102,7 @@ namespace
 			VMManager::SetDefaultSettings(*s_settings_interface, true, true, true, true, true);
 			s_settings_interface->SetBoolValue("UI", "EnableFullscreenUI", true);
 			s_settings_interface->AddToStringList("GameList", "RecursivePaths", GAMES_DIR);
+			s_settings_interface->SetStringValue("Pad2", "Type", "DualShock2");
 		}
 
 		Error error;
@@ -216,6 +229,153 @@ namespace
 
 		HorizonHost::RequestExit();
 	}
+
+	struct ButtonMap
+	{
+		u64 nx;
+		PadDualshock2::Inputs ps2;
+	};
+	constexpr ButtonMap BUTTON_MAP[] = {
+		{HidNpadButton_Up, PadDualshock2::Inputs::PAD_UP},
+		{HidNpadButton_Down, PadDualshock2::Inputs::PAD_DOWN},
+		{HidNpadButton_Left, PadDualshock2::Inputs::PAD_LEFT},
+		{HidNpadButton_Right, PadDualshock2::Inputs::PAD_RIGHT},
+		{HidNpadButton_X, PadDualshock2::Inputs::PAD_TRIANGLE},
+		{HidNpadButton_A, PadDualshock2::Inputs::PAD_CIRCLE},
+		{HidNpadButton_B, PadDualshock2::Inputs::PAD_CROSS},
+		{HidNpadButton_Y, PadDualshock2::Inputs::PAD_SQUARE},
+		{HidNpadButton_Minus, PadDualshock2::Inputs::PAD_SELECT},
+		{HidNpadButton_Plus, PadDualshock2::Inputs::PAD_START},
+		{HidNpadButton_L, PadDualshock2::Inputs::PAD_L1},
+		{HidNpadButton_R, PadDualshock2::Inputs::PAD_R1},
+		{HidNpadButton_ZL, PadDualshock2::Inputs::PAD_L2},
+		{HidNpadButton_ZR, PadDualshock2::Inputs::PAD_R2},
+		{HidNpadButton_StickL, PadDualshock2::Inputs::PAD_L3},
+		{HidNpadButton_StickR, PadDualshock2::Inputs::PAD_R3},
+	};
+
+	struct NavMap
+	{
+		u64 nx;
+		GenericInputBinding generic;
+	};
+	constexpr NavMap NAV_MAP[] = {
+		{HidNpadButton_Up, GenericInputBinding::DPadUp},
+		{HidNpadButton_Down, GenericInputBinding::DPadDown},
+		{HidNpadButton_Left, GenericInputBinding::DPadLeft},
+		{HidNpadButton_Right, GenericInputBinding::DPadRight},
+		{HidNpadButton_B, GenericInputBinding::Cross},
+		{HidNpadButton_A, GenericInputBinding::Circle},
+		{HidNpadButton_Y, GenericInputBinding::Square},
+		{HidNpadButton_X, GenericInputBinding::Triangle},
+		{HidNpadButton_L, GenericInputBinding::L1},
+		{HidNpadButton_R, GenericInputBinding::R1},
+		{HidNpadButton_ZL, GenericInputBinding::L2},
+		{HidNpadButton_ZR, GenericInputBinding::R2},
+		{HidNpadButton_Minus, GenericInputBinding::Select},
+		{HidNpadButton_Plus, GenericInputBinding::Start},
+	};
+
+	std::array<PadState, NUM_LOCAL_PLAYERS> s_pads;
+	std::thread s_input_thread;
+	std::atomic_bool s_input_stop{false};
+
+	float ApplyDeadzone(s32 raw)
+	{
+		const float v = std::clamp(static_cast<float>(raw) / static_cast<float>(JOYSTICK_MAX), -1.0f, 1.0f);
+		const float mag = std::fabs(v);
+		if (mag < STICK_DEADZONE)
+			return 0.0f;
+		const float scaled = (mag - STICK_DEADZONE) / (1.0f - STICK_DEADZONE);
+		return (v < 0.0f) ? -scaled : scaled;
+	}
+
+	void ApplyStick(u32 player, const HidAnalogStickState& s, PadDualshock2::Inputs left, PadDualshock2::Inputs right,
+		PadDualshock2::Inputs up, PadDualshock2::Inputs down)
+	{
+		const float x = ApplyDeadzone(s.x);
+		const float y = ApplyDeadzone(s.y);
+		Pad::SetControllerState(player, static_cast<u32>(right), x > 0.0f ? x : 0.0f);
+		Pad::SetControllerState(player, static_cast<u32>(left), x < 0.0f ? -x : 0.0f);
+		Pad::SetControllerState(player, static_cast<u32>(up), y > 0.0f ? y : 0.0f);
+		Pad::SetControllerState(player, static_cast<u32>(down), y < 0.0f ? -y : 0.0f);
+	}
+
+	void FeedGamePad(u32 player, PadState& pad, u64 held)
+	{
+		for (const ButtonMap& m : BUTTON_MAP)
+			Pad::SetControllerState(player, static_cast<u32>(m.ps2), (held & m.nx) ? 1.0f : 0.0f);
+
+		ApplyStick(player, padGetStickPos(&pad, 0), PadDualshock2::Inputs::PAD_L_LEFT, PadDualshock2::Inputs::PAD_L_RIGHT,
+			PadDualshock2::Inputs::PAD_L_UP, PadDualshock2::Inputs::PAD_L_DOWN);
+		ApplyStick(player, padGetStickPos(&pad, 1), PadDualshock2::Inputs::PAD_R_LEFT, PadDualshock2::Inputs::PAD_R_RIGHT,
+			PadDualshock2::Inputs::PAD_R_UP, PadDualshock2::Inputs::PAD_R_DOWN);
+	}
+
+	void FeedNav(u64 held, u64 changed)
+	{
+		for (const NavMap& m : NAV_MAP)
+		{
+			if (changed & m.nx)
+				ImGuiManager::ProcessGenericInputEvent(m.generic, InputLayout::Nintendo, (held & m.nx) ? 1.0f : 0.0f);
+		}
+	}
+
+	void InputPollLoop()
+	{
+		std::array<u64, NUM_LOCAL_PLAYERS> prev_held{};
+		bool prev_menu_combo = false;
+		while (!s_input_stop.load(std::memory_order_relaxed))
+		{
+			std::array<u64, NUM_LOCAL_PLAYERS> held{};
+			std::array<u64, NUM_LOCAL_PLAYERS> changed{};
+			for (u32 player = 0; player < NUM_LOCAL_PLAYERS; player++)
+			{
+				padUpdate(&s_pads[player]);
+				held[player] = padGetButtons(&s_pads[player]);
+				changed[player] = held[player] ^ prev_held[player];
+				prev_held[player] = held[player];
+			}
+
+			if (FullscreenUI::HasActiveWindow())
+				FeedNav(held[0], changed[0]);
+			else if (VMManager::HasValidVM())
+			{
+				for (u32 player = 0; player < NUM_LOCAL_PLAYERS; player++)
+					FeedGamePad(player, s_pads[player], held[player]);
+			}
+
+			const bool menu_combo = (held[0] & MENU_COMBO) == MENU_COMBO;
+			if (menu_combo && !prev_menu_combo)
+			{
+				if (FullscreenUI::IsInitialized() && VMManager::HasValidVM())
+					FullscreenUI::OpenPauseMenu();
+				else if (!FullscreenUI::IsInitialized())
+					HorizonHost::RequestExit();
+			}
+			prev_menu_combo = menu_combo;
+
+			svcSleepThread(INPUT_POLL_NS);
+		}
+	}
+
+	void StartInputPolling()
+	{
+		padConfigureInput(NUM_LOCAL_PLAYERS, HidNpadStyleSet_NpadStandard);
+		padInitializeDefault(&s_pads[0]);
+		padInitialize(&s_pads[1], HidNpadIdType_No2);
+
+		s_input_stop.store(false, std::memory_order_relaxed);
+		s_input_thread = std::thread(InputPollLoop);
+	}
+
+	void StopInputPolling()
+	{
+		if (!s_input_thread.joinable())
+			return;
+		s_input_stop.store(true, std::memory_order_relaxed);
+		s_input_thread.join();
+	}
 } // namespace
 
 void Host::CommitBaseSettingChanges()
@@ -290,7 +450,11 @@ int main(int argc, char* argv[])
 	if (!HorizonHost::IsExitRequested() && argc > 1 && !BootInitialImage(argv[1]) && !FullscreenUI::IsInitialized())
 		HorizonHost::RequestExit();
 
+	StartInputPolling();
+
 	RunMainLoop();
+
+	StopInputPolling();
 
 	appletUnhook(&applet_hook);
 	Host::CancelGameListRefresh();
