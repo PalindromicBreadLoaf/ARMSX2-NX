@@ -39,6 +39,7 @@ namespace
 	std::thread::id s_cpu_thread_id;
 	std::atomic_bool s_cpu_thread_valid{false};
 	std::atomic_bool s_exit_requested{false};
+	std::atomic_bool s_save_resume_state{false};
 
 	std::mutex s_gamelist_refresh_mutex;
 	std::thread s_gamelist_refresh_thread;
@@ -73,6 +74,23 @@ void HorizonHost::RequestExit()
 bool HorizonHost::IsExitRequested()
 {
 	return s_exit_requested.load(std::memory_order_acquire);
+}
+
+void HorizonHost::RequestVMShutdown(bool save_resume_state)
+{
+	if (!VMManager::HasValidVM())
+		return;
+
+	s_save_resume_state.store(save_resume_state, std::memory_order_release);
+	Host::RunOnCPUThread([]() {
+		if (VMManager::HasValidVM())
+			VMManager::SetState(VMState::Stopping);
+	});
+}
+
+bool HorizonHost::TakeResumeSaveRequest()
+{
+	return s_save_resume_state.exchange(false, std::memory_order_acq_rel);
 }
 
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
@@ -149,15 +167,18 @@ std::unique_ptr<ProgressCallback> Host::CreateHostProgressCallback()
 
 void Host::OpenURL(const std::string_view url)
 {
+	WARNING_LOG("Opening external URLs is unavailable on Horizon: {}", url);
 }
 
 bool Host::CopyTextToClipboard(const std::string_view text)
 {
+	WARNING_LOG("The Horizon clipboard is unavailable");
 	return false;
 }
 
 std::string Host::GetTextFromClipboard()
 {
+	WARNING_LOG("The Horizon clipboard is unavailable");
 	return {};
 }
 
@@ -168,6 +189,7 @@ int Host::LocaleSensitiveCompare(std::string_view lhs, std::string_view rhs)
 
 void Host::BeginTextInput()
 {
+	WARNING_LOG("Text input is unavailable until the Horizon software keyboard is implemented");
 }
 
 void Host::EndTextInput()
@@ -331,8 +353,7 @@ void Host::RequestExitBigPicture()
 
 void Host::RequestVMShutdown(bool allow_confirm, bool allow_save_state, bool default_save_state)
 {
-	if (VMManager::HasValidVM())
-		VMManager::SetState(VMState::Stopping);
+	HorizonHost::RequestVMShutdown(allow_save_state && default_save_state);
 }
 
 void Host::OnInputDeviceConnected(const std::string_view identifier, const std::string_view device_name)
@@ -384,6 +405,7 @@ void Host::OnAchievementsLoginSuccess(const char* username, u32 points, u32 sc_p
 
 void Host::OnAchievementsLoginRequested(Achievements::LoginRequestReason reason)
 {
+	WARNING_LOG("RetroAchievements login is unavailable until Horizon network and keyboard support is implemented");
 }
 
 void Host::OnAchievementsHardcoreModeChanged(bool enabled)
@@ -396,10 +418,12 @@ void Host::OnAchievementsRefreshed()
 
 void Host::OnCoverDownloaderOpenRequested()
 {
+	WARNING_LOG("Cover downloading is unavailable on Horizon");
 }
 
 void Host::OnCreateMemoryCardOpenRequested()
 {
+	WARNING_LOG("The memory card editor is unavailable on Horizon");
 }
 
 bool Host::ShouldPreferHostFileSelector()
@@ -410,6 +434,7 @@ bool Host::ShouldPreferHostFileSelector()
 void Host::OpenHostFileSelectorAsync(std::string_view title, bool select_directory, FileSelectorCallback callback,
 	FileSelectorFilters filters, std::string_view initial_directory)
 {
+	WARNING_LOG("The Horizon host file selector is unavailable; using the FullscreenUI browser instead");
 	callback({});
 }
 

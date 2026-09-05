@@ -8,9 +8,12 @@
 #include "common/Horizon/Horizon.h"
 #include "common/Path.h"
 
+#include "pcsx2/Achievements.h"
 #include "pcsx2/Config.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/INISettingsInterface.h"
+#include "pcsx2/ImGui/FullscreenUI.h"
+#include "pcsx2/ImGui/ImGuiFullscreen.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/MTGS.h"
 #include "pcsx2/VMManager.h"
@@ -119,6 +122,23 @@ namespace
 		return true;
 	}
 
+	void ReportInitialBootFailure(const VMBootResult result, const Error& error)
+	{
+		const std::string message = error.IsValid() ? error.GetDescription() : "The virtual machine could not be started.";
+		ERROR_LOG("Failed to boot launch image: {} (result {})", message, static_cast<int>(result));
+
+		if (FullscreenUI::IsInitialized())
+		{
+			MTGS::RunOnGSThread([message]() {
+				ImGuiFullscreen::OpenInfoMessageDialog("Startup Error", message);
+			});
+		}
+		else
+		{
+			HorizonHost::RequestExit();
+		}
+	}
+
 	bool BootInitialImage(const char* image_path)
 	{
 		if (!image_path || image_path[0] == '\0')
@@ -132,20 +152,36 @@ namespace
 
 		VMBootParameters boot_params;
 		boot_params.filename = image_path;
-		const VMBootResult result = VMManager::Initialize(boot_params);
-		if (result != VMBootResult::StartupSuccess)
-		{
-			ERROR_LOG("Failed to boot '{}': VM initialization result {}", image_path, static_cast<int>(result));
-			return false;
-		}
+		auto hardcore_disable_callback = [](std::string reason, VMBootRestartCallback restart_callback) {
+			if (!FullscreenUI::IsInitialized())
+			{
+				ERROR_LOG("Launch image requires disabling RetroAchievements Hardcore Mode: {}", reason);
+				HorizonHost::RequestExit();
+				return;
+			}
 
-		VMManager::SetState(VMState::Running);
+			MTGS::RunOnGSThread([reason = std::move(reason), restart_callback = std::move(restart_callback)]() mutable {
+				ImGuiFullscreen::OpenConfirmMessageDialog(Achievements::GetHardcoreModeDisableTitle(),
+					Achievements::GetHardcoreModeDisableText(reason.c_str()),
+					[restart_callback = std::move(restart_callback)](bool confirmed) mutable {
+						if (confirmed)
+							Host::RunOnCPUThread(std::move(restart_callback));
+					});
+			});
+		};
+		auto done_callback = [](VMBootResult result, const Error& error) {
+			if (result == VMBootResult::StartupSuccess)
+				VMManager::SetState(VMState::Running);
+			else
+				ReportInitialBootFailure(result, error);
+		};
+		VMManager::InitializeAsync(boot_params, std::move(hardcore_disable_callback), std::move(done_callback));
 		return true;
 	}
 
 	void RunMainLoop()
 	{
-		while (!HorizonHost::IsExitRequested() && appletMainLoop())
+		while (appletMainLoop())
 		{
 			Host::PumpMessagesOnCPUThread();
 			ProcessAppletLifecycle();
@@ -161,7 +197,7 @@ namespace
 					break;
 
 				case VMState::Stopping:
-					VMManager::Shutdown(false);
+					VMManager::Shutdown(HorizonHost::TakeResumeSaveRequest());
 					break;
 
 				case VMState::Paused:
@@ -173,6 +209,9 @@ namespace
 				case VMState::Initializing:
 					break;
 			}
+
+			if (HorizonHost::IsExitRequested() && VMManager::GetState() == VMState::Shutdown)
+				break;
 		}
 
 		HorizonHost::RequestExit();
@@ -248,15 +287,15 @@ int main(int argc, char* argv[])
 		HorizonHost::RequestExit();
 	}
 
-	if (!HorizonHost::IsExitRequested() && argc > 1)
-		BootInitialImage(argv[1]);
+	if (!HorizonHost::IsExitRequested() && argc > 1 && !BootInitialImage(argv[1]) && !FullscreenUI::IsInitialized())
+		HorizonHost::RequestExit();
 
 	RunMainLoop();
 
 	appletUnhook(&applet_hook);
 	Host::CancelGameListRefresh();
-	if (VMManager::HasValidVM())
-		VMManager::Shutdown(false);
+	if (VMManager::GetState() != VMState::Shutdown)
+		VMManager::Shutdown(HorizonHost::TakeResumeSaveRequest());
 	if (MTGS::IsOpen())
 		MTGS::WaitForClose();
 	VMManager::Internal::CPUThreadShutdown();

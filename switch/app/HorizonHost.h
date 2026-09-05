@@ -11,4 +11,7 @@ namespace HorizonHost
 
 	void RequestExit();
 	bool IsExitRequested();
+
+	void RequestVMShutdown(bool save_resume_state);
+	bool TakeResumeSaveRequest();
 } // namespace HorizonHost
