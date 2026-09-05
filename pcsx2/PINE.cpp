@@ -59,6 +59,20 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#elif defined(__SWITCH__)
+#define read_portable(a, b, c) (read(a, b, c))
+#define write_portable(a, b, c) (write(a, b, c))
+#define safe_close_portable(a) \
+	do \
+	{ \
+		if ((a) >= 0) \
+		{ \
+			close((a)); \
+			(a) = -1; \
+		} \
+	} while (0)
+#include <sys/socket.h>
+#include <unistd.h>
 #else
 #define read_portable(a, b, c) (read(a, b, c))
 #define write_portable(a, b, c) (write(a, b, c))
@@ -90,7 +104,7 @@
 // and then admits nobody. Loopback TCP is the transport Android actually supports reaching into:
 // "adb forward" bridges a device port to the workstation, which is what makes a handheld
 // debuggable from a desk at all.
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__SWITCH__)
 #define PINE_TCP_TRANSPORT 1
 #endif
 
