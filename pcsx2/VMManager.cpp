@@ -60,7 +60,12 @@
 #include "IconsFontAwesome.h"
 #include "IconsPromptFont.h"
 #include "cpuinfo.h"
+// Horizon does not link discord-rpc (no <sys/*> transport and no desktop client);
+// the Discord Rich Presence integration compiles out there.
+#if !defined(__SWITCH__)
 #include "discord_rpc.h"
+#define PCSX2_HAS_DISCORD 1
+#endif
 #include "fmt/format.h"
 
 #include <atomic>
@@ -219,10 +224,12 @@ static u64 s_session_accumulated_playtime = 0;
 static bool s_screensaver_inhibited = false;
 
 static bool s_discord_presence_active = false;
+#ifdef PCSX2_HAS_DISCORD
 static time_t s_discord_presence_time_epoch;
 static const char* s_discord_presence_app_id = "1458595419499139094";
 static const char* s_discord_presence_large_image_key = "4k-pcsx2";
 static const char* s_discord_presence_large_image_text = "PCSX2 PS2 Emulator";
+#endif
 
 // Making GSDumpReplayer.h dependent on R5900.h is a no-no, since the GS uses it.
 extern R5900cpu GSDumpReplayerCpu;
@@ -4364,11 +4371,13 @@ void VMManager::InitializeDiscordPresence()
 	if (s_discord_presence_active)
 		return;
 
+#ifdef PCSX2_HAS_DISCORD
 	DiscordEventHandlers handlers = {};
 	Discord_Initialize(s_discord_presence_app_id, &handlers, 0, nullptr);
 	s_discord_presence_active = true;
 
 	UpdateDiscordPresence(true);
+#endif
 }
 
 void VMManager::ShutdownDiscordPresence()
@@ -4376,10 +4385,12 @@ void VMManager::ShutdownDiscordPresence()
 	if (!s_discord_presence_active)
 		return;
 
+#ifdef PCSX2_HAS_DISCORD
 	Discord_ClearPresence();
 	Discord_RunCallbacks();
 	Discord_Shutdown();
 	s_discord_presence_active = false;
+#endif
 }
 
 void VMManager::UpdateDiscordPresence(bool update_session_time)
@@ -4387,6 +4398,7 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 	if (!s_discord_presence_active)
 		return;
 
+#ifdef PCSX2_HAS_DISCORD
 	if (update_session_time)
 		s_discord_presence_time_epoch = std::time(nullptr);
 
@@ -4424,6 +4436,9 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 
 	Discord_UpdatePresence(&rp);
 	Discord_RunCallbacks();
+#else
+	(void)update_session_time;
+#endif
 }
 
 void VMManager::PollDiscordPresence()
@@ -4431,7 +4446,9 @@ void VMManager::PollDiscordPresence()
 	if (!s_discord_presence_active)
 		return;
 
+#ifdef PCSX2_HAS_DISCORD
 	Discord_RunCallbacks();
+#endif
 }
 
 bool VMManager::WriteBytesToEESIORXFIFO(const std::span<const u8> data)
