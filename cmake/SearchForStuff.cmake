@@ -40,6 +40,7 @@ if(HORIZON)
 	add_library(WebP::libwebp ALIAS webp)
 
 	set(PLUTOSVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+	set(PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD ON CACHE BOOL "" FORCE)
 	add_subdirectory(3rdparty/plutovg EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/plutosvg EXCLUDE_FROM_ALL)
 
