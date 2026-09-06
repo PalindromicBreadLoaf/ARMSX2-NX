@@ -240,15 +240,17 @@ if (USE_GCC AND CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 	set_source_files_properties(FastJmp.cpp PROPERTIES COMPILE_FLAGS -fno-lto)
 endif()
 
-if(NOT WIN32 AND NOT ANDROID AND NOT IOS AND NOT HORIZON)
+if(NOT WIN32 AND NOT ANDROID AND NOT IOS)
 	# libcurl-based HTTPDownloader (Android uses HTTPDownloaderAndroid instead)
 	target_sources(common PRIVATE
 		HTTPDownloaderCurl.cpp
 		HTTPDownloaderCurl.h
 	)
-	target_link_libraries(common PRIVATE
-		CURL::libcurl
-	)
+	if(HORIZON)
+		target_link_libraries(common PRIVATE curl)
+	else()
+		target_link_libraries(common PRIVATE CURL::libcurl)
+	endif()
 endif()
 
 target_link_libraries(common PRIVATE

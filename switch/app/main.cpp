@@ -7,6 +7,7 @@
 #include "common/FileSystem.h"
 #include "common/Horizon/Horizon.h"
 #include "common/Path.h"
+#include "common/ScopedGuard.h"
 
 #include "pcsx2/Achievements.h"
 #include "pcsx2/Config.h"
@@ -470,6 +471,19 @@ int main(int argc, char* argv[])
 
 	Log::SetTimestampsEnabled(true);
 	VMManager::Internal::SetFileLogPath(Path::Combine(LOGS_DIR, "emulog.txt"));
+
+	const bool network_available = R_SUCCEEDED(socketInitializeDefault());
+	if (!network_available)
+		WARNING_LOG("socketInitializeDefault() failed");
+	const bool ssl_available = network_available && R_SUCCEEDED(sslInitialize(4));
+	if (network_available && !ssl_available)
+		WARNING_LOG("sslInitialize() failed");
+	const ScopedGuard network_guard([network_available, ssl_available]() {
+		if (ssl_available)
+			sslExit();
+		if (network_available)
+			socketExit();
+	});
 
 	const bool romfs_available = R_SUCCEEDED(romfsInit());
 	EmuFolders::AppRoot = ARMSX2_ROOT;
