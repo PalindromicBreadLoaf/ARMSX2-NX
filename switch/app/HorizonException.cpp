@@ -4,9 +4,12 @@
 
 #include "HorizonException.h"
 
-#include <switch.h>
+#include "common/HostSys.h"
+#include "common/Horizon/Horizon.h"
+#include "common/Horizon/HorizonFastmem.h"
 
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -14,12 +17,48 @@
 
 extern "C"
 {
-	alignas(0x1000) u8 __nx_exception_stack[0x1000];
-	u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+	alignas(0x1000) u8 __nx_exception_stack[EXCEPTION_SLOT_COUNT][EXCEPTION_STACK_SIZE];
+	u64 __nx_exception_stack_size = EXCEPTION_STACK_SIZE;
+	alignas(EXCEPTION_SLOT_SIZE) u8 g_horizon_exception_slots[EXCEPTION_SLOT_COUNT][EXCEPTION_SLOT_SIZE];
+	volatile u32 g_horizon_exception_slot_mask;
 }
 
 namespace
 {
+	struct ExceptionSlot
+	{
+		ThreadExceptionDump dump;
+		u8 padding[SLOT_FRAME - sizeof(ThreadExceptionDump)];
+		void* frame;
+		u32 index;
+		u8 tail[EXCEPTION_SLOT_SIZE - SLOT_INDEX - sizeof(u32)];
+	};
+
+	static_assert(sizeof(ExceptionSlot) == EXCEPTION_SLOT_SIZE);
+	static_assert(offsetof(ExceptionSlot, frame) == SLOT_FRAME);
+	static_assert(offsetof(ExceptionSlot, index) == SLOT_INDEX);
+
+	static_assert(offsetof(ThreadExceptionDump, error_desc) == DUMP_ERROR_DESC);
+	static_assert(offsetof(ThreadExceptionDump, cpu_gprs) == DUMP_GPRS);
+	static_assert(offsetof(ThreadExceptionDump, fp) == DUMP_FP);
+	static_assert(offsetof(ThreadExceptionDump, lr) == DUMP_LR);
+	static_assert(offsetof(ThreadExceptionDump, sp) == DUMP_SP);
+	static_assert(offsetof(ThreadExceptionDump, pc) == DUMP_PC);
+	static_assert(offsetof(ThreadExceptionDump, fpu_gprs) == DUMP_FPU);
+	static_assert(offsetof(ThreadExceptionDump, pstate) == DUMP_PSTATE);
+	static_assert(offsetof(ThreadExceptionDump, esr) == DUMP_ESR);
+	static_assert(offsetof(ThreadExceptionDump, far) == DUMP_FAR);
+
+	static_assert(offsetof(ThreadExceptionFrameA64, lr) == FRAME_LR);
+	static_assert(offsetof(ThreadExceptionFrameA64, sp) == FRAME_SP);
+	static_assert(offsetof(ThreadExceptionFrameA64, elr_el1) == FRAME_PC);
+	static_assert(offsetof(ThreadExceptionFrameA64, pstate) == FRAME_PSTATE);
+	static_assert(offsetof(ThreadExceptionFrameA64, esr) == FRAME_ESR);
+	static_assert(offsetof(ThreadExceptionFrameA64, far) == FRAME_FAR);
+
+	constexpr u32 ESR_EC_DATA_ABORT_LOWER = 0x24;
+	constexpr u32 ESR_EC_DATA_ABORT_SAME = 0x25;
+
 	int s_report_fd = -1;
 
 	const char* DescribeError(u32 error_desc)
@@ -62,8 +101,33 @@ namespace
 	};
 } // namespace
 
+bool HorizonFastmem::HasResumableFaultHandler()
+{
+	return true;
+}
+
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx)
 {
+	if (threadExceptionIsAArch64(ctx))
+	{
+		const u32 exception_class = (ctx->esr >> 26) & 0x3f;
+		if (exception_class == ESR_EC_DATA_ABORT_LOWER || exception_class == ESR_EC_DATA_ABORT_SAME)
+		{
+			const uptr fault_address = static_cast<uptr>(ctx->far.x);
+
+			if (HorizonFastmem::ResolveFault(fault_address))
+				return;
+
+			const bool is_write = (ctx->esr & (1u << 6)) != 0;
+			if (PageFaultHandler::HandlePageFault(reinterpret_cast<void*>(ctx->pc.x),
+					reinterpret_cast<void*>(fault_address), is_write) ==
+				PageFaultHandler::HandlerResult::ContinueExecution)
+			{
+				return;
+			}
+		}
+	}
+
 	Report report;
 	report.Append("\n===== ARMSX2-NX crash report =====\n");
 	report.Append("tick=%016lx aarch64=%d\n", svcGetSystemTick(),

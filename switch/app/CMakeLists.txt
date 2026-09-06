@@ -2,14 +2,18 @@
 # Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
 # SPDX-License-Identifier: GPL-3.0+
 
+enable_language(ASM)
+
 add_executable(armsx2
 	main.cpp
 	HorizonHost.cpp
 	HorizonUsbStorage.cpp
 	HorizonException.cpp
+	HorizonExceptionEntry.S
 )
 
-set_source_files_properties(HorizonException.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
+set_source_files_properties(HorizonException.cpp HorizonExceptionEntry.S
+	PROPERTIES COMPILE_OPTIONS "-fno-lto")
 
 # USB mass-storage support
 include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/UsbHsFs.cmake")

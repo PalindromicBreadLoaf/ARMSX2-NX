@@ -6,6 +6,7 @@
 #include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/Horizon/Horizon.h"
+#include "common/Horizon/HorizonFastmem.h"
 #include "common/Path.h"
 #include "common/ScopedGuard.h"
 
@@ -474,6 +475,11 @@ int main(int argc, char* argv[])
 
 	Log::SetTimestampsEnabled(true);
 	VMManager::Internal::SetFileLogPath(Path::Combine(LOGS_DIR, "emulog.txt"));
+
+	if (HorizonFastmem::IsSupported())
+		INFO_LOG("Horizon fastmem available: {}", HorizonFastmem::GetSupportReason());
+	else
+		INFO_LOG("Horizon fastmem unavailable: {}", HorizonFastmem::GetSupportReason());
 
 	const bool network_available = R_SUCCEEDED(socketInitializeDefault());
 	if (!network_available)

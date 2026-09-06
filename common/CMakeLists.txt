@@ -194,6 +194,8 @@ elseif(HORIZON)
 	target_sources(common PRIVATE
 		Horizon/Horizon.h
 		Horizon/HorizonCompat.cpp
+		Horizon/HorizonFastmem.cpp
+		Horizon/HorizonFastmem.h
 		Horizon/HorizonHostSys.cpp
 		Horizon/HorizonMisc.cpp
 		Horizon/HorizonNet.cpp
