@@ -29,6 +29,7 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
@@ -234,12 +235,33 @@ namespace
 		return true;
 	}
 
+	bool s_keyboard_shown_for_focus = false;
+
+	void ProcessSoftwareKeyboard()
+	{
+		if (!ImGuiManager::WantsTextInput())
+		{
+			s_keyboard_shown_for_focus = false;
+			return;
+		}
+
+		if (s_keyboard_shown_for_focus)
+			return;
+		s_keyboard_shown_for_focus = true;
+
+		HorizonHost::SoftwareKeyboardParameters params;
+		params.guide_text = "Enter text";
+		if (std::optional<std::string> text = HorizonHost::ShowSoftwareKeyboard(params); text.has_value())
+			ImGuiManager::AddTextInput(std::move(text.value()));
+	}
+
 	void RunMainLoop()
 	{
 		while (appletMainLoop())
 		{
 			Host::PumpMessagesOnCPUThread();
 			ProcessAppletLifecycle();
+			ProcessSoftwareKeyboard();
 
 			if (HorizonUsbStorage::ConsumeChange())
 			{

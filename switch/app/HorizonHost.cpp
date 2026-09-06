@@ -5,6 +5,7 @@
 #include "HorizonHost.h"
 
 #include "common/Console.h"
+#include "common/Horizon/Horizon.h"
 #include "common/ProgressCallback.h"
 #include "common/Threading.h"
 #include "common/WindowInfo.h"
@@ -20,6 +21,7 @@
 #include "pcsx2/MTGS.h"
 #include "pcsx2/VMManager.h"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -29,6 +31,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -43,6 +46,8 @@ namespace
 
 	std::mutex s_gamelist_refresh_mutex;
 	std::thread s_gamelist_refresh_thread;
+
+	constexpr std::size_t SOFTWARE_KEYBOARD_MAX_LENGTH = 500;
 } // namespace
 
 void HorizonHost::SetCPUThread()
@@ -91,6 +96,58 @@ void HorizonHost::RequestVMShutdown(bool save_resume_state)
 bool HorizonHost::TakeResumeSaveRequest()
 {
 	return s_save_resume_state.exchange(false, std::memory_order_acq_rel);
+}
+
+std::optional<std::string> HorizonHost::ShowSoftwareKeyboard(const SoftwareKeyboardParameters& params)
+{
+	if (!IsCPUThread())
+	{
+		ERROR_LOG("The software keyboard must be shown from the main thread");
+		return std::nullopt;
+	}
+
+	SwkbdConfig keyboard;
+	if (R_FAILED(swkbdCreate(&keyboard, 0)))
+	{
+		ERROR_LOG("Failed to create the Horizon software keyboard");
+		return std::nullopt;
+	}
+
+	if (params.password)
+		swkbdConfigMakePresetPassword(&keyboard);
+	else
+		swkbdConfigMakePresetDefault(&keyboard);
+
+	if (!params.guide_text.empty())
+		swkbdConfigSetGuideText(&keyboard, params.guide_text.c_str());
+	if (!params.initial_text.empty())
+		swkbdConfigSetInitialText(&keyboard, params.initial_text.c_str());
+	if (!params.ok_text.empty())
+		swkbdConfigSetOkButtonText(&keyboard, params.ok_text.c_str());
+
+	const std::size_t max_length = std::clamp<std::size_t>(params.max_length, 1, SOFTWARE_KEYBOARD_MAX_LENGTH);
+	swkbdConfigSetStringLenMax(&keyboard, static_cast<u32>(max_length));
+
+	const bool renderer_open = MTGS::IsOpen();
+	if (renderer_open)
+	{
+		MTGS::RunOnGSThread([]() { MTGS::SetRunIdle(false); });
+		MTGS::WaitGS(false);
+	}
+
+	std::vector<char> buffer(max_length + 1, '\0');
+	const Result result = swkbdShow(&keyboard, buffer.data(), buffer.size());
+	swkbdClose(&keyboard);
+
+	if (renderer_open)
+		MTGS::RunOnGSThread([]() { MTGS::SetRunIdle(true); });
+
+	std::optional<std::string> output;
+	if (R_SUCCEEDED(result) && buffer[0] != '\0')
+		output.emplace(buffer.data());
+
+	std::fill(buffer.begin(), buffer.end(), '\0');
+	return output;
 }
 
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
@@ -189,7 +246,8 @@ int Host::LocaleSensitiveCompare(std::string_view lhs, std::string_view rhs)
 
 void Host::BeginTextInput()
 {
-	WARNING_LOG("Text input is unavailable until the Horizon software keyboard is implemented");
+	// The Horizon software keyboard is a modal library driven by
+	// ImGuiManager::WantsTextInput().
 }
 
 void Host::EndTextInput()
