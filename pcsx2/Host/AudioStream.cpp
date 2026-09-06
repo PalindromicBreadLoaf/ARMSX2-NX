@@ -124,6 +124,11 @@ std::unique_ptr<AudioStream> AudioStream::CreateStream(AudioBackend backend, u32
 			return CreateOboeAudioStream(sample_rate, parameters, stretch_enabled, error);
 #endif
 
+#ifdef __SWITCH__
+		case AudioBackend::Audout:
+			return CreateAudoutAudioStream(sample_rate, parameters, stretch_enabled, error);
+#endif
+
 		case AudioBackend::Null:
 			return CreateNullStream(sample_rate, parameters.buffer_ms);
 
@@ -155,12 +160,14 @@ static constexpr const std::array s_backend_names = {
 	"Cubeb",
 	"SDL",
 	"Oboe",
+	"Audout",
 };
 static constexpr const std::array s_backend_display_names = {
 	TRANSLATE_NOOP("AudioStream", "Null (No Output)"),
 	TRANSLATE_NOOP("AudioStream", "Cubeb"),
 	TRANSLATE_NOOP("AudioStream", "SDL"),
 	TRANSLATE_NOOP("AudioStream", "Oboe"),
+	TRANSLATE_NOOP("AudioStream", "Audout"),
 };
 
 std::optional<AudioBackend> AudioStream::ParseBackendName(const char* str)

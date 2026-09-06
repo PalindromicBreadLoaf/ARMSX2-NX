@@ -1236,6 +1236,11 @@ if(ARCH_ARM64 OR ANDROID OR ARMSX2_IOS)
 		SPU2/spu2_neon.h)
 endif()
 
+if(HORIZON)
+	list(APPEND pcsx2HostSources
+		Host/AudoutAudioStream.cpp)
+endif()
+
 if(ANDROID)
 	list(APPEND pcsx2HostSources
 		Host/OboeAudioStream.cpp)

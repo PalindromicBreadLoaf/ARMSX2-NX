@@ -156,6 +156,10 @@ private:
 	static std::unique_ptr<AudioStream> CreateOboeAudioStream(u32 sample_rate, const AudioStreamParameters& parameters,
 		bool stretch_enabled, Error* error);
 
+	// libnx audout backend. Defined in Host/AudoutAudioStream.cpp.
+	static std::unique_ptr<AudioStream> CreateAudoutAudioStream(u32 sample_rate, const AudioStreamParameters& parameters,
+		bool stretch_enabled, Error* error);
+
 	void AllocateBuffer();
 	void DestroyBuffer();
 
