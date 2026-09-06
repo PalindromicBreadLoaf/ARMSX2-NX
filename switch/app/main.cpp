@@ -22,6 +22,7 @@
 #include "pcsx2/SIO/Pad/PadDualshock2.h"
 #include "pcsx2/VMManager.h"
 
+#include "HorizonException.h"
 #include "HorizonHost.h"
 #include "HorizonUsbStorage.h"
 
@@ -469,6 +470,8 @@ int main(int argc, char* argv[])
 	mkdir(GAMES_DIR, 0777);
 	mkdir(LOGS_DIR, 0777);
 
+	HorizonException::Initialize(LOGS_DIR);
+
 	Log::SetTimestampsEnabled(true);
 	VMManager::Internal::SetFileLogPath(Path::Combine(LOGS_DIR, "emulog.txt"));
 
@@ -564,6 +567,7 @@ int main(int argc, char* argv[])
 
 	if (romfs_available)
 		romfsExit();
+	HorizonException::Shutdown();
 	appletUnlockExit();
 	return 0;
 }

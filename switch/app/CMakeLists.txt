@@ -6,7 +6,10 @@ add_executable(armsx2
 	main.cpp
 	HorizonHost.cpp
 	HorizonUsbStorage.cpp
+	HorizonException.cpp
 )
+
+set_source_files_properties(HorizonException.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 
 # USB mass-storage support
 include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/UsbHsFs.cmake")
