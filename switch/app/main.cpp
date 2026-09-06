@@ -22,6 +22,7 @@
 #include "pcsx2/VMManager.h"
 
 #include "HorizonHost.h"
+#include "HorizonUsbStorage.h"
 
 #include <algorithm>
 #include <array>
@@ -39,6 +40,9 @@ namespace
 	constexpr const char* LOGS_DIR = "sdmc:/switch/armsx2/logs";
 	constexpr const char* SETTINGS_PATH = "sdmc:/switch/armsx2/armsx2.ini";
 	constexpr u64 IDLE_POLL_NS = 8'000'000ULL;
+
+	constexpr const char* USB_SETTINGS_SECTION = "Horizon";
+	constexpr const char* USB_GAME_ROOTS_KEY = "ManagedUsbGameRoots";
 
 	constexpr u64 INPUT_POLL_NS = 16'000'000ULL;
 	constexpr float STICK_DEADZONE = 0.15f;
@@ -114,6 +118,44 @@ namespace
 
 		VMManager::Internal::LoadStartupSettings();
 		return true;
+	}
+
+	bool SyncUsbGameRoots()
+	{
+		std::vector<std::string> roots;
+		for (const HorizonUsbStorage::Volume& volume : HorizonUsbStorage::GetVolumes())
+			roots.push_back(volume.root);
+
+		auto lock = Host::GetSettingsLock();
+		const std::vector<std::string> old_roots =
+			s_settings_interface->GetStringList(USB_SETTINGS_SECTION, USB_GAME_ROOTS_KEY);
+		if (roots == old_roots)
+			return false;
+
+		for (const std::string& root : old_roots)
+			s_settings_interface->RemoveFromStringList("GameList", "RecursivePaths", root.c_str());
+		for (const std::string& root : roots)
+			s_settings_interface->AddToStringList("GameList", "RecursivePaths", root.c_str());
+
+		s_settings_interface->SetStringList(USB_SETTINGS_SECTION, USB_GAME_ROOTS_KEY, roots);
+
+		Error error;
+		if (!s_settings_interface->Save(&error))
+			ERROR_LOG("Failed to save USB game roots: {}", error.GetDescription());
+		return true;
+	}
+
+	void LogUsbVolumes()
+	{
+		const std::vector<HorizonUsbStorage::Volume> volumes = HorizonUsbStorage::GetVolumes();
+		if (volumes.empty())
+		{
+			INFO_LOG("USB storage disconnected");
+			return;
+		}
+
+		for (const HorizonUsbStorage::Volume& volume : volumes)
+			INFO_LOG("USB volume '{}' mounted at {} ({})", volume.label, volume.root, volume.filesystem);
 	}
 
 	bool InitializeFullscreenUI()
@@ -198,6 +240,13 @@ namespace
 		{
 			Host::PumpMessagesOnCPUThread();
 			ProcessAppletLifecycle();
+
+			if (HorizonUsbStorage::ConsumeChange())
+			{
+				LogUsbVolumes();
+				if (SyncUsbGameRoots() && FullscreenUI::IsInitialized())
+					Host::RefreshGameListAsync(false);
+			}
 
 			switch (VMManager::GetState())
 			{
@@ -435,6 +484,18 @@ int main(int argc, char* argv[])
 	HorizonHost::SetCPUThread();
 	VMManager::ApplySettings();
 
+	if (HorizonUsbStorage::Initialize())
+	{
+		SyncUsbGameRoots();
+		LogUsbVolumes();
+		HorizonUsbStorage::ConsumeChange();
+	}
+	else
+	{
+		SyncUsbGameRoots();
+		WARNING_LOG("{}", HorizonUsbStorage::GetError());
+	}
+
 	AppletHookCookie applet_hook{};
 	appletHook(&applet_hook, AppletHookCallback, nullptr);
 
@@ -458,6 +519,7 @@ int main(int argc, char* argv[])
 
 	appletUnhook(&applet_hook);
 	Host::CancelGameListRefresh();
+	HorizonUsbStorage::Shutdown();
 	if (VMManager::GetState() != VMState::Shutdown)
 		VMManager::Shutdown(HorizonHost::TakeResumeSaveRequest());
 	if (MTGS::IsOpen())

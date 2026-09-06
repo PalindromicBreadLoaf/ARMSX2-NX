@@ -5,7 +5,11 @@
 add_executable(armsx2
 	main.cpp
 	HorizonHost.cpp
+	HorizonUsbStorage.cpp
 )
+
+# USB mass-storage support
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/UsbHsFs.cmake")
 
 target_include_directories(armsx2 PRIVATE
 	"${CMAKE_BINARY_DIR}/common/include"
@@ -28,6 +32,7 @@ target_link_libraries(armsx2 PRIVATE
 	${ARMSX2_CORE_LINK_TARGETS}
 	PCSX2_FLAGS
 	-Wl,--end-group
+	usbhsfs
 )
 
 nx_generate_nacp(OUTPUT armsx2.nacp

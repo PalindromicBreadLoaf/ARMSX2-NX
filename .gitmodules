@@ -1,0 +1,3 @@
+[submodule "switch/externals/libusbhsfs"]
+	path = switch/externals/libusbhsfs
+	url = https://github.com/DarkMatterCore/libusbhsfs.git
