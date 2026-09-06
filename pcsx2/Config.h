@@ -316,6 +316,7 @@ enum class GSRendererType : s8
 	VK = 14,
 	Metal = 17,
 	DX12 = 15,
+	DK3D = 18,
 };
 
 enum class GSVSyncMode : u8

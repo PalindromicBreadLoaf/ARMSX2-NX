@@ -37,6 +37,10 @@
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #endif
 
+#ifdef __SWITCH__
+#include "GS/Renderers/DK3D/GSDeviceDK.h"
+#endif
+
 #ifdef _WIN32
 
 #include "GS/Renderers/DX11/GSDevice11.h"
@@ -98,6 +102,11 @@ static RenderAPI GetAPIForRenderer(GSRendererType renderer)
 		case GSRendererType::VK:
 			return RenderAPI::Vulkan;
 
+#ifdef __SWITCH__
+		case GSRendererType::DK3D:
+			return RenderAPI::DK3D;
+#endif
+
 #ifdef _WIN32
 		case GSRendererType::DX11:
 			return RenderAPI::D3D11;
@@ -149,6 +158,12 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 #ifdef ENABLE_VULKAN
 		case RenderAPI::Vulkan:
 			g_gs_device = std::make_unique<GSDeviceVK>();
+			break;
+#endif
+
+#ifdef __SWITCH__
+		case RenderAPI::DK3D:
+			g_gs_device = std::make_unique<GSDeviceDK>();
 			break;
 #endif
 

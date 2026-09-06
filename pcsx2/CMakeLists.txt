@@ -1239,6 +1239,13 @@ endif()
 if(HORIZON)
 	list(APPEND pcsx2HostSources
 		Host/AudoutAudioStream.cpp)
+	# deko3d GS backend.
+	list(APPEND pcsx2GSSources
+		GS/Renderers/DK3D/GSDeviceDK.cpp
+		GS/Renderers/DK3D/GSTextureDK.cpp)
+	list(APPEND pcsx2GSHeaders
+		GS/Renderers/DK3D/GSDeviceDK.h
+		GS/Renderers/DK3D/GSTextureDK.h)
 endif()
 
 if(ANDROID)

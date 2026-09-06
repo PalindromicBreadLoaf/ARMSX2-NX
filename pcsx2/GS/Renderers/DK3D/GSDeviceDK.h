@@ -1,0 +1,293 @@
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// Copyright(c) 2026: PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
+// SPDX-License-Identifier: GPL-3.0+
+
+#pragma once
+
+#include "GS/Renderers/Common/GSDevice.h"
+#include "GS/Renderers/Common/GSTexture.h"
+
+#ifdef __SWITCH__
+#include "GS/Renderers/DK3D/GSTextureDK.h"
+
+#include <deko3d.h>
+#include <memory>
+#include <vector>
+#endif
+
+// deko3d hardware GS backend for the Nintendo Switch only.
+class GSDeviceDK final : public GSDevice
+{
+public:
+	GSDeviceDK();
+	~GSDeviceDK() override;
+
+	RenderAPI GetRenderAPI() const override;
+	bool Create(GSVSyncMode vsync_mode, bool allow_present_throttle) override;
+
+	bool HasSurface() const override;
+	void DestroySurface() override;
+	bool UpdateWindow() override;
+	void ResizeWindow(u32 new_window_width, u32 new_window_height, float new_window_scale) override;
+	bool SupportsExclusiveFullscreen() const override;
+
+	PresentResult DoBeginPresent(bool frame_skip) override;
+	void EndPresent() override;
+	void SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle) override;
+
+	std::string GetDriverInfo() const override;
+	bool SetGPUTimingEnabled(bool enabled) override;
+	float GetAndResetAccumulatedGPUTime() override;
+	bool SetGPUPipelineStatisticsEnabled(bool enabled) override { return false; }
+	GPUPipelineStatistics GetAndResetAccumulatedGPUPipelineStatistics() override { return {}; }
+
+	void PushDebugGroup(const char* fmt, ...) override;
+	void PopDebugGroup() override;
+	void InsertDebugMessage(DebugMessageCategory category, const char* fmt, ...) override;
+
+	std::unique_ptr<GSDownloadTexture> CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format) override;
+
+#ifdef __SWITCH__
+	// Record a render-target to buffer copy into the current frame command buffer
+	void ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMemBlock dst_block, u32 dst_offset);
+	// Submit the pending readback copy and wait only on it
+	void FlushReadback();
+	// Record a buffer to image copy into the current frame command buffer
+	bool UploadToImage(GSTextureDK* dst, const DkImageView& view, const DkImageRect& rect, const void* data,
+		u32 src_pitch, u32 upload_pitch, u32 num_rows);
+	// Record a mip-chain downsample into the current frame command buffer
+	void GenerateImageMipmaps(GSTextureDK* tex, DkImage* image, int width, int height, int levels);
+
+	// Pool equivalent DkMemBlocks instead of redoing them every texture
+	DkMemBlock AcquireMemBlock(u32 size, u32 flags);
+	void ReleaseMemBlock(DkMemBlock block, u32 size, u32 flags);
+#endif
+
+	void DoCopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY) override;
+	void PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
+		PresentShader shader, float shaderTime, Filter filter) override;
+	void DoUpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex,
+		u32 dOffset, u32 dSize) override;
+	void DoConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM,
+		GSTexture* dTex, u32 DBW, u32 DPSM) override;
+	void DoFilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32 downsample_factor,
+		const GSVector2i& clamp_min, const GSVector4& dRect) override;
+
+	void DoRenderHW(GSHWDrawConfig& config) override;
+	void ClearSamplerCache() override;
+
+protected:
+	GSTexture* CreateSurface(GSTexture::Usage usage, int width, int height, int levels, GSTexture::Format format) override;
+
+	using GSDevice::DoStretchRect; // Suppress overloaded virtual function warning
+	void DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
+		ShaderConvertSelector shader, Filter filter) override;
+
+	void DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
+		const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter) override;
+	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
+		ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) override;
+	void DoFXAA(GSTexture* sTex, GSTexture* dTex) override;
+	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) override;
+	bool DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only,
+		const std::array<u32, NUM_CAS_CONSTANTS>& constants) override;
+
+#ifdef __SWITCH__
+private:
+	static constexpr unsigned NUM_FRAMEBUFFERS = 3;
+	static constexpr unsigned NUM_FRAMES_IN_FLIGHT = 3;
+	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 1024;
+	static constexpr unsigned SAMPLER_POINT = 0;
+	static constexpr unsigned SAMPLER_LINEAR = 4;
+	static constexpr unsigned NUM_SAMPLERS = 8;
+	static constexpr u64 MEMBLOCK_POOL_MAX_BYTES = 64 * 1024 * 1024;
+
+	bool CreateDeviceObjects();
+	void DestroyDeviceObjects();
+	bool LoadShaders();
+	bool SetupSamplers();
+	void BeginFrameIfNeeded();
+	// deko3d cbAddMem hook for command streams that exceed CMDBUF_SIZE.
+	static void AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minReqSize);
+	void AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize);
+	// Flushes a pending ClearRenderTarget
+	void CommitClear(GSTextureDK* tex);
+	// Optional cb is fragment uniform buffer 0 for post-processing shaders.
+	void DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
+		const DkShader* fragment_shader, bool linear, const void* cb = nullptr, u32 cb_size = 0,
+		bool depth_output = false, u32 color_write_mask = 0xf, bool alpha_blend = false, bool integer_output = false);
+	void DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
+		ShaderConvert shader, bool linear, u32 color_write_mask);
+	// Bump-allocate into per-frame stream buffers and return the GPU address.
+	DkGpuAddr StreamVertices(const void* data, u32 size);
+	DkGpuAddr StreamIndices(const void* data, u32 size);
+	DkGpuAddr StreamUniform(const void* data, u32 size);
+	u32 PushImage(const GSTextureDK* tex);
+	// Draw tfx geometry, splitting barriers for feedback-loop reads.
+	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
+	// Write stencil=1 to pixels that pass the destination-alpha test.
+	void SetupDATE(GSTextureDK* rt, GSTextureDK* ds, SetDATM datm, const GSVector4i& bbox);
+	// Return the PrimID image to bind for the main draw.
+	GSTextureDK* SetupPrimitiveTrackingDATE(GSHWDrawConfig& config);
+	// Present ImGui over game frame
+	void RenderImGui();
+	// Forget the cached tfx pipeline state so the next HW draw re-binds it
+	void InvalidateHWStateCache()
+	{
+		m_hw_invariants_bound = false;
+		m_hw_uniforms_valid = false;
+		m_hw_tex_valid = false;
+	}
+	// Issue a deko3d barrier and stop image generation if the image cache was marked
+	void IssueBarrier(DkBarrier mode, u32 invalidate_flags);
+	// GPU-side timestamp report into the per-frame timing slot
+	void WriteGPUTimestamp(u32 frame_index, u32 which);
+	// Harvest the start/end timestamps of a finished frame into m_accumulated_gpu_time.
+	void ReadGPUTimestamps(u32 frame_index);
+
+	DkDevice m_device = nullptr;
+	DkQueue m_queue = nullptr;
+	DkMemBlock m_fb_memblock = nullptr;
+	DkImage m_framebuffers[NUM_FRAMEBUFFERS] = {};
+	DkSwapchain m_swapchain = nullptr;
+
+	// Buffer frame's GPU resources so the CPU can record frame N+1 while the GPU is still executing frame N.
+	struct FrameContext
+	{
+		DkMemBlock cmdbuf_memblock = nullptr;
+		DkCmdBuf cmdbuf = nullptr;
+		DkMemBlock vertex_memblock = nullptr;
+		DkMemBlock index_memblock = nullptr;
+		DkMemBlock uniform_memblock = nullptr;
+		DkMemBlock staging_memblock = nullptr;
+		DkFence fence{};
+		bool fence_pending = false;
+		bool timestamp_written = false;
+	};
+	FrameContext m_frames[NUM_FRAMES_IN_FLIGHT] = {};
+	u32 m_frame_index = 0;
+
+	DkMemBlock m_cmdbuf_memblock = nullptr;
+	DkCmdBuf m_cmdbuf = nullptr;
+
+	// Convert/present
+	DkMemBlock m_code_memblock = nullptr;
+	DkShader m_convert_vsh{};
+	DkShader m_copy_fsh{};
+	DkShader m_convert_fsh{};
+	DkShader m_convert_int_fsh{};
+	bool m_convert_shaders_ok = false;
+
+	// Texture cache converts
+	DkShader m_downsample_fsh{};
+	DkShader m_clut_fsh{};
+	DkShader m_convert_8i_fsh{};
+	bool m_texconvert_shaders_ok = false;
+
+	// Destination-alpha (DATE)
+	DkShader m_date_fsh{};        // stencil setup
+	DkShader m_primid_init_fsh{}; // PrimID prefill
+	bool m_date_shaders_ok = false;
+
+	// The fragment shader is specialised at build time from tfx_fsh.glsl
+	// SelectTfxVariant picks the cheapest one a draw can use.
+	enum TfxVariant : u32
+	{
+		TfxVariantUber = 0,     // full runtime-selected shader
+		TfxVariantOpaque,       // no RT read / channel / depth / shuffle / dither
+		TfxVariantPalette,      // opaque with single tap palette point sampling
+		TfxVariantFast,         // opaque with single tap point sampling, no palette
+		TfxVariantFeedback,     // keeps RT read but folds channel/depth/shuffle/dither
+		TfxVariantFeedbackPalette, // feedback with single-tap palette point sampling
+		TfxVariantFeedbackFast, // feedback with single-tap point sampling, no palette
+		NumTfxVariants,
+	};
+	static u32 SelectTfxVariant(const GSHWDrawConfig& config);
+
+	DkShader m_tfx_vsh{};
+	DkShader m_tfx_fsh[NumTfxVariants]{};
+	bool m_tfx_shaders_ok = false;
+
+	// Skip re-emitting binds that match the previous HW draw
+	bool m_hw_invariants_bound = false;
+	u32 m_hw_tfx_variant = TfxVariantUber;
+	u32 m_hw_blend_key = 0;
+	u32 m_hw_colormask = 0;
+	u32 m_hw_depth_key = 0;
+
+	// Skip redoing cb_vs/cb_ps/selector when they match the prior draw
+	bool m_hw_uniforms_valid = false;
+	bool m_hw_last_has_tex = false;
+	GSHWDrawConfig::VSConstantBuffer m_hw_last_vs{};
+	GSHWDrawConfig::PSConstantBuffer m_hw_last_ps{};
+	GSHWDrawConfig::PSSelector m_hw_last_pssel{};
+
+	// Skip re-pushing/binding the tfx source when a run of draws reuses them
+	bool m_hw_tex_valid = false;
+	const GSTextureDK* m_hw_last_tex = nullptr;
+	const GSTextureDK* m_hw_last_pal = nullptr;
+	u32 m_hw_last_sampler = 0;
+
+	// Post-processing fragment shaders
+	DkShader m_interlace_fsh{};
+	DkShader m_shadeboost_fsh{};
+	DkShader m_fxaa_fsh{};
+	DkShader m_merge_fsh{};
+	DkShader m_yuv_fsh{};
+	bool m_postprocess_shaders_ok = false;
+
+	// ImGui
+	DkShader m_imgui_vsh{};
+	DkShader m_imgui_fsh{};
+	bool m_imgui_shaders_ok = false;
+
+	// CAS compute shader
+	DkShader m_cas_csh{};
+	bool m_cas_shader_ok = false;
+
+	DkMemBlock m_descriptor_memblock = nullptr;
+	DkGpuAddr m_image_descriptor_set = 0;
+	DkGpuAddr m_sampler_descriptor_set = 0;
+	u32 m_next_image_slot = 0;
+
+	DkMemBlock m_vertex_memblock = nullptr;
+	u32 m_vertex_offset = 0;
+	DkMemBlock m_index_memblock = nullptr;
+	u32 m_index_offset = 0;
+	DkMemBlock m_uniform_memblock = nullptr;
+	u32 m_uniform_offset = 0;
+	// Texture upload staging ring
+	DkMemBlock m_staging_memblock = nullptr;
+	u32 m_staging_offset = 0;
+
+	// Free-list of destroyed texture/readback memblocks
+	struct PooledMemBlock
+	{
+		DkMemBlock block;
+		u32 size;
+		u32 flags;
+	};
+	std::vector<PooledMemBlock> m_memblock_pool;
+	u64 m_memblock_pool_bytes = 0;
+	void DrainMemBlockPool();
+
+	DkImageView m_swapchain_view{};
+	bool m_frame_active = false;
+
+	// Bumped by every image-invalidating barrier.
+	u64 m_gpu_write_gen = 1;
+
+	DkFence m_readback_fence{};
+	bool m_readback_pending = false;
+
+	// GPU-busy %
+	DkMemBlock m_timestamp_memblock = nullptr;
+	bool m_gpu_timing_enabled = false;
+	float m_accumulated_gpu_time = 0.0f;
+
+	u32 m_framebuffer_size = 0;
+	int m_present_width = 0;
+	int m_present_height = 0;
+	int m_present_slot = -1;
+#endif
+};

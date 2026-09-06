@@ -576,6 +576,15 @@ void PerformanceMetrics::SetGSBackThread(Threading::ThreadHandle thread)
 	s_gs_back_thread_handle = std::move(thread);
 }
 
+// TODO: no-op placeholders for the deko3d backend's GS wait instrumentation.
+void PerformanceMetrics::AccumulateGSAcquireWait(u64 ns)
+{
+}
+
+void PerformanceMetrics::AccumulateGSGpuWait(u64 ns)
+{
+}
+
 u64 PerformanceMetrics::GetFrameNumber()
 {
 	return s_frame_number;

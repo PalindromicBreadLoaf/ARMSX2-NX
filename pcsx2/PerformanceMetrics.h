@@ -62,6 +62,10 @@ namespace PerformanceMetrics
 	/// "GS" figure alone reads as a ~50% drop in GS cost that never happened.
 	void SetGSBackThread(Threading::ThreadHandle thread);
 
+	/// TODO: GS-thread wait instrumentation fed by the deko3d backend.
+	void AccumulateGSAcquireWait(u64 ns);
+	void AccumulateGSGpuWait(u64 ns);
+
 	u64 GetFrameNumber();
 
 	InternalFPSMethod GetInternalFPSMethod();
