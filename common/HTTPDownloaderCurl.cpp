@@ -9,6 +9,13 @@
 
 #include "fmt/format.h"
 
+#ifdef __SWITCH__
+namespace Horizon
+{
+	bool EnsureNetworkInitialized();
+} // namespace Horizon
+#endif
+
 #include <algorithm>
 #include <functional>
 #include <pthread.h>
@@ -27,6 +34,14 @@ HTTPDownloaderCurl::~HTTPDownloaderCurl()
 
 std::unique_ptr<HTTPDownloader> HTTPDownloader::Create(std::string user_agent)
 {
+#ifdef __SWITCH__
+	if (!Horizon::EnsureNetworkInitialized())
+	{
+		Console.Error("Network unavailable; HTTP downloads are disabled");
+		return {};
+	}
+#endif
+
 	std::unique_ptr<HTTPDownloaderCurl> instance(std::make_unique<HTTPDownloaderCurl>());
 	if (!instance->Initialize(std::move(user_agent)))
 		return {};
