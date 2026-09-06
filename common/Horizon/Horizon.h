@@ -9,3 +9,14 @@
 #include <switch.h>
 #undef u128
 #undef s128
+
+namespace Horizon
+{
+	// Lazily brings up the BSD socket
+	bool EnsureNetworkInitialized();
+
+	// Init logging
+	void BreadcrumbInit(const char* report_dir);
+	void Breadcrumb(const char* message);
+	void BreadcrumbShutdown();
+} // namespace Horizon

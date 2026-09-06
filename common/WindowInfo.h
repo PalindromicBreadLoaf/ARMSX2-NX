@@ -22,7 +22,10 @@ struct WindowInfo
 		// intermediate). Frontend supplies no native window handle; the
 		// renderer enumerates displays itself. surface_width/surface_height
 		// carry the requested mode (0 = pick the display's preferred mode).
-		VulkanDirect
+		VulkanDirect,
+
+		// Nintendo Switch NWindow
+		VI
 	};
 
 	/// The type of the surface. Surfaceless indicates it will not be displayed on screen at all.

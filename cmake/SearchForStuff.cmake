@@ -67,8 +67,16 @@ if (WIN32)
 	find_package(DirectX-Headers 1.618.1 REQUIRED)
 endif()
 
-if(USE_VULKAN AND NOT HORIZON)
-	find_package(Shaderc REQUIRED)
+if(USE_VULKAN)
+	if(HORIZON)
+		add_subdirectory(3rdparty/glslang EXCLUDE_FROM_ALL)
+	else()
+		find_package(Shaderc REQUIRED)
+	endif()
+endif()
+
+if(HORIZON)
+	set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
 endif()
 
 # Platform-specific dependencies.

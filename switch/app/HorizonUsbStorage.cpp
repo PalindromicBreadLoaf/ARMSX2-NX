@@ -4,6 +4,8 @@
 
 #include "HorizonUsbStorage.h"
 
+#include "common/Horizon/Horizon.h"
+
 #include <usbhsfs.h>
 
 #include <atomic>

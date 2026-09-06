@@ -65,8 +65,15 @@
 #if !defined(__SWITCH__)
 #include "discord_rpc.h"
 #define PCSX2_HAS_DISCORD 1
+#else
+#include "common/Horizon/Horizon.h"
+#define VM_BOOT_BREADCRUMB(msg) Horizon::Breadcrumb(msg)
 #endif
 #include "fmt/format.h"
+
+#ifndef VM_BOOT_BREADCRUMB
+#define VM_BOOT_BREADCRUMB(msg) ((void)0)
+#endif
 
 #include <atomic>
 #include <mutex>
@@ -453,20 +460,25 @@ bool VMManager::Internal::CPUThreadInitialize()
 	x86Emitter::use_avx = g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX;
 #endif
 
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: LogCPUCapabilities");
 	LogCPUCapabilities();
 
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: SysMemory::Allocate");
 	if (!SysMemory::Allocate())
 	{
 		Host::ReportErrorAsync("Error", "Failed to allocate VM memory.");
 		return false;
 	}
 
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: InitializeCPUProviders");
 	InitializeCPUProviders();
 
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: USBinit");
 	USBinit();
 
 	// We want settings loaded so we choose the correct renderer for big picture mode.
 	// This also sorts out input sources.
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: LoadSettings");
 	LoadSettings();
 	Console.WriteLn(
 		"@@CPU_BACKEND@@ code_generation=%d ee_rec=%d iop_rec=%d vu0_rec=%d vu1_rec=%d fastmem=%d mtvu=%d",
@@ -478,13 +490,18 @@ bool VMManager::Internal::CPUThreadInitialize()
 		EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0,
 		EmuConfig.Speedhacks.vuThread ? 1 : 0);
 
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: Achievements");
 	if (EmuConfig.Achievements.Enabled && !Achievements::IsActive())
 		Achievements::Initialize();
 
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: ReloadPINE");
 	ReloadPINE();
 
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: DiscordPresence");
 	if (EmuConfig.EnableDiscordPresence)
 		InitializeDiscordPresence();
+
+	VM_BOOT_BREADCRUMB("CPUThreadInitialize: done");
 
 	// Check for advanced settings status and warn the user if its enabled
 	if (Host::GetBaseBoolSettingValue("UI", "ShowAdvancedSettings", false))
@@ -2858,6 +2875,9 @@ void VMManager::LogCPUCapabilities()
 	// cpuinfo_initialize() has already run unconditionally in
 	// CPUThreadInitialize, immediately before this function is called.
 	std::string extensions;
+#if defined(__SWITCH__)
+	extensions += "NEON CRC32 ";
+#else
 	if (cpuinfo_has_arm_neon())
 		extensions += "NEON ";
 	if (cpuinfo_has_arm_atomics())
@@ -2868,6 +2888,7 @@ void VMManager::LogCPUCapabilities()
 		extensions += "SVE ";
 	if (cpuinfo_has_arm_sve2())
 		extensions += "SVE2 ";
+#endif
 #endif
 
 	StringUtil::StripWhitespace(&extensions);
@@ -2902,13 +2923,19 @@ void VMManager::InitializeCPUProviders()
 		return;
 	}
 
+	VM_BOOT_BREADCRUMB("InitializeCPUProviders: recCpu.Reserve (EE)");
 	recCpu.Reserve();
+	VM_BOOT_BREADCRUMB("InitializeCPUProviders: psxRec.Reserve (IOP)");
 	psxRec.Reserve();
 
+	VM_BOOT_BREADCRUMB("InitializeCPUProviders: CpuMicroVU0.Reserve");
 	CpuMicroVU0.Reserve();
+	VM_BOOT_BREADCRUMB("InitializeCPUProviders: CpuMicroVU1.Reserve");
 	CpuMicroVU1.Reserve();
 
+	VM_BOOT_BREADCRUMB("InitializeCPUProviders: VifUnpackSSE_Init");
 	VifUnpackSSE_Init();
+	VM_BOOT_BREADCRUMB("InitializeCPUProviders: done");
 	s_cpu_providers_initialized = true;
 }
 

@@ -42,5 +42,7 @@ namespace HorizonException
 	void Initialize(const char* report_dir);
 
 	void Shutdown();
+
+	void Breadcrumb(const char* message);
 } // namespace HorizonException
 #endif

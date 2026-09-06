@@ -126,7 +126,9 @@ alignas(vixl::aarch64::MacroAssembler) static thread_local u8 s_armAsmStorage[si
 // macOS always has offset 0, so behavior there is unchanged.
 u8* armGetWritableCodePtr(u8* rx_ptr)
 {
-#ifdef __APPLE__
+#if defined(__SWITCH__)
+	return static_cast<u8*>(HostSys::JitGetWritablePointer(rx_ptr));
+#elif defined(__APPLE__)
 	// The alias translation applies only to addresses inside the dual-mapped
 	// JIT region (SetJitRange = the MmapCodeDualMap arena). Anything else —
 	// the Arm64BaseBlocks link tests patch static buffers, for instance —

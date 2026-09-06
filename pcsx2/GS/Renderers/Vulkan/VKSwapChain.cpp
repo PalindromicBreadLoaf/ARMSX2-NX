@@ -181,6 +181,29 @@ VkSurfaceKHR VKSwapChain::CreateVulkanSurface(VkInstance instance, VkPhysicalDev
 	}
 #endif
 
+#if defined(VK_USE_PLATFORM_VI_NN)
+	if (wi->type == WindowInfo::Type::VI)
+	{
+		// libnx NWindow* from nwindowGetDefault().
+		VkViSurfaceCreateInfoNN surface_create_info = {
+			VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN,
+			nullptr,
+			0,
+			wi->window_handle
+		};
+
+		VkSurfaceKHR surface;
+		VkResult res = vkCreateViSurfaceNN(instance, &surface_create_info, nullptr, &surface);
+		if (res != VK_SUCCESS)
+		{
+			LOG_VULKAN_ERROR(res, "vkCreateViSurfaceNN failed: ");
+			return VK_NULL_HANDLE;
+		}
+
+		return surface;
+	}
+#endif
+
 	// VK_KHR_display direct-to-monitor (kmsdrm handhelds). No compositor,
 	// no GBM, no native window handle from the frontend — the renderer
 	// enumerates displays itself.
@@ -625,6 +648,7 @@ bool VKSwapChain::CreateSwapChain()
 	// present mode regardless of WSI.
 	const bool use_triple =
 		(m_window_info.type == WindowInfo::Type::VulkanDirect) ||
+		(m_window_info.type == WindowInfo::Type::VI) ||
 		(m_present_mode == VK_PRESENT_MODE_MAILBOX_KHR);
 	u32 desired_image_count = use_triple ? 3 : 2;
 

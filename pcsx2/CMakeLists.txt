@@ -765,7 +765,11 @@ if(USE_VULKAN)
 		GS/Renderers/Vulkan/VKSwapChain.h
 	)
 	target_link_libraries(PCSX2_FLAGS INTERFACE vulkan-headers)
-	target_include_directories(PCSX2_FLAGS INTERFACE ${SHADERC_INCLUDE_DIR})
+	if(HORIZON)
+		target_link_libraries(PCSX2_FLAGS INTERFACE glslang)
+	else()
+		target_include_directories(PCSX2_FLAGS INTERFACE ${SHADERC_INCLUDE_DIR})
+	endif()
 	if(ANDROID AND CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
 		# VKLoader.cpp's adrenotools_open_libvulkan splice needs adrenotools/driver.h.
 		target_link_libraries(PCSX2_FLAGS INTERFACE adrenotools)
@@ -1032,6 +1036,11 @@ set(pcsx2FreeBSDSources
 	CDVD/Darwin/IOCtlSrc.cpp
 	)
 
+set(pcsx2HorizonSources
+	CDVD/Horizon/DriveUtility.cpp
+	CDVD/Horizon/IOCtlSrc.cpp
+	)
+
 # Linux headers
 set(pcsx2LinuxHeaders
 	)
@@ -1246,6 +1255,8 @@ if(HORIZON)
 	list(APPEND pcsx2GSHeaders
 		GS/Renderers/DK3D/GSDeviceDK.h
 		GS/Renderers/DK3D/GSTextureDK.h)
+	list(APPEND pcsx2Sources
+		Android/AndroidPcapStubs.cpp)
 endif()
 
 if(ANDROID)
@@ -1348,6 +1359,11 @@ if(LINUX)
 
 	target_link_libraries(PCSX2_FLAGS INTERFACE
 		PkgConfig::LIBUDEV
+	)
+elseif(HORIZON)
+	target_sources(PCSX2 PRIVATE
+		${pcsx2HorizonSources}
+		${pcsx2LinuxHeaders}
 	)
 endif()
 

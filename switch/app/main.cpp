@@ -8,7 +8,6 @@
 #include "common/Horizon/Horizon.h"
 #include "common/Horizon/HorizonFastmem.h"
 #include "common/Path.h"
-#include "common/ScopedGuard.h"
 
 #include "pcsx2/Achievements.h"
 #include "pcsx2/Config.h"
@@ -170,11 +169,13 @@ namespace
 			return false;
 		}
 
+		HorizonException::Breadcrumb("ImGuiManager::InitializeFullscreenUI ok; MTGS::WaitForOpen");
 		if (!MTGS::WaitForOpen())
 		{
 			ERROR_LOG("Failed to open the GS thread for FullscreenUI");
 			return false;
 		}
+		HorizonException::Breadcrumb("MTGS::WaitForOpen ok");
 
 		MTGS::RunOnGSThread([]() { MTGS::SetRunIdle(true); });
 		Host::RefreshGameListAsync(false);
@@ -480,21 +481,10 @@ int main(int argc, char* argv[])
 		INFO_LOG("Horizon fastmem available: {}", HorizonFastmem::GetSupportReason());
 	else
 		INFO_LOG("Horizon fastmem unavailable: {}", HorizonFastmem::GetSupportReason());
-
-	const bool network_available = R_SUCCEEDED(socketInitializeDefault());
-	if (!network_available)
-		WARNING_LOG("socketInitializeDefault() failed");
-	const bool ssl_available = network_available && R_SUCCEEDED(sslInitialize(4));
-	if (network_available && !ssl_available)
-		WARNING_LOG("sslInitialize() failed");
-	const ScopedGuard network_guard([network_available, ssl_available]() {
-		if (ssl_available)
-			sslExit();
-		if (network_available)
-			socketExit();
-	});
+	HorizonException::Breadcrumb("fastmem checked");
 
 	const bool romfs_available = R_SUCCEEDED(romfsInit());
+	HorizonException::Breadcrumb(romfs_available ? "romfsInit ok" : "romfsInit failed");
 	EmuFolders::AppRoot = ARMSX2_ROOT;
 	EmuFolders::DataRoot = ARMSX2_ROOT;
 	EmuFolders::Settings = Path::Combine(ARMSX2_ROOT, "inis");
@@ -507,6 +497,7 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
+	HorizonException::Breadcrumb("initializing settings");
 	if (!InitializeSettings())
 	{
 		ERROR_LOG("Failed to initialize Switch settings");
@@ -516,6 +507,7 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
+	HorizonException::Breadcrumb("CPUThreadInitialize");
 	if (!VMManager::Internal::CPUThreadInitialize())
 	{
 		ERROR_LOG("Failed to initialize the Switch frontend");
@@ -528,6 +520,7 @@ int main(int argc, char* argv[])
 
 	HorizonHost::SetCPUThread();
 	VMManager::ApplySettings();
+	HorizonException::Breadcrumb("settings applied");
 
 	if (HorizonUsbStorage::Initialize())
 	{
@@ -543,8 +536,10 @@ int main(int argc, char* argv[])
 
 	AppletHookCookie applet_hook{};
 	appletHook(&applet_hook, AppletHookCallback, nullptr);
+	HorizonException::Breadcrumb("USB + applet hook done");
 
 	const bool fullscreen_ui = Host::GetBaseBoolSettingValue("UI", "EnableFullscreenUI", true);
+	HorizonException::Breadcrumb(fullscreen_ui ? "initializing FullscreenUI (GS open)" : "FullscreenUI disabled");
 	if (fullscreen_ui && !InitializeFullscreenUI())
 		HorizonHost::RequestExit();
 	else if (!fullscreen_ui && argc < 2)
@@ -556,9 +551,12 @@ int main(int argc, char* argv[])
 	if (!HorizonHost::IsExitRequested() && argc > 1 && !BootInitialImage(argv[1]) && !FullscreenUI::IsInitialized())
 		HorizonHost::RequestExit();
 
+	HorizonException::Breadcrumb("starting input polling");
 	StartInputPolling();
 
+	HorizonException::Breadcrumb("entering main loop");
 	RunMainLoop();
+	HorizonException::Breadcrumb("main loop exited");
 
 	StopInputPolling();
 

@@ -50,6 +50,10 @@ namespace
 #include "common/ScopedGuard.h"
 #include "common/Timer.h"
 
+#ifdef __SWITCH__
+#include "common/Horizon/Horizon.h"
+#endif
+
 #include "imgui.h"
 
 #ifdef ARMSX2_HAS_LIBRASHADER
@@ -86,7 +90,11 @@ enum : u32
 	INDEX_BUFFER_SIZE = 16 * 1024 * 1024,
 	VERTEX_UNIFORM_BUFFER_SIZE = 8 * 1024 * 1024,
 	FRAGMENT_UNIFORM_BUFFER_SIZE = 8 * 1024 * 1024,
+#ifdef __SWITCH__
+	TEXTURE_BUFFER_SIZE = 32 * 1024 * 1024,
+#else
 	TEXTURE_BUFFER_SIZE = 64 * 1024 * 1024,
+#endif
 };
 
 
@@ -246,6 +254,10 @@ bool GSDeviceVK::SelectInstanceExtensions(ExtensionList* extension_list, const W
 #endif
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
 	if (wi.type == WindowInfo::Type::Android && !SupportsExtension(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME, true))
+		return false;
+#endif
+#if defined(VK_USE_PLATFORM_VI_NN)
+	if (wi.type == WindowInfo::Type::VI && !SupportsExtension(VK_NN_VI_SURFACE_EXTENSION_NAME, true))
 		return false;
 #endif
 
@@ -1105,7 +1117,7 @@ bool GSDeviceVK::ProcessDeviceExtensions()
 			m_optional_extensions.vk_ext_calibrated_timestamps = false;
 	}
 
-	m_optional_extensions.vk_swapchain_maintenance1 &= 
+	m_optional_extensions.vk_swapchain_maintenance1 &=
 		(swapchain_maintenance1_feature.swapchainMaintenance1 == VK_TRUE);
 
 	m_optional_extensions.vk_ext_fragment_shader_interlock &=
@@ -3250,6 +3262,15 @@ bool GSDeviceVK::CreateDeviceAndSwapChain()
 	if (!AcquireWindow(true))
 		return false;
 
+#ifdef __SWITCH__
+	m_window_info.type = WindowInfo::Type::VI;
+	m_window_info.window_handle = nwindowGetDefault();
+	m_window_info.surface_width = 1280;
+	m_window_info.surface_height = 720;
+	m_window_info.surface_scale = 1.0f;
+	m_window_info.surface_refresh_rate = 60.0f;
+#endif
+
 	// Libretro context sharing: the VkInstance comes from the frontend's
 	// negotiation interface. Function loading still goes through the wrapped
 	// vkGetInstanceProcAddr so vkCreateDevice/vkQueueSubmit get intercepted.
@@ -4266,7 +4287,7 @@ void GSDeviceVK::DoMultiStretchRects(
 	const MultiStretchRect* rects, u32 num_rects, GSTextureVK* dTex, ShaderConvertSelector shader)
 {
 	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
-	
+
 	// Set up vertices first.
 	const u32 vertex_reserve_size = num_rects * 4 * sizeof(GSVertexPT1);
 	const u32 index_reserve_size = num_rects * 6 * sizeof(u16);
@@ -5703,7 +5724,7 @@ bool GSDeviceVK::CompileConvertPipelines()
 		gpb.SetFragmentShader(ps);
 
 		VkPipeline pipe = gpb.Create(m_device, g_vulkan_shader_cache->GetPipelineCache(true), false);
-					
+
 		if (!pipe)
 			return false;
 
@@ -8236,7 +8257,7 @@ void GSDeviceVK::DoRenderHW(GSHWDrawConfig& config)
 		// Unbind to avoid conflicts with framebuffer
 		PSSetShaderResource(TFX_TEXTURE_RT, nullptr, false);
 	}
-	
+
 	if (pipe.IsDepthFeedbackLoop() && draw_ds)
 	{
 		pxAssertMsg(m_features.texture_barrier, "Texture barriers enabled");
@@ -8254,7 +8275,7 @@ void GSDeviceVK::DoRenderHW(GSHWDrawConfig& config)
 		// Unbind to avoid conflicts with framebuffer
 		PSSetShaderResource(TFX_TEXTURE_DEPTH, nullptr, false);
 	}
-	
+
 	PSSetROVs(draw_rt_rov, draw_ds_rov, config.ps.HasColorOutput(), config.ps.HasDepthROVWrite());
 
 	OMSetRenderTargets(draw_rt, draw_ds, config.scissor, static_cast<FeedbackLoopFlag>(pipe.feedback_loop_flags), rtsize);

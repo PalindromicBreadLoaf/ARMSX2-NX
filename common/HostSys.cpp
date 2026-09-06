@@ -14,6 +14,10 @@
 #include <sys/system_properties.h>
 #endif
 
+#if defined(__SWITCH__)
+#include <thread>
+#endif
+
 static u32 PAUSE_TIME = 0;
 
 static void MultiPause()
@@ -284,6 +288,20 @@ static std::string DetectArmCPUName()
 static CPUInfo CalcCPUInfo()
 {
 	CPUInfo out;
+
+#if defined(__SWITCH__)
+	if (!cpuinfo_initialize())
+	{
+		const unsigned hc = std::thread::hardware_concurrency();
+		out.name = "NVIDIA Tegra X1";
+		out.num_threads = hc ? hc : 4;
+		out.num_big_cores = out.num_threads;
+		out.num_small_cores = 0;
+		out.num_clusters = 1;
+		return out;
+	}
+#endif
+
 	const cpuinfo_package* pkg = cpuinfo_get_package(0);
 	out.name = (pkg && pkg->name[0] != '\0') ? pkg->name : "Unknown";
 

@@ -120,6 +120,12 @@ namespace HostSys
 	void FlushInstructionCache(void* address, u32 size);
 #endif
 
+#if defined(__SWITCH__)
+	void* JitGetWritablePointer(void* exec_ptr);
+#else
+	[[maybe_unused]] __fi static void* JitGetWritablePointer(void* exec_ptr) { return exec_ptr; }
+#endif
+
 	/// Returns the size of pages for the current host.
 	size_t GetRuntimePageSize();
 

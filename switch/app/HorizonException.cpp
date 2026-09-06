@@ -169,14 +169,24 @@ namespace HorizonException
 		char path[768];
 		std::snprintf(path, sizeof(path), "%s/crash.txt", report_dir);
 		s_report_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+
+		Horizon::BreadcrumbInit(report_dir);
+		Breadcrumb("HorizonException::Initialize");
 	}
 
 	void Shutdown()
 	{
+		Breadcrumb("HorizonException::Shutdown");
 		if (s_report_fd >= 0)
 		{
 			close(s_report_fd);
 			s_report_fd = -1;
 		}
+		Horizon::BreadcrumbShutdown();
+	}
+
+	void Breadcrumb(const char* message)
+	{
+		Horizon::Breadcrumb(message);
 	}
 } // namespace HorizonException

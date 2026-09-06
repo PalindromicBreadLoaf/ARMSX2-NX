@@ -40,7 +40,24 @@ target_link_libraries(armsx2 PRIVATE
 	PCSX2_FLAGS
 	-Wl,--end-group
 	usbhsfs
+	deko3d
 )
+
+if(USE_VULKAN OR USE_OPENGL)
+	find_package(PkgConfig REQUIRED)
+	if(USE_OPENGL)
+		pkg_check_modules(NXVK REQUIRED nxvk-gl)
+	else()
+		pkg_check_modules(NXVK REQUIRED nxvk)
+	endif()
+
+	# newlib shims required by NXVK.
+	target_sources(armsx2 PRIVATE nvk_compat.cpp)
+	target_include_directories(armsx2 PRIVATE ${NXVK_INCLUDE_DIRS})
+	target_compile_options(armsx2 PRIVATE ${NXVK_CFLAGS_OTHER})
+
+	target_link_libraries(armsx2 PRIVATE ${NXVK_LDFLAGS})
+endif()
 
 # uam live shader compilation
 find_program(UAM_EXE NAMES uam PATHS "$ENV{DEVKITPRO}/tools/bin" "${DEVKITPRO}/tools/bin" "/opt/devkitpro/tools/bin")
@@ -145,12 +162,10 @@ list(APPEND DK3D_DKSH_FILES "${DK3D_ROMFS_SHADER_DIR}/cas_csh.dksh")
 add_custom_target(armsx2_shaders DEPENDS ${DK3D_DKSH_FILES})
 add_dependencies(armsx2 armsx2_shaders)
 
-# Pack the compiled shaders into the NRO's ROMFS. The full runtime resources/
-# bundle (FullscreenUI assets, GameDB, fonts) is handled by the packaging phase.
+# Pack the compiled shaders into the NRO's ROMFS.
 dkp_add_asset_target(armsx2_romfs "${DK3D_ROMFS_DIR}")
 add_dependencies(armsx2_romfs armsx2_shaders)
 set_property(TARGET armsx2_romfs APPEND PROPERTY DKP_ASSET_FILES ${DK3D_DKSH_FILES})
-# -----------------------------------------------------------------------------
 
 nx_generate_nacp(OUTPUT armsx2.nacp
 	NAME "ARMSX2-NX"

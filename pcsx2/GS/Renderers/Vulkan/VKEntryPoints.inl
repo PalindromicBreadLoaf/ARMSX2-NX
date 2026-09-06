@@ -60,6 +60,10 @@ VULKAN_INSTANCE_ENTRY_POINT(vkCreateMetalSurfaceEXT, false)
 VULKAN_INSTANCE_ENTRY_POINT(vkCreateAndroidSurfaceKHR, false)
 #endif
 
+#if defined(VK_USE_PLATFORM_VI_NN)
+VULKAN_INSTANCE_ENTRY_POINT(vkCreateViSurfaceNN, false)
+#endif
+
 // VK_EXT_debug_utils
 VULKAN_INSTANCE_ENTRY_POINT(vkCmdBeginDebugUtilsLabelEXT, false)
 VULKAN_INSTANCE_ENTRY_POINT(vkCmdEndDebugUtilsLabelEXT, false)

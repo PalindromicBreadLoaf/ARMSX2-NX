@@ -214,6 +214,15 @@ size_t HostSys::GetRuntimeCacheLineSize()
 	return 64;
 }
 
+void* HostSys::JitGetWritablePointer(void* exec_ptr)
+{
+	std::lock_guard lock(s_code_mutex);
+	if (const HorizonCodeMapping* mapping = FindCodeMapping(exec_ptr))
+		return mapping->rw + (static_cast<u8*>(exec_ptr) - mapping->rx);
+
+	return exec_ptr;
+}
+
 void HostSys::FlushInstructionCache(void* address, u32 size)
 {
 	char* const rx = static_cast<char*>(address);
