@@ -25,11 +25,11 @@
 
 namespace
 {
-	constexpr u32 CMDBUF_SIZE = 8 * 1024 * 1024;
+	constexpr u32 CMDBUF_SIZE = 16 * 1024 * 1024;
 	constexpr u32 CODE_MEMSIZE = 256 * 1024;
-	constexpr u32 VERTEX_BUFFER_SIZE = 4 * 1024 * 1024;
-	constexpr u32 INDEX_BUFFER_SIZE = 2 * 1024 * 1024;
-	constexpr u32 UNIFORM_BUFFER_SIZE = 2 * 1024 * 1024;
+	constexpr u32 VERTEX_BUFFER_SIZE = 16 * 1024 * 1024;
+	constexpr u32 INDEX_BUFFER_SIZE = 8 * 1024 * 1024;
+	constexpr u32 UNIFORM_BUFFER_SIZE = 8 * 1024 * 1024;
 	// Holds a whole frame's texture uploads
 	constexpr u32 STAGING_BUFFER_SIZE = 16 * 1024 * 1024;
 	// Source base alignment for buffer to image copies
@@ -145,6 +145,16 @@ namespace
 	{
 		return (value + align - 1) & ~(align - 1);
 	}
+
+	void WarnStreamWrap(const char* which, u32 size)
+	{
+		static bool warned = false;
+		if (warned)
+			return;
+		warned = true;
+		Console.Warning("DK3D: %s stream ring (%u bytes) wrapped within a frame. Earlier draws may "
+						"be corrupted. Yell at PalindromicBreadLoaf to increase the buffer size.", which, size);
+	}
 } // namespace
 #endif
 
@@ -197,9 +207,11 @@ bool GSDeviceDK::CreateDeviceObjects()
 		Console.Error("DK3D deko3d error: context='%s' result=%d message='%s'", context ? context : "?",
 			static_cast<int>(result), message ? message : "?");
 	};
+	Horizon::Breadcrumb("DK3D: dkDeviceCreate");
 	m_device = dkDeviceCreate(&device_maker);
 	if (!m_device)
 		return false;
+	Horizon::Breadcrumb("DK3D: device created");
 
 	DkImageLayoutMaker layout_maker;
 	dkImageLayoutMakerDefaults(&layout_maker, m_device);
@@ -233,9 +245,11 @@ bool GSDeviceDK::CreateDeviceObjects()
 
 	DkSwapchainMaker swapchain_maker;
 	dkSwapchainMakerDefaults(&swapchain_maker, m_device, nwindowGetDefault(), swapchain_images, NUM_FRAMEBUFFERS);
+	Horizon::Breadcrumb("DK3D: dkSwapchainCreate");
 	m_swapchain = dkSwapchainCreate(&swapchain_maker);
 	if (!m_swapchain)
 		return false;
+	Horizon::Breadcrumb("DK3D: swapchain created");
 
 	// Successive frames overlap instead of serialising through dkQueueWaitIdle.
 	DkCmdBufMaker cmdbuf_maker;
@@ -296,9 +310,11 @@ bool GSDeviceDK::CreateDeviceObjects()
 	DkQueueMaker queue_maker;
 	dkQueueMakerDefaults(&queue_maker, m_device);
 	queue_maker.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute;
+	Horizon::Breadcrumb("DK3D: dkQueueCreate");
 	m_queue = dkQueueCreate(&queue_maker);
 	if (!m_queue)
 		return false;
+	Horizon::Breadcrumb("DK3D: queue created");
 
 	// Descriptor ring
 	const u32 descriptor_size = AlignUp(
@@ -323,7 +339,9 @@ bool GSDeviceDK::CreateDeviceObjects()
 	// Allow GSRendererHW to use software blending
 	m_features.texture_barrier = true;
 
+	Horizon::Breadcrumb("DK3D: LoadShaders");
 	LoadShaders();
+	Horizon::Breadcrumb("DK3D: LoadShaders done");
 	if (!m_convert_shaders_ok)
 		Console.Warning("DK3D: No shaders available. Things will be broken.");
 	else
@@ -415,6 +433,9 @@ void GSDeviceDK::BeginFrameIfNeeded()
 		PerformanceMetrics::AccumulateGSGpuWait(
 			static_cast<u64>(Common::Timer::ConvertValueToNanoseconds(Common::Timer::GetCurrentValue() - wait_start)));
 		ctx.fence_pending = false;
+		for (DkMemBlock block : ctx.extra_cmdbuf_memblocks)
+			dkMemBlockDestroy(block);
+		ctx.extra_cmdbuf_memblocks.clear();
 		// Frame is now complete
 		if (ctx.timestamp_written)
 		{
@@ -457,16 +478,31 @@ void GSDeviceDK::AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minRe
 
 void GSDeviceDK::AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize)
 {
-	// If a frame exceeds CMDBUF_SIZE, wrap instead of letting deko3d abort.
-	Console.Warning("DK3D: command buffer ring exhausted (need %zu bytes).", minReqSize);
-	dkCmdBufAddMemory(cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
+	const u32 size = AlignUp(std::max<u32>(static_cast<u32>(minReqSize), CMDBUF_SIZE), DK_MEMBLOCK_ALIGNMENT);
+	Console.Warning("DK3D: command buffer overflowed (need %zu bytes). Allocating %u more.", minReqSize, size);
+
+	DkMemBlockMaker memblock_maker;
+	dkMemBlockMakerDefaults(&memblock_maker, m_device, size);
+	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+	DkMemBlock block = dkMemBlockCreate(&memblock_maker);
+	if (!block)
+	{
+		Console.Error("DK3D: failed to allocate overflow command memory.");
+		return;
+	}
+
+	m_frames[m_frame_index].extra_cmdbuf_memblocks.push_back(block);
+	dkCmdBufAddMemory(cmdbuf, block, 0, size);
 }
 
 DkGpuAddr GSDeviceDK::StreamVertices(const void* data, u32 size)
 {
 	m_vertex_offset = AlignUp(m_vertex_offset, sizeof(ConvertVertex));
 	if (m_vertex_offset + size > VERTEX_BUFFER_SIZE)
+	{
+		WarnStreamWrap("vertex", VERTEX_BUFFER_SIZE);
 		m_vertex_offset = 0;
+	}
 	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_vertex_memblock)) + m_vertex_offset, data, size);
 	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_vertex_memblock) + m_vertex_offset;
 	m_vertex_offset += size;
@@ -477,7 +513,10 @@ DkGpuAddr GSDeviceDK::StreamIndices(const void* data, u32 size)
 {
 	m_index_offset = AlignUp(m_index_offset, sizeof(u32));
 	if (m_index_offset + size > INDEX_BUFFER_SIZE)
+	{
+		WarnStreamWrap("index", INDEX_BUFFER_SIZE);
 		m_index_offset = 0;
+	}
 	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_index_memblock)) + m_index_offset, data, size);
 	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_index_memblock) + m_index_offset;
 	m_index_offset += size;
@@ -488,7 +527,10 @@ DkGpuAddr GSDeviceDK::StreamUniform(const void* data, u32 size)
 {
 	m_uniform_offset = AlignUp(m_uniform_offset, DK_UNIFORM_BUF_ALIGNMENT);
 	if (m_uniform_offset + AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT) > UNIFORM_BUFFER_SIZE)
+	{
+		WarnStreamWrap("uniform", UNIFORM_BUFFER_SIZE);
 		m_uniform_offset = 0;
+	}
 	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_uniform_memblock)) + m_uniform_offset, data, size);
 	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_uniform_memblock) + m_uniform_offset;
 	m_uniform_offset += AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT);
@@ -509,6 +551,9 @@ u32 GSDeviceDK::PushImage(const GSTextureDK* tex)
 
 void GSDeviceDK::CommitClear(GSTextureDK* tex)
 {
+	// TODO: depth targets bail out here, so a deferred depth clear is never materialized when a
+	// depth texture is sampled as a convert/stretch source before it is ever bound as a depth
+	// attachment.
 	if (!tex || tex->IsDepth() || tex->GetState() != GSTexture::State::Cleared)
 		return;
 
@@ -803,6 +848,9 @@ void GSDeviceDK::DestroyDeviceObjects()
 			dkCmdBufDestroy(ctx.cmdbuf);
 			ctx.cmdbuf = nullptr;
 		}
+		for (DkMemBlock block : ctx.extra_cmdbuf_memblocks)
+			dkMemBlockDestroy(block);
+		ctx.extra_cmdbuf_memblocks.clear();
 		if (ctx.cmdbuf_memblock)
 		{
 			dkMemBlockDestroy(ctx.cmdbuf_memblock);
@@ -1204,6 +1252,9 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 	const DkImageRect src_rect = {static_cast<u32>(rect.left), static_cast<u32>(rect.top), 0,
 		static_cast<u32>(rect.width()), static_cast<u32>(rect.height()), 1};
 
+	// TODO: rowLength=0 packs GPU rows tight to rect.width(), but GSDownloadTextureDK uses the
+	// full-texture transfer pitch when use_transfer_pitch=false, so partial-width readbacks land
+	// at the wrong CPU stride.
 	const DkCopyBuf dst = {dkMemBlockGetGpuAddr(dst_block) + dst_offset, 0, 0};
 	dkCmdBufCopyImageToBuffer(m_cmdbuf, &src_view, &src_rect, &dst, 0);
 

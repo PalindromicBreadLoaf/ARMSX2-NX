@@ -21,11 +21,18 @@ layout(std140, binding = 1) uniform cb1
 	vec4 LODParams;
 	vec4 STRange;
 	ivec4 ChannelShuffle;
+	vec2 ChannelShuffleOffset;
 	vec2 TC_OffsetHack;
 	vec2 STScale;
 	mat4 DitherMatrix;
 	float ScaledScaleFactor;
 	float RcpScaleFactor;
+	float _pad0_cb1;
+	float _pad1_cb1;
+	float LineCovScale;
+	float _pad2_cb1;
+	float _pad3_cb1;
+	float _pad4_cb1;
 };
 
 layout(std140, binding = 0) uniform cbSel
@@ -612,7 +619,7 @@ vec4 ps_color()
 {
 	vec2 st = (sel_fst != 0u) ? v_ti.xy : (v_t.xy / v_t.w);
 	vec2 st_int = (sel_fst != 0u) ? v_ti.zw : (v_ti.zw / v_t.w);
-	ivec2 fc = ivec2(gl_FragCoord.xy);
+	ivec2 fc = ivec2(gl_FragCoord.xy + ChannelShuffleOffset);
 
 	vec4 T;
 	if (sel_channel == 1u)

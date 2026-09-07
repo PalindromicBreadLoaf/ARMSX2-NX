@@ -39,6 +39,10 @@
 
 #ifdef __SWITCH__
 #include "GS/Renderers/DK3D/GSDeviceDK.h"
+#include "common/Horizon/Horizon.h"
+#define GS_BREADCRUMB(msg) Horizon::Breadcrumb(msg)
+#else
+#define GS_BREADCRUMB(msg) ((void)0)
 #endif
 
 #ifdef _WIN32
@@ -172,10 +176,14 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 			return false;
 	}
 
+	GS_BREADCRUMB("OpenGSDevice: g_gs_device->Create");
 	bool okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
+	GS_BREADCRUMB("OpenGSDevice: Create returned");
 	if (okay)
 	{
+		GS_BREADCRUMB("OpenGSDevice: ImGuiManager::Initialize");
 		okay = ImGuiManager::Initialize();
+		GS_BREADCRUMB("OpenGSDevice: ImGuiManager::Initialize returned");
 		if (!okay)
 			Console.Error("Failed to initialize ImGuiManager");
 	}

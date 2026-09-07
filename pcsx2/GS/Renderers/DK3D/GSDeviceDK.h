@@ -156,6 +156,7 @@ private:
 	{
 		DkMemBlock cmdbuf_memblock = nullptr;
 		DkCmdBuf cmdbuf = nullptr;
+		std::vector<DkMemBlock> extra_cmdbuf_memblocks;
 		DkMemBlock vertex_memblock = nullptr;
 		DkMemBlock index_memblock = nullptr;
 		DkMemBlock uniform_memblock = nullptr;
