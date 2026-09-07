@@ -60,6 +60,7 @@ private:
 
 	std::unique_ptr<u8[]> m_map_buffer;
 	GSVector4i m_map_area = GSVector4i::zero();
+	int m_map_level = 0;
 };
 
 class GSDeviceDK;

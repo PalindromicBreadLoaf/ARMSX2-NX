@@ -10,28 +10,25 @@ layout (binding = 0) uniform sampler2D samp0;
 layout (std140, binding = 0) uniform cb
 {
 	uint variant;
+	uint bilinear;
 };
 
 // Subset of ShaderConvert handled here
 // This must match GSDevice.h enum ordering
-const uint COLCLIP_INIT           = 6u;
-const uint COLCLIP_RESOLVE        = 7u;
-const uint RTA_CORRECTION         = 8u;
-const uint RTA_DECORRECTION       = 9u;
-const uint TRANSPARENCY_FILTER    = 10u;
-const uint FLOAT32_TO_RGBA8       = 13u;
-const uint FLOAT32_TO_RGB8        = 14u;
-const uint FLOAT16_TO_RGB5A1      = 15u;
-const uint RGBA8_TO_FLOAT32       = 16u;
-const uint RGBA8_TO_FLOAT24       = 17u;
-const uint RGBA8_TO_FLOAT16       = 18u;
-const uint RGB5A1_TO_FLOAT16      = 19u;
-const uint RGBA8_TO_FLOAT32_BILN  = 20u;
-const uint RGBA8_TO_FLOAT24_BILN  = 21u;
-const uint RGBA8_TO_FLOAT16_BILN  = 22u;
-const uint RGB5A1_TO_FLOAT16_BILN = 23u;
-const uint FLOAT32_TO_FLOAT24     = 24u;
-const uint DEPTH_COPY             = 25u;
+const uint DEPTH_COPY            = 1u;
+const uint COLCLIP_INIT          = 7u;
+const uint COLCLIP_RESOLVE       = 8u;
+const uint RTA_CORRECTION        = 9u;
+const uint RTA_DECORRECTION      = 10u;
+const uint TRANSPARENCY_FILTER   = 11u;
+const uint DEPTH32_TO_RGBA8      = 14u;
+const uint DEPTH32_TO_RGB8       = 15u;
+const uint DEPTH16_TO_RGB5A1     = 16u;
+const uint RGBA8_TO_DEPTH32      = 17u;
+const uint RGBA8_TO_DEPTH24      = 18u;
+const uint RGBA8_TO_DEPTH16      = 19u;
+const uint RGB5A1_TO_DEPTH16     = 20u;
+const uint DEPTH32_TO_DEPTH24    = 21u;
 
 vec4 depth32_to_rgba8(float value)
 {
@@ -75,11 +72,11 @@ float rgb5a1_to_depth16(vec4 unorm)
 
 float rgba_texel_to_depth(vec4 c, uint v)
 {
-	if (v == RGBA8_TO_FLOAT32 || v == RGBA8_TO_FLOAT32_BILN)
+	if (v == RGBA8_TO_DEPTH32)
 		return rgba8_to_depth32(c);
-	if (v == RGBA8_TO_FLOAT24 || v == RGBA8_TO_FLOAT24_BILN)
+	if (v == RGBA8_TO_DEPTH24)
 		return rgba8_to_depth24(c);
-	if (v == RGBA8_TO_FLOAT16 || v == RGBA8_TO_FLOAT16_BILN)
+	if (v == RGBA8_TO_DEPTH16)
 		return rgba8_to_depth16(c);
 	return rgb5a1_to_depth16(c);
 }
@@ -127,31 +124,29 @@ void main()
 		vec4 c = texture(samp0, vTexCoord);
 		oColor = vec4(c.rgb, 1.0);
 	}
-	else if (variant == FLOAT32_TO_RGBA8 || variant == FLOAT32_TO_RGB8)
+	else if (variant == DEPTH32_TO_RGBA8 || variant == DEPTH32_TO_RGB8)
 	{
-		// FLOAT32_TO_RGB8 is the same conversion with alpha write-masked off (C++ side).
 		oColor = depth32_to_rgba8(texture(samp0, vTexCoord).r);
 	}
-	else if (variant == FLOAT16_TO_RGB5A1)
+	else if (variant == DEPTH16_TO_RGB5A1)
 	{
 		oColor = depth16_to_rgba8(texture(samp0, vTexCoord).r);
 	}
 	else if (variant == DEPTH_COPY)
 	{
 		gl_FragDepth = texture(samp0, vTexCoord).r;
+		oColor = vec4(gl_FragDepth);
 	}
-	else if (variant == FLOAT32_TO_FLOAT24)
+	else if (variant == DEPTH32_TO_DEPTH24)
 	{
 		uint val = uint(texture(samp0, vTexCoord).r * exp2(32.0)) & 0xFFFFFFu;
 		gl_FragDepth = float(val) * exp2(-32.0);
+		oColor = vec4(gl_FragDepth);
 	}
-	else if (variant >= RGBA8_TO_FLOAT32 && variant <= RGB5A1_TO_FLOAT16)
+	else if (variant >= RGBA8_TO_DEPTH32 && variant <= RGB5A1_TO_DEPTH16)
 	{
-		gl_FragDepth = rgba_texel_to_depth(texture(samp0, vTexCoord), variant);
-	}
-	else if (variant >= RGBA8_TO_FLOAT32_BILN && variant <= RGB5A1_TO_FLOAT16_BILN)
-	{
-		gl_FragDepth = biln_depth(variant);
+		gl_FragDepth = bilinear != 0u ? biln_depth(variant) : rgba_texel_to_depth(texture(samp0, vTexCoord), variant);
+		oColor = vec4(gl_FragDepth);
 	}
 	else
 	{

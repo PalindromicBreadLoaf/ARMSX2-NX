@@ -49,7 +49,8 @@ public:
 
 #ifdef __SWITCH__
 	// Record a render-target to buffer copy into the current frame command buffer
-	void ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMemBlock dst_block, u32 dst_offset);
+	void ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, u32 src_level, DkMemBlock dst_block,
+		u32 dst_offset, u32 dst_pitch);
 	// Submit the pending readback copy and wait only on it
 	void FlushReadback();
 	// Record a buffer to image copy into the current frame command buffer
@@ -107,6 +108,7 @@ private:
 	bool LoadShaders();
 	bool SetupSamplers();
 	void BeginFrameIfNeeded();
+	void SubmitFrame();
 	// deko3d cbAddMem hook for command streams that exceed CMDBUF_SIZE.
 	static void AddCmdMemoryThunk(void* userData, DkCmdBuf cmdbuf, size_t minReqSize);
 	void AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize);
@@ -115,13 +117,18 @@ private:
 	// Optional cb is fragment uniform buffer 0 for post-processing shaders.
 	void DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
 		const DkShader* fragment_shader, bool linear, const void* cb = nullptr, u32 cb_size = 0,
-		bool depth_output = false, u32 color_write_mask = 0xf, bool alpha_blend = false, bool integer_output = false);
+		bool depth_output = false, u32 color_write_mask = 0xf, bool alpha_blend = false);
 	void DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
-		ShaderConvert shader, bool linear, u32 color_write_mask);
+		ShaderConvertSelector selector, bool linear);
 	// Bump-allocate into per-frame stream buffers and return the GPU address.
 	DkGpuAddr StreamVertices(const void* data, u32 size);
 	DkGpuAddr StreamIndices(const void* data, u32 size);
 	DkGpuAddr StreamUniform(const void* data, u32 size);
+	void* ReserveStreamMemory(DkMemBlock& block, u32& offset, u32 size, u32 alignment, u32 capacity,
+		DkGpuAddr* gpu_addr);
+	DkMemBlock AllocateFrameMemory(u32 size);
+	void ReserveImageDescriptors(u32 count);
+	u32 PushImageDescriptor(const DkImageDescriptor& descriptor);
 	u32 PushImage(const GSTextureDK* tex);
 	// Draw tfx geometry, splitting barriers for feedback-loop reads.
 	void SendHWDraw(const GSHWDrawConfig& config, DkPrimitive primitive, bool one_barrier, bool full_barrier);
@@ -151,12 +158,23 @@ private:
 	DkImage m_framebuffers[NUM_FRAMEBUFFERS] = {};
 	DkSwapchain m_swapchain = nullptr;
 
+	struct PooledMemBlock
+	{
+		DkMemBlock block;
+		u32 size;
+		u32 flags;
+	};
+	void PoolMemBlock(const PooledMemBlock& block);
+
 	// Buffer frame's GPU resources so the CPU can record frame N+1 while the GPU is still executing frame N.
 	struct FrameContext
 	{
 		DkMemBlock cmdbuf_memblock = nullptr;
 		DkCmdBuf cmdbuf = nullptr;
 		std::vector<DkMemBlock> extra_cmdbuf_memblocks;
+		std::vector<DkMemBlock> extra_stream_memblocks;
+		std::vector<PooledMemBlock> retired_memblocks;
+		DkMemBlock descriptor_memblock = nullptr;
 		DkMemBlock vertex_memblock = nullptr;
 		DkMemBlock index_memblock = nullptr;
 		DkMemBlock uniform_memblock = nullptr;
@@ -247,6 +265,7 @@ private:
 	bool m_cas_shader_ok = false;
 
 	DkMemBlock m_descriptor_memblock = nullptr;
+	DkMemBlock m_sampler_memblock = nullptr;
 	DkGpuAddr m_image_descriptor_set = 0;
 	DkGpuAddr m_sampler_descriptor_set = 0;
 	u32 m_next_image_slot = 0;
@@ -262,12 +281,6 @@ private:
 	u32 m_staging_offset = 0;
 
 	// Free-list of destroyed texture/readback memblocks
-	struct PooledMemBlock
-	{
-		DkMemBlock block;
-		u32 size;
-		u32 flags;
-	};
 	std::vector<PooledMemBlock> m_memblock_pool;
 	u64 m_memblock_pool_bytes = 0;
 	void DrainMemBlockPool();

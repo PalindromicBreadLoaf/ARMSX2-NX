@@ -31,6 +31,7 @@ DkImageFormat GSTextureDK::LookupFormat(Format format, bool& is_depth)
 		case Format::ColorHDR:     return DkImageFormat_RGBA16_Float;
 		case Format::ColorClip:    return DkImageFormat_RGBA16_Unorm;
 		case Format::DepthStencil: is_depth = true; return DkImageFormat_ZF32_X24S8;
+		case Format::DepthColor:    return DkImageFormat_R32_Float;
 		case Format::UNorm8:       return DkImageFormat_R8_Unorm;
 		case Format::UInt16:       return DkImageFormat_R16_Uint;
 		case Format::UInt32:       return DkImageFormat_R32_Uint;
@@ -169,18 +170,20 @@ bool GSTextureDK::DoUpdate(const GSVector4i& r, const void* data, int pitch, int
 
 bool GSTextureDK::DoMap(GSMap& m, const GSVector4i* r, int layer)
 {
-	if (m_is_depth)
+	if (m_is_depth || layer < 0 || layer >= m_mipmap_levels)
 		return false;
 
-	const GSVector4i area = r ? *r : GetRect();
+	const GSVector4i area = r ? *r : GSVector4i(0, 0, std::max(1, m_size.x >> layer), std::max(1, m_size.y >> layer));
 	const int width = area.z - area.x;
 	const int height = area.w - area.y;
 	if (width <= 0 || height <= 0)
 		return false;
 
 	const u32 pitch = CalcUploadPitch(static_cast<u32>(width));
-	m_map_buffer = std::make_unique<u8[]>(static_cast<size_t>(pitch) * static_cast<size_t>(height));
+	const u32 rows = IsCompressedFormat() ? (static_cast<u32>(height) + 3) / 4 : static_cast<u32>(height);
+	m_map_buffer = std::make_unique<u8[]>(static_cast<size_t>(pitch) * rows);
 	m_map_area = area;
+	m_map_level = layer;
 	m.bits = m_map_buffer.get();
 	m.pitch = static_cast<int>(pitch);
 	return true;
@@ -192,7 +195,7 @@ void GSTextureDK::Unmap()
 		return;
 
 	const u32 pitch = CalcUploadPitch(static_cast<u32>(m_map_area.z - m_map_area.x));
-	DoUpdate(m_map_area, m_map_buffer.get(), static_cast<int>(pitch), 0);
+	DoUpdate(m_map_area, m_map_buffer.get(), static_cast<int>(pitch), m_map_level);
 	m_map_buffer.reset();
 }
 
@@ -264,7 +267,7 @@ void GSDownloadTextureDK::DoCopyFromTexture(
 	g_perfmon.Put(GSPerfMon::Readbacks, 1);
 
 	// Records the copy into the frame command buffer
-	m_device->ReadbackTexture(dktex, src, m_memblock, copy_offset);
+	m_device->ReadbackTexture(dktex, src, src_level, m_memblock, copy_offset, m_current_pitch);
 	m_needs_flush = true;
 }
 

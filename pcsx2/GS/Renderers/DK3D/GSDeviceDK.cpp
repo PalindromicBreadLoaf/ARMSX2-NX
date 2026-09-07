@@ -4,9 +4,6 @@
 
 #include "GS/Renderers/DK3D/GSDeviceDK.h"
 
-// CreateSurface falls back to null textures so GSRendererHW always gets one.
-#include "GS/Renderers/Null/GSDeviceNone.h"
-
 #include "GS/Renderers/Common/GSVertex.h"
 #include "GS/GSPerfMon.h"
 #include "PerformanceMetrics.h"
@@ -58,6 +55,15 @@ namespace
 		u32 depth_fmt, urban_chaos, tales;
 		u32 automatic_lod, manual_lod;
 	};
+	static_assert(sizeof(DKTfxSelector) == 208);
+	static_assert(sizeof(GSHWDrawConfig::VSConstantBuffer) == 48);
+	static_assert(sizeof(GSHWDrawConfig::PSConstantBuffer) == 272);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, ChannelShuffleOffset) == 144);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, TCOffsetHack) == 152);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, STScale) == 160);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, DitherMatrix) == 176);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, ScaleFactor) == 240);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, LineCovScale) == 256);
 
 	// Translate a PSSelector into the tfx ubershader's cbSel uniform
 	DKTfxSelector MakeTfxSelector(const GSHWDrawConfig::PSSelector& ps, bool has_tex)
@@ -141,19 +147,28 @@ namespace
 		}
 	}
 
+	// These values are embedded in convert_fsh.glsl and convert_int_fsh.glsl.
+	static_assert(static_cast<u32>(ShaderConvert::DEPTH_COPY) == 1);
+	static_assert(static_cast<u32>(ShaderConvert::RGB5A1_TO_16_BITS) == 2);
+	static_assert(static_cast<u32>(ShaderConvert::COLCLIP_INIT) == 7);
+	static_assert(static_cast<u32>(ShaderConvert::COLCLIP_RESOLVE) == 8);
+	static_assert(static_cast<u32>(ShaderConvert::RTA_CORRECTION) == 9);
+	static_assert(static_cast<u32>(ShaderConvert::RTA_DECORRECTION) == 10);
+	static_assert(static_cast<u32>(ShaderConvert::TRANSPARENCY_FILTER) == 11);
+	static_assert(static_cast<u32>(ShaderConvert::DEPTH32_TO_16_BITS) == 12);
+	static_assert(static_cast<u32>(ShaderConvert::DEPTH32_TO_32_BITS) == 13);
+	static_assert(static_cast<u32>(ShaderConvert::DEPTH32_TO_RGBA8) == 14);
+	static_assert(static_cast<u32>(ShaderConvert::DEPTH32_TO_RGB8) == 15);
+	static_assert(static_cast<u32>(ShaderConvert::DEPTH16_TO_RGB5A1) == 16);
+	static_assert(static_cast<u32>(ShaderConvert::RGBA8_TO_DEPTH32) == 17);
+	static_assert(static_cast<u32>(ShaderConvert::RGBA8_TO_DEPTH24) == 18);
+	static_assert(static_cast<u32>(ShaderConvert::RGBA8_TO_DEPTH16) == 19);
+	static_assert(static_cast<u32>(ShaderConvert::RGB5A1_TO_DEPTH16) == 20);
+	static_assert(static_cast<u32>(ShaderConvert::DEPTH32_TO_DEPTH24) == 21);
+
 	constexpr u32 AlignUp(u32 value, u32 align)
 	{
 		return (value + align - 1) & ~(align - 1);
-	}
-
-	void WarnStreamWrap(const char* which, u32 size)
-	{
-		static bool warned = false;
-		if (warned)
-			return;
-		warned = true;
-		Console.Warning("DK3D: %s stream ring (%u bytes) wrapped within a frame. Earlier draws may "
-						"be corrupted. Yell at PalindromicBreadLoaf to increase the buffer size.", which, size);
 	}
 } // namespace
 #endif
@@ -295,6 +310,13 @@ bool GSDeviceDK::CreateDeviceObjects()
 		ctx.staging_memblock = dkMemBlockCreate(&memblock_maker);
 		if (!ctx.staging_memblock)
 			return false;
+
+		dkMemBlockMakerDefaults(&memblock_maker, m_device,
+			AlignUp(NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor), DK_MEMBLOCK_ALIGNMENT));
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		ctx.descriptor_memblock = dkMemBlockCreate(&memblock_maker);
+		if (!ctx.descriptor_memblock)
+			return false;
 	}
 
 	// BeginFrameIfNeeded rotates frame aliases through NUM_FRAMES_IN_FLIGHT contexts
@@ -316,18 +338,13 @@ bool GSDeviceDK::CreateDeviceObjects()
 		return false;
 	Horizon::Breadcrumb("DK3D: queue created");
 
-	// Descriptor ring
-	const u32 descriptor_size = AlignUp(
-		NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor) + NUM_SAMPLERS * sizeof(DkSamplerDescriptor),
-		DK_MEMBLOCK_ALIGNMENT);
+	const u32 descriptor_size = AlignUp(NUM_SAMPLERS * sizeof(DkSamplerDescriptor), DK_MEMBLOCK_ALIGNMENT);
 	dkMemBlockMakerDefaults(&memblock_maker, m_device, descriptor_size);
 	memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	m_descriptor_memblock = dkMemBlockCreate(&memblock_maker);
-	if (!m_descriptor_memblock)
+	m_sampler_memblock = dkMemBlockCreate(&memblock_maker);
+	if (!m_sampler_memblock)
 		return false;
-	const DkGpuAddr descriptor_base = dkMemBlockGetGpuAddr(m_descriptor_memblock);
-	m_image_descriptor_set = descriptor_base;
-	m_sampler_descriptor_set = descriptor_base + NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor);
+	m_sampler_descriptor_set = dkMemBlockGetGpuAddr(m_sampler_memblock);
 
 	// GPU-timing report buffer
 	dkMemBlockMakerDefaults(&memblock_maker, m_device, DK_MEMBLOCK_ALIGNMENT);
@@ -380,12 +397,7 @@ bool GSDeviceDK::SetupSamplers()
 	}
 
 	// Samplers never change
-	dkCmdBufClear(m_cmdbuf);
-	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
-	dkCmdBufPushData(m_cmdbuf, m_sampler_descriptor_set, descriptors, sizeof(descriptors));
-	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
-	dkQueueWaitIdle(m_queue);
-	dkCmdBufClear(m_cmdbuf);
+	std::memcpy(dkMemBlockGetCpuAddr(m_sampler_memblock), descriptors, sizeof(descriptors));
 	return true;
 }
 
@@ -436,6 +448,12 @@ void GSDeviceDK::BeginFrameIfNeeded()
 		for (DkMemBlock block : ctx.extra_cmdbuf_memblocks)
 			dkMemBlockDestroy(block);
 		ctx.extra_cmdbuf_memblocks.clear();
+		for (DkMemBlock block : ctx.extra_stream_memblocks)
+			dkMemBlockDestroy(block);
+		ctx.extra_stream_memblocks.clear();
+		for (const PooledMemBlock& block : ctx.retired_memblocks)
+			PoolMemBlock(block);
+		ctx.retired_memblocks.clear();
 		// Frame is now complete
 		if (ctx.timestamp_written)
 		{
@@ -450,6 +468,8 @@ void GSDeviceDK::BeginFrameIfNeeded()
 	m_index_memblock = ctx.index_memblock;
 	m_uniform_memblock = ctx.uniform_memblock;
 	m_staging_memblock = ctx.staging_memblock;
+	m_descriptor_memblock = ctx.descriptor_memblock;
+	m_image_descriptor_set = dkMemBlockGetGpuAddr(m_descriptor_memblock);
 
 	dkCmdBufClear(m_cmdbuf);
 	dkCmdBufAddMemory(m_cmdbuf, m_cmdbuf_memblock, 0, CMDBUF_SIZE);
@@ -495,86 +515,120 @@ void GSDeviceDK::AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize)
 	dkCmdBufAddMemory(cmdbuf, block, 0, size);
 }
 
+DkMemBlock GSDeviceDK::AllocateFrameMemory(u32 size)
+{
+	DkMemBlockMaker maker;
+	dkMemBlockMakerDefaults(&maker, m_device, AlignUp(size, DK_MEMBLOCK_ALIGNMENT));
+	maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+	DkMemBlock block = dkMemBlockCreate(&maker);
+	if (!block)
+		pxFailRel("DK3D: failed to allocate frame stream memory.");
+	m_frames[m_frame_index].extra_stream_memblocks.push_back(block);
+	return block;
+}
+
+void* GSDeviceDK::ReserveStreamMemory(DkMemBlock& block, u32& offset, u32 size, u32 alignment,
+	u32 capacity, DkGpuAddr* gpu_addr)
+{
+	offset = AlignUp(offset, alignment);
+	if (size > dkMemBlockGetSize(block) - offset)
+	{
+		// Earlier commands keep referencing the old block until this frame's fence completes.
+		block = AllocateFrameMemory(std::max(size, capacity));
+		offset = 0;
+	}
+	void* const cpu_addr = static_cast<u8*>(dkMemBlockGetCpuAddr(block)) + offset;
+	*gpu_addr = dkMemBlockGetGpuAddr(block) + offset;
+	offset += size;
+	return cpu_addr;
+}
+
 DkGpuAddr GSDeviceDK::StreamVertices(const void* data, u32 size)
 {
-	m_vertex_offset = AlignUp(m_vertex_offset, sizeof(ConvertVertex));
-	if (m_vertex_offset + size > VERTEX_BUFFER_SIZE)
-	{
-		WarnStreamWrap("vertex", VERTEX_BUFFER_SIZE);
-		m_vertex_offset = 0;
-	}
-	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_vertex_memblock)) + m_vertex_offset, data, size);
-	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_vertex_memblock) + m_vertex_offset;
-	m_vertex_offset += size;
+	DkGpuAddr addr;
+	void* dst = ReserveStreamMemory(m_vertex_memblock, m_vertex_offset, size, alignof(GSVertex),
+		VERTEX_BUFFER_SIZE, &addr);
+	std::memcpy(dst, data, size);
 	return addr;
 }
 
 DkGpuAddr GSDeviceDK::StreamIndices(const void* data, u32 size)
 {
-	m_index_offset = AlignUp(m_index_offset, sizeof(u32));
-	if (m_index_offset + size > INDEX_BUFFER_SIZE)
-	{
-		WarnStreamWrap("index", INDEX_BUFFER_SIZE);
-		m_index_offset = 0;
-	}
-	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_index_memblock)) + m_index_offset, data, size);
-	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_index_memblock) + m_index_offset;
-	m_index_offset += size;
+	DkGpuAddr addr;
+	void* dst = ReserveStreamMemory(m_index_memblock, m_index_offset, size, sizeof(u32), INDEX_BUFFER_SIZE, &addr);
+	std::memcpy(dst, data, size);
 	return addr;
 }
 
 DkGpuAddr GSDeviceDK::StreamUniform(const void* data, u32 size)
 {
-	m_uniform_offset = AlignUp(m_uniform_offset, DK_UNIFORM_BUF_ALIGNMENT);
-	if (m_uniform_offset + AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT) > UNIFORM_BUFFER_SIZE)
-	{
-		WarnStreamWrap("uniform", UNIFORM_BUFFER_SIZE);
-		m_uniform_offset = 0;
-	}
-	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_uniform_memblock)) + m_uniform_offset, data, size);
-	const DkGpuAddr addr = dkMemBlockGetGpuAddr(m_uniform_memblock) + m_uniform_offset;
-	m_uniform_offset += AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT);
+	DkGpuAddr addr;
+	void* dst = ReserveStreamMemory(m_uniform_memblock, m_uniform_offset, AlignUp(size, DK_UNIFORM_BUF_ALIGNMENT),
+		DK_UNIFORM_BUF_ALIGNMENT, UNIFORM_BUFFER_SIZE, &addr);
+	std::memcpy(dst, data, size);
 	return addr;
+}
+
+void GSDeviceDK::ReserveImageDescriptors(u32 count)
+{
+	pxAssert(count <= NUM_IMAGE_DESCRIPTORS);
+	if (m_next_image_slot + count <= NUM_IMAGE_DESCRIPTORS)
+		return;
+
+	m_descriptor_memblock = AllocateFrameMemory(NUM_IMAGE_DESCRIPTORS * sizeof(DkImageDescriptor));
+	m_image_descriptor_set = dkMemBlockGetGpuAddr(m_descriptor_memblock);
+	m_next_image_slot = 0;
+	m_hw_tex_valid = false;
+	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
+	IssueBarrier(DkBarrier_None, DkInvalidateFlags_Descriptors);
+}
+
+u32 GSDeviceDK::PushImageDescriptor(const DkImageDescriptor& descriptor)
+{
+	pxAssert(m_next_image_slot < NUM_IMAGE_DESCRIPTORS);
+	const u32 slot = m_next_image_slot++;
+	static_cast<DkImageDescriptor*>(dkMemBlockGetCpuAddr(m_descriptor_memblock))[slot] = descriptor;
+	return slot;
 }
 
 u32 GSDeviceDK::PushImage(const GSTextureDK* tex)
 {
-	const u32 slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
-	if (m_next_image_slot == 0)
-		m_hw_tex_valid = false;
-	const DkImageDescriptor descriptor = tex->GetDescriptor();
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + slot * sizeof(DkImageDescriptor), &descriptor,
-		sizeof(descriptor));
-	return slot;
+	return PushImageDescriptor(tex->GetDescriptor());
 }
 
 void GSDeviceDK::CommitClear(GSTextureDK* tex)
 {
-	// TODO: depth targets bail out here, so a deferred depth clear is never materialized when a
-	// depth texture is sampled as a convert/stretch source before it is ever bound as a depth
-	// attachment.
-	if (!tex || tex->IsDepth() || tex->GetState() != GSTexture::State::Cleared)
+	if (!tex || tex->GetState() != GSTexture::State::Cleared)
 		return;
 
 	DkImageView view;
 	tex->GetImageView(&view);
-	dkCmdBufBindRenderTarget(m_cmdbuf, &view, nullptr);
+	if (tex->IsDepth())
+		dkCmdBufBindRenderTargets(m_cmdbuf, nullptr, 0, &view);
+	else
+		dkCmdBufBindRenderTarget(m_cmdbuf, &view, nullptr);
 	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(tex->GetWidth()), static_cast<float>(tex->GetHeight()),
 		0.0f, 1.0f};
 	const DkScissor scissor = {0, 0, static_cast<u32>(tex->GetWidth()), static_cast<u32>(tex->GetHeight())};
 	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
 	dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
-	float cc[4];
-	GSVector4::store<false>(cc, tex->GetUNormClearColor());
-	dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, cc[0], cc[1], cc[2], cc[3]);
+	if (tex->IsDepth())
+		dkCmdBufClearDepthStencil(m_cmdbuf, true, tex->GetClearDepth(), 0, 0);
+	else if (tex->GetFormat() == GSTexture::Format::UInt16 || tex->GetFormat() == GSTexture::Format::UInt32)
+		dkCmdBufClearColorUint(m_cmdbuf, 0, DkColorMask_RGBA, tex->GetClearColor(), 0, 0, 0);
+	else
+	{
+		float cc[4];
+		GSVector4::store<false>(cc, tex->GetClearForFormat());
+		dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, cc[0], cc[1], cc[2], cc[3]);
+	}
 	tex->SetState(GSTexture::State::Dirty);
 	tex->SetWriteGen(m_gpu_write_gen);
 }
 
 void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex,
 	const GSVector4& dRect, const DkShader* fragment_shader, bool linear, const void* cb, u32 cb_size,
-	bool depth_output, u32 color_write_mask, bool alpha_blend, bool integer_output)
+	bool depth_output, u32 color_write_mask, bool alpha_blend)
 {
 	if (!sTex || !m_convert_shaders_ok)
 		return;
@@ -591,6 +645,7 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 
 	// Flush only when sTex was written this generation
 	CommitClear(sTex);
+	CommitClear(dTex);
 	if (sTex->GetWriteGen() == m_gpu_write_gen)
 	{
 		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
@@ -609,25 +664,6 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 		dkCmdBufBindRenderTargets(m_cmdbuf, nullptr, 0, &target_view);
 	else
 		dkCmdBufBindRenderTarget(m_cmdbuf, &target_view, nullptr);
-
-	// Resolve pending clear before writing over the target.
-	if (!is_present && dTex->GetState() == GSTexture::State::Cleared)
-	{
-		if (depth_output)
-		{
-			dkCmdBufClearDepthStencil(m_cmdbuf, true, dTex->GetClearDepth(), 0xFF, 0);
-		}
-		else if (integer_output)
-		{
-			dkCmdBufClearColorUint(m_cmdbuf, 0, DkColorMask_RGBA, dTex->GetClearColor(), 0, 0, 0);
-		}
-		else
-		{
-			float cc[4];
-			GSVector4::store<false>(cc, dTex->GetUNormClearColor());
-			dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, cc[0], cc[1], cc[2], cc[3]);
-		}
-	}
 
 	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(ds.x), static_cast<float>(ds.y), 0.0f, 1.0f};
 	const DkScissor scissor = {0, 0, static_cast<u32>(ds.x), static_cast<u32>(ds.y)};
@@ -665,14 +701,11 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 	const DkShader* shaders[] = {&m_convert_vsh, fragment_shader};
 	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
+	ReserveImageDescriptors(1);
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
 	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
 
-	const u32 image_slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
-	const DkImageDescriptor src_descriptor = sTex->GetDescriptor();
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + image_slot * sizeof(DkImageDescriptor), &src_descriptor,
-		sizeof(src_descriptor));
+	const u32 image_slot = PushImage(sTex);
 	const DkResHandle texture_handle = dkMakeTextureHandle(image_slot, linear ? SAMPLER_LINEAR : SAMPLER_POINT);
 	dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 0, &texture_handle, 1);
 
@@ -694,12 +727,7 @@ void GSDeviceDK::DoStretchRectImpl(GSTextureDK* sTex, const GSVector4& sRect, GS
 		{{right, bottom, 0.5f, 1.0f}, {sRect.z, sRect.w}},
 	};
 
-	m_vertex_offset = AlignUp(m_vertex_offset, sizeof(ConvertVertex));
-	if (m_vertex_offset + sizeof(vertices) > VERTEX_BUFFER_SIZE)
-		m_vertex_offset = 0;
-	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_vertex_memblock)) + m_vertex_offset, vertices, sizeof(vertices));
-	const DkGpuAddr vertex_addr = dkMemBlockGetGpuAddr(m_vertex_memblock) + m_vertex_offset;
-	m_vertex_offset += sizeof(vertices);
+	const DkGpuAddr vertex_addr = StreamVertices(vertices, sizeof(vertices));
 
 	static const DkVtxAttribState attribs[2] = {
 		{0, 0, offsetof(ConvertVertex, pos), DkVtxAttribSize_4x32, DkVtxAttribType_Float, 0},
@@ -851,6 +879,17 @@ void GSDeviceDK::DestroyDeviceObjects()
 		for (DkMemBlock block : ctx.extra_cmdbuf_memblocks)
 			dkMemBlockDestroy(block);
 		ctx.extra_cmdbuf_memblocks.clear();
+		for (DkMemBlock block : ctx.extra_stream_memblocks)
+			dkMemBlockDestroy(block);
+		ctx.extra_stream_memblocks.clear();
+		for (const PooledMemBlock& block : ctx.retired_memblocks)
+			dkMemBlockDestroy(block.block);
+		ctx.retired_memblocks.clear();
+		if (ctx.descriptor_memblock)
+		{
+			dkMemBlockDestroy(ctx.descriptor_memblock);
+			ctx.descriptor_memblock = nullptr;
+		}
 		if (ctx.cmdbuf_memblock)
 		{
 			dkMemBlockDestroy(ctx.cmdbuf_memblock);
@@ -885,10 +924,11 @@ void GSDeviceDK::DestroyDeviceObjects()
 	m_uniform_memblock = nullptr;
 	m_staging_memblock = nullptr;
 
-	if (m_descriptor_memblock)
+	m_descriptor_memblock = nullptr;
+	if (m_sampler_memblock)
 	{
-		dkMemBlockDestroy(m_descriptor_memblock);
-		m_descriptor_memblock = nullptr;
+		dkMemBlockDestroy(m_sampler_memblock);
+		m_sampler_memblock = nullptr;
 	}
 	if (m_timestamp_memblock)
 	{
@@ -952,14 +992,24 @@ void GSDeviceDK::ReleaseMemBlock(DkMemBlock block, u32 size, u32 flags)
 	if (!block)
 		return;
 
-	if (m_memblock_pool_bytes + size > MEMBLOCK_POOL_MAX_BYTES)
+	FrameContext& ctx = m_frames[m_frame_index];
+	if (m_frame_active || ctx.fence_pending)
+		ctx.retired_memblocks.push_back({block, size, flags});
+	else
+		PoolMemBlock({block, size, flags});
+	InvalidateHWStateCache();
+}
+
+void GSDeviceDK::PoolMemBlock(const PooledMemBlock& block)
+{
+	if (m_memblock_pool_bytes + block.size > MEMBLOCK_POOL_MAX_BYTES)
 	{
-		dkMemBlockDestroy(block);
+		dkMemBlockDestroy(block.block);
 		return;
 	}
 
-	m_memblock_pool.push_back({block, size, flags});
-	m_memblock_pool_bytes += size;
+	m_memblock_pool.push_back(block);
+	m_memblock_pool_bytes += block.size;
 }
 
 void GSDeviceDK::DrainMemBlockPool()
@@ -1002,7 +1052,10 @@ GSDevice::PresentResult GSDeviceDK::DoBeginPresent(bool frame_skip)
 {
 #ifdef __SWITCH__
 	if (frame_skip || !m_swapchain)
+	{
+		SubmitFrame();
 		return PresentResult::FrameSkipped;
+	}
 
 	// DoMerge may already have opened the frame? Otherwise we start here.
 	BeginFrameIfNeeded();
@@ -1136,6 +1189,7 @@ void GSDeviceDK::RenderImGui()
 			dkCmdBufSetScissors(m_cmdbuf, 0, &dk_scissor, 1);
 
 			GSTextureDK* const tex = reinterpret_cast<GSTextureDK*>(pcmd->GetTexID());
+			ReserveImageDescriptors(1);
 			const u32 slot = tex ? PushImage(tex) : 0;
 			const DkResHandle handle = dkMakeTextureHandle(slot, SAMPLER_LINEAR);
 			dkCmdBufBindTextures(m_cmdbuf, DkStage_Fragment, 0, &handle, 1);
@@ -1153,28 +1207,31 @@ void GSDeviceDK::EndPresent()
 {
 #ifdef __SWITCH__
 	RenderImGui();
+	SubmitFrame();
+#endif
+}
 
+#ifdef __SWITCH__
+void GSDeviceDK::SubmitFrame()
+{
 	if (!m_frame_active)
 		return;
 
+	FrameContext& ctx = m_frames[m_frame_index];
+	if (ctx.timestamp_written)
+		WriteGPUTimestamp(m_frame_index, 1);
+	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
+	dkQueueSignalFence(m_queue, &ctx.fence, false);
+	ctx.fence_pending = true;
 	if (m_present_slot >= 0)
-	{
-		FrameContext& ctx = m_frames[m_frame_index];
-		// Record when the GPU finishes this frame's work
-		if (ctx.timestamp_written)
-			WriteGPUTimestamp(m_frame_index, 1);
-		dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
-		// Signal this context's fence so the next frame reusing it waits precisely on
-		// this frame's completion.
-		dkQueueSignalFence(m_queue, &ctx.fence, false);
-		ctx.fence_pending = true;
 		dkQueuePresentImage(m_queue, m_swapchain, m_present_slot);
-	}
+	else
+		dkQueueFlush(m_queue);
 
 	m_present_slot = -1;
 	m_frame_active = false;
-#endif
 }
+#endif
 
 void GSDeviceDK::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 {
@@ -1233,7 +1290,8 @@ std::unique_ptr<GSDownloadTexture> GSDeviceDK::CreateDownloadTexture(u32 width, 
 }
 
 #ifdef __SWITCH__
-void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMemBlock dst_block, u32 dst_offset)
+void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, u32 src_level,
+	DkMemBlock dst_block, u32 dst_offset, u32 dst_pitch)
 {
 	if (!src || rect.rempty())
 		return;
@@ -1243,19 +1301,14 @@ void GSDeviceDK::ReadbackTexture(GSTextureDK* src, const GSVector4i& rect, DkMem
 	InvalidateHWStateCache();
 	CommitClear(src);
 
-	// Flush and invalidate caches
-	IssueBarrier(DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
-	g_perfmon.Put(GSPerfMon::Barriers, 1);
-
 	DkImageView src_view;
 	src->GetImageView(&src_view);
+	src_view.mipLevelOffset = static_cast<uint8_t>(src_level);
+	src_view.mipLevelCount = 1;
 	const DkImageRect src_rect = {static_cast<u32>(rect.left), static_cast<u32>(rect.top), 0,
 		static_cast<u32>(rect.width()), static_cast<u32>(rect.height()), 1};
 
-	// TODO: rowLength=0 packs GPU rows tight to rect.width(), but GSDownloadTextureDK uses the
-	// full-texture transfer pitch when use_transfer_pitch=false, so partial-width readbacks land
-	// at the wrong CPU stride.
-	const DkCopyBuf dst = {dkMemBlockGetGpuAddr(dst_block) + dst_offset, 0, 0};
+	const DkCopyBuf dst = {dkMemBlockGetGpuAddr(dst_block) + dst_offset, dst_pitch, 0};
 	dkCmdBufCopyImageToBuffer(m_cmdbuf, &src_view, &src_rect, &dst, 0);
 
 	// Copy now rides in the frame command buffer
@@ -1268,11 +1321,11 @@ void GSDeviceDK::FlushReadback()
 		return;
 	m_readback_pending = false;
 
-	// A frame should always be active
-	if (!m_frame_active)
-		return;
+	BeginFrameIfNeeded();
 
 	// Finish this list so EndPresent won't resubmit it, then wait only on the copy, not the entire frame
+	IssueBarrier(DkBarrier_Primitives, DkInvalidateFlags_L2Cache);
+	g_perfmon.Put(GSPerfMon::Barriers, 1);
 	dkQueueSubmitCommands(m_queue, dkCmdBufFinishList(m_cmdbuf));
 	dkQueueSignalFence(m_queue, &m_readback_fence, false);
 	dkQueueFlush(m_queue);
@@ -1288,23 +1341,12 @@ bool GSDeviceDK::UploadToImage(GSTextureDK* dst_tex, const DkImageView& view, co
 	const u32 upload_size = num_rows * upload_pitch;
 	if (upload_size == 0)
 		return false;
-	if (upload_size > STAGING_BUFFER_SIZE)
-	{
-		Console.Error("DK3D: texture upload of %u bytes exceeds the %u-byte staging ring.", upload_size,
-			STAGING_BUFFER_SIZE);
-		return false;
-	}
-
 	BeginFrameIfNeeded();
-	InvalidateHWStateCache();
+	CommitClear(dst_tex);
 
-	// Reserve a slot in the staging ring
-	m_staging_offset = AlignUp(m_staging_offset, STAGING_ALIGNMENT);
-	if (m_staging_offset + upload_size > STAGING_BUFFER_SIZE)
-		m_staging_offset = 0;
-	u8* const dst = static_cast<u8*>(dkMemBlockGetCpuAddr(m_staging_memblock)) + m_staging_offset;
-	const DkGpuAddr src_addr = dkMemBlockGetGpuAddr(m_staging_memblock) + m_staging_offset;
-	m_staging_offset += upload_size;
+	DkGpuAddr src_addr;
+	u8* const dst = static_cast<u8*>(ReserveStreamMemory(m_staging_memblock, m_staging_offset, upload_size,
+		STAGING_ALIGNMENT, STAGING_BUFFER_SIZE, &src_addr));
 
 	const u8* const src = static_cast<const u8*>(data);
 	const u32 copy_bytes = std::min<u32>(upload_pitch, src_pitch);
@@ -1315,7 +1357,7 @@ bool GSDeviceDK::UploadToImage(GSTextureDK* dst_tex, const DkImageView& view, co
 	dkCmdBufCopyBufferToImage(m_cmdbuf, &copy_src, &view, &rect, 0);
 	// Don't drain the pipeline per upload
 	if (dst_tex)
-		dst_tex->SetWriteGen(m_gpu_write_gen);
+		dst_tex->SetWriteGen(0);
 
 	g_perfmon.Put(GSPerfMon::TextureUploads, 1);
 	return true;
@@ -1327,13 +1369,7 @@ void GSDeviceDK::GenerateImageMipmaps(GSTextureDK* tex, DkImage* image, int widt
 		return;
 
 	BeginFrameIfNeeded();
-	InvalidateHWStateCache();
-
-	if (tex && tex->GetWriteGen() == m_gpu_write_gen)
-	{
-		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
-		g_perfmon.Put(GSPerfMon::Barriers, 1);
-	}
+	CommitClear(tex);
 
 	for (int level = 1; level < levels; level++)
 	{
@@ -1353,10 +1389,9 @@ void GSDeviceDK::GenerateImageMipmaps(GSTextureDK* tex, DkImage* image, int widt
 			static_cast<u32>(std::max(1, height >> level)), 1};
 
 		dkCmdBufBlitImage(m_cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect, DkBlitFlag_FilterLinear, 0);
-
-		IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
-		g_perfmon.Put(GSPerfMon::Barriers, 1);
 	}
+	if (tex)
+		tex->SetWriteGen(0);
 }
 #endif
 
@@ -1374,6 +1409,8 @@ void GSDeviceDK::DoCopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& 
 	BeginFrameIfNeeded();
 	// dkCmdBufCopyImage may reprogram 3D-engine state
 	InvalidateHWStateCache();
+	CommitClear(src);
+	CommitClear(dst);
 
 	DkImageView src_view;
 	DkImageView dst_view;
@@ -1391,9 +1428,11 @@ void GSDeviceDK::DoCopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& 
 }
 
 void GSDeviceDK::DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureDK* dTex, const GSVector4& dRect,
-	ShaderConvert shader, bool linear, u32 color_write_mask)
+	ShaderConvertSelector selector, bool linear)
 {
 #ifdef __SWITCH__
+	const ShaderConvert shader = selector.Shader();
+	const u32 color_write_mask = selector.Mask() & selector.DefaultMask();
 	// COPY uses the plain copy shader
 	if (shader == ShaderConvert::COPY)
 	{
@@ -1404,17 +1443,18 @@ void GSDeviceDK::DoConvert(GSTextureDK* sTex, const GSVector4& sRect, GSTextureD
 	struct
 	{
 		u32 variant;
-		u32 pad[3];
-	} ub = {static_cast<u32>(shader), {0, 0, 0}};
+		u32 bilinear;
+		u32 pad[2];
+	} ub = {static_cast<u32>(shader), selector.Biln() ? 1u : 0u, {0, 0}};
 
 	if (IsIntegerOutput(shader))
 	{
 		DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_int_fsh, false, &ub, sizeof(ub), false,
-			color_write_mask, false, true);
+			color_write_mask);
 		return;
 	}
 
-	DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_fsh, false, &ub, sizeof(ub), HasFloat32Output(shader),
+	DoStretchRectImpl(sTex, sRect, dTex, dRect, &m_convert_fsh, linear, &ub, sizeof(ub), selector.DepthOutput(),
 		color_write_mask);
 #endif
 }
@@ -1423,8 +1463,8 @@ void GSDeviceDK::DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTextur
 	ShaderConvertSelector shader, Filter filter)
 {
 #ifdef __SWITCH__
-	DoConvert(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, shader.Shader(),
-		filter == Filter::Biln, shader.Mask());
+	DoConvert(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect, shader,
+		filter == Filter::Biln);
 #endif
 }
 
@@ -1559,22 +1599,22 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 		return;
 
 	GSTextureDK* const rt = static_cast<GSTextureDK*>(config.rt);
-	// Depth-only draws are not handled yet.
-	// TODO: That ^
-	if (!rt || rt->IsDepth() || config.nindices == 0 || !config.verts || !config.indices)
+	GSTextureDK* const ds = static_cast<GSTextureDK*>(config.ds);
+	const bool has_ds = (ds && ds->IsDepth());
+	if ((!rt && !has_ds) || (rt && rt->IsDepth()) || config.nindices == 0 || !config.verts || !config.indices)
 		return;
 
-	GSTextureDK* const ds = static_cast<GSTextureDK*>(config.ds);
 	GSTextureDK* const tex = static_cast<GSTextureDK*>(config.tex);
 	GSTextureDK* const pal = static_cast<GSTextureDK*>(config.pal);
-	const bool has_ds = (ds && ds->IsDepth());
 
 	BeginFrameIfNeeded();
 
 	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
 
-	if (tex)
-		CommitClear(tex);
+	CommitClear(rt);
+	CommitClear(ds);
+	CommitClear(tex);
+	CommitClear(pal);
 	if ((tex && tex->GetWriteGen() == m_gpu_write_gen) ||
 		(pal && pal->GetWriteGen() == m_gpu_write_gen))
 	{
@@ -1584,11 +1624,11 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 
 	// Destination-alpha setup
 	GSTextureDK* date_image = nullptr;
-	if (config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::Stencil)
+	if (rt && config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::Stencil)
 	{
 		SetupDATE(rt, ds, config.datm, config.drawarea);
 	}
-	else if (config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::PrimIDTracking)
+	else if (rt && config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::PrimIDTracking)
 	{
 		date_image = SetupPrimitiveTrackingDATE(config);
 		if (!date_image)
@@ -1597,12 +1637,13 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 
 	DkImageView rt_view;
 	DkImageView ds_view;
-	rt->GetImageView(&rt_view);
+	if (rt)
+		rt->GetImageView(&rt_view);
 	if (has_ds)
 		ds->GetImageView(&ds_view);
-	dkCmdBufBindRenderTarget(m_cmdbuf, &rt_view, has_ds ? &ds_view : nullptr);
+	dkCmdBufBindRenderTarget(m_cmdbuf, rt ? &rt_view : nullptr, has_ds ? &ds_view : nullptr);
 
-	const GSVector2i rtsize = rt->GetSize();
+	const GSVector2i rtsize = rt ? rt->GetSize() : ds->GetSize();
 	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(rtsize.x), static_cast<float>(rtsize.y), 0.0f, 1.0f};
 	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
 
@@ -1611,19 +1652,10 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 		static_cast<u32>(std::max(0, scissor.width())), static_cast<u32>(std::max(0, scissor.height()))};
 	dkCmdBufSetScissors(m_cmdbuf, 0, &dk_scissor, 1);
 
-	// Commit pending clears on the targets before drawing over them.
-	if (rt->GetState() == GSTexture::State::Cleared)
-	{
-		float cc[4];
-		GSVector4::store<false>(cc, rt->GetUNormClearColor());
-		dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, cc[0], cc[1], cc[2], cc[3]);
-	}
-	rt->SetState(GSTexture::State::Dirty);
+	if (rt)
+		rt->SetState(GSTexture::State::Dirty);
 	if (has_ds)
 	{
-		// Stencil clears to 1. This is important. Do not mess this up.
-		if (ds->GetState() == GSTexture::State::Cleared)
-			dkCmdBufClearDepthStencil(m_cmdbuf, true, ds->GetClearDepth(), 0xFF, 1);
 		ds->SetState(GSTexture::State::Dirty);
 
 		if (config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::StencilOne)
@@ -1643,6 +1675,7 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 
 	// Route to the cheapest specialised fragment shader this draw can use.
 	const u32 tfx_variant = SelectTfxVariant(config);
+	ReserveImageDescriptors(4);
 
 	// A variant switch needs the shaders re-bound
 	const bool force_state = !m_hw_invariants_bound || m_hw_tfx_variant != tfx_variant;
@@ -1764,7 +1797,8 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 	}
 
 	// Bind RT as RtSampler when shader-side blending/fbmask/DATE needs Cd/Ad.
-	const bool needs_rt_tex = config.require_one_barrier || config.require_full_barrier;
+	const bool needs_rt_tex = rt && (config.require_one_barrier || config.require_full_barrier ||
+		config.alpha_second_pass.require_one_barrier || config.alpha_second_pass.require_full_barrier);
 	if (needs_rt_tex)
 	{
 		const DkResHandle rt_handle = dkMakeTextureHandle(PushImage(rt), SAMPLER_POINT);
@@ -1862,7 +1896,8 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 		m_hw_uniforms_valid = false;
 
 	// Mark the targets written this generation
-	rt->SetWriteGen(m_gpu_write_gen);
+	if (rt)
+		rt->SetWriteGen(m_gpu_write_gen);
 	if (has_ds)
 		ds->SetWriteGen(m_gpu_write_gen);
 
@@ -1936,6 +1971,7 @@ void GSDeviceDK::SetupDATE(GSTextureDK* rt, GSTextureDK* ds, SetDATM datm, const
 	const DkShader* shaders[] = {&m_convert_vsh, &m_date_fsh};
 	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
+	ReserveImageDescriptors(1);
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
 	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
 
@@ -1963,12 +1999,7 @@ void GSDeviceDK::SetupDATE(GSTextureDK* rt, GSTextureDK* ds, SetDATM datm, const
 		{{right, bottom, 0.5f, 1.0f}, {1.0f, 1.0f}},
 	};
 
-	m_vertex_offset = AlignUp(m_vertex_offset, sizeof(ConvertVertex));
-	if (m_vertex_offset + sizeof(vertices) > VERTEX_BUFFER_SIZE)
-		m_vertex_offset = 0;
-	std::memcpy(static_cast<u8*>(dkMemBlockGetCpuAddr(m_vertex_memblock)) + m_vertex_offset, vertices, sizeof(vertices));
-	const DkGpuAddr vertex_addr = dkMemBlockGetGpuAddr(m_vertex_memblock) + m_vertex_offset;
-	m_vertex_offset += sizeof(vertices);
+	const DkGpuAddr vertex_addr = StreamVertices(vertices, sizeof(vertices));
 
 	static const DkVtxAttribState attribs[2] = {
 		{0, 0, offsetof(ConvertVertex, pos), DkVtxAttribSize_4x32, DkVtxAttribType_Float, 0},
@@ -2082,6 +2113,7 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh[TfxVariantUber]};
 	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
+	ReserveImageDescriptors(2);
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
 	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
 
@@ -2208,10 +2240,10 @@ GSTexture* GSDeviceDK::CreateSurface(GSTexture::Usage usage, int width, int heig
 		std::unique_ptr<GSTextureDK> tex = GSTextureDK::Create(m_device, this, usage, format, width, height, levels);
 		if (tex)
 			return tex.release();
-		Console.Error("DK3D: CreateSurface(%dx%d) failed. Falling back to null.", width, height);
+		return nullptr;
 	}
 #endif
-	return new GSTextureNone(usage, width, height, levels, format);
+	return nullptr;
 }
 
 void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
@@ -2259,6 +2291,7 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		dkCmdBufSetScissors(m_cmdbuf, 0, &scissor, 1);
 		dkCmdBufClearColorFloat(m_cmdbuf, 0, DkColorMask_RGBA, bg[0], bg[1], bg[2], bg[3]);
 		dst->SetState(GSTexture::State::Dirty);
+		dst->SetWriteGen(m_gpu_write_gen);
 	};
 
 	clear_dst_bg();
@@ -2369,27 +2402,21 @@ bool GSDeviceDK::DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only,
 	IssueBarrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 	g_perfmon.Put(GSPerfMon::Barriers, 1);
 
+	ReserveImageDescriptors(2);
 	dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
 	dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
 
 	// Source bound as a sampled texture
-	const u32 src_slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
-	const DkImageDescriptor src_descriptor = sTexDK->GetDescriptor();
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + src_slot * sizeof(DkImageDescriptor), &src_descriptor,
-		sizeof(src_descriptor));
+	const u32 src_slot = PushImage(sTexDK);
 	const DkResHandle src_handle = dkMakeTextureHandle(src_slot, SAMPLER_POINT);
 	dkCmdBufBindTextures(m_cmdbuf, DkStage_Compute, 0, &src_handle, 1);
 
 	// Destination bound as a load/store image
-	const u32 dst_slot = m_next_image_slot;
-	m_next_image_slot = (m_next_image_slot + 1) % NUM_IMAGE_DESCRIPTORS;
 	DkImageView dst_view;
 	dTexDK->GetImageView(&dst_view);
 	DkImageDescriptor dst_descriptor;
 	dkImageDescriptorInitialize(&dst_descriptor, &dst_view, true, false);
-	dkCmdBufPushData(m_cmdbuf, m_image_descriptor_set + dst_slot * sizeof(DkImageDescriptor), &dst_descriptor,
-		sizeof(dst_descriptor));
+	const u32 dst_slot = PushImageDescriptor(dst_descriptor);
 	const DkResHandle dst_handle = dkMakeImageHandle(dst_slot);
 	dkCmdBufBindImages(m_cmdbuf, DkStage_Compute, 0, &dst_handle, 1);
 
