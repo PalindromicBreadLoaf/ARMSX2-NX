@@ -41,6 +41,13 @@
 #include FT_FREETYPE_H
 #include FT_MODULE_H
 
+#ifdef __SWITCH__
+#include "common/Horizon/Horizon.h"
+#define IMGUI_BREADCRUMB(msg) Horizon::Breadcrumb(msg)
+#else
+#define IMGUI_BREADCRUMB(msg) ((void)0)
+#endif
+
 namespace ImGuiManager
 {
 	struct SoftwareCursor
@@ -154,11 +161,13 @@ void ImGuiManager::SetFonts(std::vector<FontInfo> info)
 
 bool ImGuiManager::Initialize()
 {
+	IMGUI_BREADCRUMB("ImGuiManager::Initialize: LoadFontData");
 	if (!LoadFontData())
 	{
 		pxFailRel("Failed to load font data");
 		return false;
 	}
+	IMGUI_BREADCRUMB("ImGuiManager::Initialize: LoadFontData done");
 
 	s_global_scale = std::max(0.5f, g_gs_device->GetWindowScale() * (GSConfig.OsdScale / 100.0f));
 	s_scale_changed = false;
@@ -209,6 +218,7 @@ bool ImGuiManager::Initialize()
 		ImGuiFullscreen::UpdateFontScale();
 	}
 
+	IMGUI_BREADCRUMB("ImGuiManager::Initialize: AddImGuiFonts");
 	if (!AddImGuiFonts())
 	{
 		Host::ReportErrorAsync("ImGuiManager", "Failed to create ImGui font text");
@@ -216,14 +226,22 @@ bool ImGuiManager::Initialize()
 		UnloadFontData();
 		return false;
 	}
+	IMGUI_BREADCRUMB("ImGuiManager::Initialize: AddImGuiFonts done");
 
 	NewFrame();
+	IMGUI_BREADCRUMB("ImGuiManager::Initialize: NewFrame done");
 
 	// reinitialize fsui if it was previously enabled
 	if (add_fullscreen_fonts)
+	{
+		IMGUI_BREADCRUMB("ImGuiManager::Initialize: re-InitializeFullscreenUI");
 		InitializeFullscreenUI();
+		IMGUI_BREADCRUMB("ImGuiManager::Initialize: re-InitializeFullscreenUI done");
+	}
 
+	IMGUI_BREADCRUMB("ImGuiManager::Initialize: CreateSoftwareCursorTextures");
 	CreateSoftwareCursorTextures();
+	IMGUI_BREADCRUMB("ImGuiManager::Initialize: done");
 	return true;
 }
 

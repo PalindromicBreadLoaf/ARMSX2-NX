@@ -52,6 +52,9 @@ namespace
 	constexpr u32 NUM_LOCAL_PLAYERS = 2;
 	constexpr u64 MENU_COMBO = HidNpadButton_Plus | HidNpadButton_Minus;
 
+	std::atomic<u64> s_nav_snapshot{0};
+	void PumpMenuNav();
+
 	std::unique_ptr<INISettingsInterface> s_settings_interface;
 	std::atomic_bool s_applet_backgrounded{false};
 	std::atomic_bool s_applet_resumed{false};
@@ -264,6 +267,7 @@ namespace
 		while (appletMainLoop())
 		{
 			Host::PumpMessagesOnCPUThread();
+			PumpMenuNav();
 			ProcessAppletLifecycle();
 			ProcessSoftwareKeyboard();
 
@@ -396,25 +400,39 @@ namespace
 		}
 	}
 
+	void PumpMenuNav()
+	{
+		static u64 s_prev_nav_held = 0;
+
+		const u64 held = s_nav_snapshot.load(std::memory_order_relaxed);
+
+		if (!FullscreenUI::HasActiveWindow())
+		{
+			s_prev_nav_held = held;
+			return;
+		}
+
+		const u64 changed = held ^ s_prev_nav_held;
+		s_prev_nav_held = held;
+		if (changed)
+			FeedNav(held, changed);
+	}
+
 	void InputPollLoop()
 	{
-		std::array<u64, NUM_LOCAL_PLAYERS> prev_held{};
 		bool prev_menu_combo = false;
 		while (!s_input_stop.load(std::memory_order_relaxed))
 		{
 			std::array<u64, NUM_LOCAL_PLAYERS> held{};
-			std::array<u64, NUM_LOCAL_PLAYERS> changed{};
 			for (u32 player = 0; player < NUM_LOCAL_PLAYERS; player++)
 			{
 				padUpdate(&s_pads[player]);
 				held[player] = padGetButtons(&s_pads[player]);
-				changed[player] = held[player] ^ prev_held[player];
-				prev_held[player] = held[player];
 			}
 
-			if (FullscreenUI::HasActiveWindow())
-				FeedNav(held[0], changed[0]);
-			else if (VMManager::HasValidVM())
+			s_nav_snapshot.store(held[0], std::memory_order_relaxed);
+
+			if (!FullscreenUI::HasActiveWindow() && VMManager::HasValidVM())
 			{
 				for (u32 player = 0; player < NUM_LOCAL_PLAYERS; player++)
 					FeedGamePad(player, s_pads[player], held[player]);
@@ -473,6 +491,7 @@ int main(int argc, char* argv[])
 	mkdir(LOGS_DIR, 0777);
 
 	HorizonException::Initialize(LOGS_DIR);
+	Horizon::ExitTrace("=== main entered");
 
 	Log::SetTimestampsEnabled(true);
 	VMManager::Internal::SetFileLogPath(Path::Combine(LOGS_DIR, "emulog.txt"));
@@ -557,6 +576,7 @@ int main(int argc, char* argv[])
 	HorizonException::Breadcrumb("entering main loop");
 	RunMainLoop();
 	HorizonException::Breadcrumb("main loop exited");
+	Horizon::ExitTrace("shutdown begin");
 
 	StopInputPolling();
 
@@ -565,13 +585,17 @@ int main(int argc, char* argv[])
 	HorizonUsbStorage::Shutdown();
 	if (VMManager::GetState() != VMState::Shutdown)
 		VMManager::Shutdown(HorizonHost::TakeResumeSaveRequest());
+	Horizon::ExitTrace("VMManager::Shutdown done");
 	if (MTGS::IsOpen())
 		MTGS::WaitForClose();
+	Horizon::ExitTrace("MTGS closed");
 	VMManager::Internal::CPUThreadShutdown();
+	Horizon::ExitTrace("CPUThreadShutdown done (SysMemory released, JIT freed)");
 
 	if (romfs_available)
 		romfsExit();
 	HorizonException::Shutdown();
+	Horizon::ExitTrace("clean exit");
 	appletUnlockExit();
 	return 0;
 }

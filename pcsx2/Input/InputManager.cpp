@@ -1869,6 +1869,10 @@ InputManager::GenericInputBindingMapping InputManager::GetGenericBindingMapping(
 
 bool InputManager::IsInputSourceEnabled(SettingsInterface& si, InputSourceType type)
 {
+#ifdef __SWITCH__
+	if (type == InputSourceType::SDL)
+		return false;
+#endif
 	return si.GetBoolValue("InputSources", InputManager::InputSourceToString(type), InputManager::GetInputSourceDefaultEnabled(type));
 }
 
