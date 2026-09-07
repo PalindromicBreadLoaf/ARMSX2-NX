@@ -19,4 +19,5 @@ namespace Horizon
 	void BreadcrumbInit(const char* report_dir);
 	void Breadcrumb(const char* message);
 	void BreadcrumbShutdown();
+	void ExitTrace(const char* message);
 } // namespace Horizon

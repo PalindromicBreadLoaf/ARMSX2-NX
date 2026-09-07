@@ -705,14 +705,22 @@ void VMManager::LoadSettings()
 	// and the rounding mode has an impact on the conversion of floating-point values to/from strings.
 	FPControlRegisterBackup fpcr_backup(FPControlRegister::GetDefault());
 
+	VM_BOOT_BREADCRUMB("LoadSettings: GetSettingsLock");
 	std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
 	SettingsInterface* si = Host::GetSettingsInterface();
+	VM_BOOT_BREADCRUMB("LoadSettings: LoadCoreSettings");
 	LoadCoreSettings(*si);
+	VM_BOOT_BREADCRUMB("LoadSettings: Pad::LoadConfig");
 	Pad::LoadConfig(*si);
+	VM_BOOT_BREADCRUMB("LoadSettings: Host::LoadSettings");
 	Host::LoadSettings(*si, lock);
+	VM_BOOT_BREADCRUMB("LoadSettings: InputManager::ReloadSources");
 	InputManager::ReloadSources(*si, lock);
+	VM_BOOT_BREADCRUMB("LoadSettings: LoadInputBindings");
 	LoadInputBindings(*si, lock);
+	VM_BOOT_BREADCRUMB("LoadSettings: UpdateLoggingSettings");
 	UpdateLoggingSettings(*si);
+	VM_BOOT_BREADCRUMB("LoadSettings: done");
 
 	// Apply runtime perf-dump gate from Profiler config (no-op on
 	// non-USE_PERF_JITDUMP builds).
