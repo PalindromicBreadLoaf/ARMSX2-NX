@@ -162,10 +162,25 @@ list(APPEND DK3D_DKSH_FILES "${DK3D_ROMFS_SHADER_DIR}/cas_csh.dksh")
 add_custom_target(armsx2_shaders DEPENDS ${DK3D_DKSH_FILES})
 add_dependencies(armsx2 armsx2_shaders)
 
-# Pack the compiled shaders into the NRO's ROMFS.
+# Embed resources into the romfs
+set(ARMSX2_RESOURCE_SRC_DIR "${CMAKE_SOURCE_DIR}/bin/resources")
+set(DK3D_ROMFS_RESOURCE_DIR "${DK3D_ROMFS_DIR}/resources")
+set(ARMSX2_RESOURCE_STAMP "${CMAKE_CURRENT_BINARY_DIR}/armsx2_resources.stamp")
+file(GLOB_RECURSE ARMSX2_RESOURCE_FILES CONFIGURE_DEPENDS "${ARMSX2_RESOURCE_SRC_DIR}/*")
+add_custom_command(
+	OUTPUT "${ARMSX2_RESOURCE_STAMP}"
+	COMMAND ${CMAKE_COMMAND} -E copy_directory "${ARMSX2_RESOURCE_SRC_DIR}" "${DK3D_ROMFS_RESOURCE_DIR}"
+	COMMAND ${CMAKE_COMMAND} -E touch "${ARMSX2_RESOURCE_STAMP}"
+	DEPENDS ${ARMSX2_RESOURCE_FILES}
+	COMMENT "Copying resources into ROMFS (romfs:/resources)"
+	VERBATIM
+)
+add_custom_target(armsx2_resources DEPENDS "${ARMSX2_RESOURCE_STAMP}")
+
+# Pack the compiled shaders and resources into the NRO's ROMFS.
 dkp_add_asset_target(armsx2_romfs "${DK3D_ROMFS_DIR}")
-add_dependencies(armsx2_romfs armsx2_shaders)
-set_property(TARGET armsx2_romfs APPEND PROPERTY DKP_ASSET_FILES ${DK3D_DKSH_FILES})
+add_dependencies(armsx2_romfs armsx2_shaders armsx2_resources)
+set_property(TARGET armsx2_romfs APPEND PROPERTY DKP_ASSET_FILES ${DK3D_DKSH_FILES} "${ARMSX2_RESOURCE_STAMP}")
 
 nx_generate_nacp(OUTPUT armsx2.nacp
 	NAME "ARMSX2-NX"
