@@ -3418,6 +3418,12 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 		DrawIntListSetting(bsi, FSUI_ICONSTR(ICON_FA_MICROCHIP, "GS Back Thread"),
 			FSUI_CSTR("Pipelined splits GS emulation across two threads on multi-core systems. The debug modes are much slower — do not use them for play."),
 			"EmuCore/GS", "GSBackThreadMode", static_cast<int>(GSBackThreadMode::Off), s_back_thread_modes, std::size(s_back_thread_modes), true);
+#ifdef __SWITCH__
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MICROCHIP, "GS Backend on Core 3"),
+			FSUI_CSTR("Runs the second GS thread on the fourth core. Requires a loader granting core 3. Experimental."),
+			"EmuCore/GS", "GSBackThreadUseCore3", false,
+			GetEffectiveIntSetting(bsi, "EmuCore/GS", "GSBackThreadMode", 0) >= static_cast<int>(GSBackThreadMode::Lockstep));
+#endif
 #if !defined(__APPLE__)
 		DrawIntListSetting(bsi, FSUI_ICONSTR(ICON_FA_EXPAND, "Allow Exclusive Fullscreen"),
 			FSUI_CSTR("Overrides the driver's heuristics for enabling exclusive fullscreen, or direct flip/scanout."), "EmuCore/GS",

@@ -906,6 +906,7 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(OverrideTextureBarriers) &&
 		OpEqu(DepthFeedbackMode) &&
 		OpEqu(BackThreadMode) &&
+		OpEqu(BackThreadUseCore3) &&
 
 		OpEqu(CAS_Sharpness) &&
 		OpEqu(FSR_Sharpness) &&
@@ -979,6 +980,7 @@ bool Pcsx2Config::GSOptions::IsRestartOption(const char* ini_key)
 		"OverrideTextureBarriers",
 		"DepthFeedbackMode",
 		"GSBackThreadMode",
+		"GSBackThreadUseCore3",
 		"HWAA1",
 		"ExclusiveFullscreenControl",
 	};
@@ -1009,6 +1011,7 @@ bool Pcsx2Config::GSOptions::RestartOptionsAreEqual(const GSOptions& right) cons
 		   OpEqu(OverrideTextureBarriers) &&
 		   OpEqu(DepthFeedbackMode) &&
 		   OpEqu(BackThreadMode) &&
+		   OpEqu(BackThreadUseCore3) &&
 		   OpEqu(HWAA1) &&
 		   OpEqu(ExclusiveFullscreenControl);
 }
@@ -1190,6 +1193,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitfieldEx(OverrideTextureBarriers, "OverrideTextureBarriers");
 	SettingsWrapIntEnumEx(DepthFeedbackMode, "DepthFeedbackMode");
 	SettingsWrapIntEnumEx(BackThreadMode, "GSBackThreadMode");
+	SettingsWrapEntryEx(BackThreadUseCore3, "GSBackThreadUseCore3");
 
 	SettingsWrapBitfield(ShadeBoost_Brightness);
 	SettingsWrapBitfield(ShadeBoost_Contrast);

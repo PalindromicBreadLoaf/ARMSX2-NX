@@ -1050,6 +1050,7 @@ struct Pcsx2Config
 		s8 OverrideTextureBarriers = -1;
 		GSDepthFeedbackMode DepthFeedbackMode = GSDepthFeedbackMode::Auto;
 		GSBackThreadMode BackThreadMode = GSBackThreadMode::Off;
+		bool BackThreadUseCore3 = false;
 
 		// RetroArch (.slangp) shader chain, applied at present after ShadeBoost/FXAA via
 		// librashader. Disabled or an empty preset skips the chain entirely (zero cost),
