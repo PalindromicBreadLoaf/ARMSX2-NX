@@ -4106,6 +4106,26 @@ void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
 	}
 }
 
+#elif defined(__SWITCH__)
+
+static void InitializeProcessorList()
+{
+	const u64 allowed_cores = Horizon::GetProcessCoreMask();
+	for (u32 core = 0; core < 3; core++)
+	{
+		if (allowed_cores & (u64{1} << core))
+			s_processor_list.push_back(core);
+	}
+	INFO_LOG("Switch: process core mask 0x{:x}, {} application cores. core 3 {}",
+		allowed_cores, s_processor_list.size(), (allowed_cores & 8) ? "available for explicit assignment" : "unavailable");
+}
+
+void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
+{
+	si.SetBoolValue("EmuCore/Speedhacks", "vuThread", true);
+	si.SetBoolValue("EmuCore", "EnableThreadPinning", true);
+}
+
 #else
 
 static void InitializeProcessorList()
@@ -4264,8 +4284,10 @@ void VMManager::SetEmuThreadAffinities()
 	return;
 #else
 	const bool new_pin_enable = (GetState() != VMState::Shutdown && EmuConfig.EnableThreadPinning);
+#ifndef __SWITCH__
 	if (s_thread_affinities_set == new_pin_enable)
 		return;
+#endif
 
 	// Track whether pinning is *currently effective*, not just EmuConfig.EnableThreadPinning
 	// (matches refresh-experimental — a shutdown call with pinning enabled must not leave this
@@ -4318,6 +4340,12 @@ void VMManager::SetEmuThreadAffinities()
 	INFO_LOG("  GS thread is on processor {} (0x{:x})", gs_index, gs_affinity);
 	MTGS::GetThreadHandle().SetAffinity(gs_affinity);
 
+#ifdef __SWITCH__
+	INFO_LOG("Switch: actual thread masks EE=0x{:x}, VU=0x{:x}, GS=0x{:x}",
+		s_vm_thread_handle.GetAffinity(), mtvu ? vu1Thread.GetThreadHandle().GetAffinity() : 0,
+		MTGS::GetThreadHandle().GetAffinity());
+#endif
+
 #ifdef __ANDROID__
 	// Bump the emu-critical threads slightly above default so Android's
 	// scheduler favors them over app/UI housekeeping under load. EPERM is
@@ -4328,6 +4356,7 @@ void VMManager::SetEmuThreadAffinities()
 	MTGS::GetThreadHandle().SetNicePriority(-1);
 #endif
 
+#if !defined(__SWITCH__)
 	// Try to find some threads for the software renderer.
 	// They should be in the same cluster as the main GS thread. If they're not, for example,
 	// we had 4 P cores and 6 E cores, let the OS schedule them instead.
@@ -4346,6 +4375,7 @@ void VMManager::SetEmuThreadAffinities()
 
 		s_software_renderer_processor_list.push_back(proc_index);
 	}
+#endif
 #endif // __ANDROID__ (else branch of the top-level guard)
 }
 

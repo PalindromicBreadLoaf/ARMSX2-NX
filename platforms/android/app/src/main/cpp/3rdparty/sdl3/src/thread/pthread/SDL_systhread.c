@@ -71,6 +71,15 @@ static const int sig_list[] = {
 
 static void *RunThread(void *data)
 {
+#ifdef SDL_PLATFORM_SWITCH
+    u64 core_mask = 0;
+    if (R_SUCCEEDED(svcGetInfo(&core_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+        core_mask &= 7;
+        if (core_mask) {
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, __builtin_ctzll(core_mask), core_mask);
+        }
+    }
+#endif
 #ifdef SDL_PLATFORM_ANDROID
     Android_JNI_SetupThread();
 #endif

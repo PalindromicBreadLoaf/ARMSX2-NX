@@ -7,8 +7,10 @@
 #endif
 
 #include "common/Assertions.h"
+#include "common/Console.h"
 #include "common/Threading.h"
 
+#include <future>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -53,6 +55,24 @@ namespace
 		return armTicksToNs(ticks) / 1000;
 	}
 } // namespace
+
+u64 Horizon::GetProcessCoreMask()
+{
+	u64 mask = 0;
+	return R_SUCCEEDED(svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) ? mask : 0;
+}
+
+void Horizon::ReserveCore3ForCallingThread()
+{
+	const u64 mask = GetProcessCoreMask() & 0x7;
+	if (mask && R_FAILED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, __builtin_ctzll(mask), mask)))
+		Console.Warning("Switch: failed to restrict worker to application cores");
+}
+
+bool Horizon::PinCallingThreadToCore3()
+{
+	return (GetProcessCoreMask() & 8) && R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, 8));
+}
 
 __forceinline void Threading::Timeslice()
 {
@@ -129,10 +149,10 @@ bool Threading::ThreadHandle::SetAffinity(u64 processor_mask) const
 	if (!m_native_handle)
 		return false;
 
-	u64 allowed_cores = 0;
-	if (R_FAILED(svcGetInfo(&allowed_cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || allowed_cores == 0)
+	const u64 allowed_cores = Horizon::GetProcessCoreMask();
+	if (allowed_cores == 0)
 		return false;
-	const u64 mask = processor_mask ? (processor_mask & allowed_cores) : allowed_cores;
+	const u64 mask = processor_mask ? (processor_mask & allowed_cores) : (allowed_cores & 0x7);
 	if (!mask)
 		return false;
 
@@ -149,7 +169,11 @@ bool Threading::ThreadHandle::SetAffinity(u64 processor_mask) const
 			return false;
 		handle = it->second;
 	}
-	return R_SUCCEEDED(svcSetThreadCoreMask(handle, __builtin_ctzll(mask), static_cast<u32>(mask)));
+	const Result result = svcSetThreadCoreMask(handle, __builtin_ctzll(mask), mask);
+	if (R_FAILED(result))
+		Console.Warning("Switch: setting thread affinity 0x%llx failed: 0x%08x",
+			static_cast<unsigned long long>(mask), result);
+	return R_SUCCEEDED(result);
 }
 
 bool Threading::ThreadHandle::SetNicePriority(int nice) const
@@ -160,13 +184,25 @@ bool Threading::ThreadHandle::SetNicePriority(int nice) const
 
 u64 Threading::ThreadHandle::GetAffinity() const
 {
-	u64 allowed_cores = 0;
-	return R_SUCCEEDED(svcGetInfo(&allowed_cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) ? allowed_cores : 0;
+	if (!m_native_handle)
+		return 0;
+	Handle handle = CUR_THREAD_HANDLE;
+	if (static_cast<void*>(pthread_self()) != m_native_handle)
+	{
+		std::lock_guard lock(s_thread_handle_map_mutex);
+		const auto it = s_thread_handle_map.find(m_native_handle);
+		if (it == s_thread_handle_map.end())
+			return 0;
+		handle = it->second;
+	}
+	s32 preferred_core = 0;
+	u64 mask = 0;
+	return R_SUCCEEDED(svcGetThreadCoreMask(&preferred_core, &mask, handle)) ? mask : 0;
 }
 
 int Threading::ThreadHandle::GetCurrentCpu() const
 {
-	return -1;
+	return m_native_handle == static_cast<void*>(pthread_self()) ? svcGetCurrentProcessorNumber() : -1;
 }
 
 Threading::Thread::Thread() = default;
@@ -216,7 +252,12 @@ void* Threading::Thread::ThreadProc(void* param)
 bool Threading::Thread::Start(EntryPoint func)
 {
 	pxAssertRel(!m_native_handle, "Can't start an already started thread");
-	auto entry = std::make_unique<EntryPoint>(std::move(func));
+	auto started = std::make_shared<std::promise<void>>();
+	auto ready = started->get_future();
+	auto entry = std::make_unique<EntryPoint>([func = std::move(func), started = std::move(started)]() mutable {
+		started->set_value();
+		func();
+	});
 	pthread_attr_t attrs;
 	pthread_attr_t* attr = nullptr;
 	if (m_stack_size != 0)
@@ -234,6 +275,7 @@ bool Threading::Thread::Start(EntryPoint func)
 		return false;
 	m_native_handle = static_cast<void*>(handle);
 	entry.release();
+	ready.wait();
 	return true;
 }
 

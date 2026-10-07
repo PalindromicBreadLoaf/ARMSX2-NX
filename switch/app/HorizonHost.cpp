@@ -389,6 +389,8 @@ void Host::RefreshGameListAsync(bool invalidate_cache)
 		s_gamelist_refresh_thread.join();
 
 	s_gamelist_refresh_thread = std::thread([invalidate_cache]() {
+		if (!Horizon::PinCallingThreadToCore3())
+			Horizon::ReserveCore3ForCallingThread();
 		Threading::SetNameOfCurrentThread("GameList Refresh");
 		GameList::Refresh(invalidate_cache, false, nullptr);
 	});

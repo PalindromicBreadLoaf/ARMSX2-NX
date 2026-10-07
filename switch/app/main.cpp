@@ -490,6 +490,7 @@ void Host::CommitBaseSettingChanges()
 
 int main(int argc, char* argv[])
 {
+	Horizon::ReserveCore3ForCallingThread();
 	appletLockExit();
 
 	mkdir("sdmc:/switch", 0777);
