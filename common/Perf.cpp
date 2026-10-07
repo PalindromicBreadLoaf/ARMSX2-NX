@@ -10,6 +10,10 @@
 #include "jitprofiling.h"
 #endif
 
+#ifdef __SWITCH__
+#include "common/Horizon/HorizonProfiling.h"
+#endif
+
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -235,6 +239,21 @@ namespace Perf
 		else
 			std::snprintf(full_symbol, std::size(full_symbol), "%s%016" PRIX64, prefix, key);
 		RegisterMethod(ptr, size, full_symbol);
+	}
+#elif defined(__SWITCH__)
+	void Group::Register(const void* ptr, size_t size, const char* symbol)
+	{
+		Horizon::Profiling::AddJitSymbol(ptr, size, m_prefix, Horizon::Profiling::JitSymbolKind::Name, symbol, 0);
+	}
+
+	void Group::RegisterPC(const void* ptr, size_t size, u32 pc)
+	{
+		Horizon::Profiling::AddJitSymbol(ptr, size, m_prefix, Horizon::Profiling::JitSymbolKind::PC, nullptr, pc);
+	}
+
+	void Group::RegisterKey(const void* ptr, size_t size, const char* prefix, u64 key)
+	{
+		Horizon::Profiling::AddJitSymbol(ptr, size, m_prefix, Horizon::Profiling::JitSymbolKind::Key, prefix, key);
 	}
 #else
 	void Group::Register(const void* ptr, size_t size, const char* symbol) {}

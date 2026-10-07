@@ -161,6 +161,11 @@ elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR
 	elseif(HORIZON)
 		set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 		add_compile_options("-march=armv8-a+crc" "-mtune=cortex-a57" -flax-vector-conversions)
+		option(ARMSX2_FRAME_POINTERS "Keep frame pointers so the Switch profiler can record full call stacks" OFF)
+		if(ARMSX2_FRAME_POINTERS)
+			add_compile_options(-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)
+			list(APPEND PCSX2_DEFS ARMSX2_FRAME_POINTERS=1)
+		endif()
 	elseif(NOT MSVC)
 		# Require atomic rmw instructions (LSE, ARMv8.1+). This is the upstream
 		# default and targets the broad arm64 ecosystem. MSVC (and clang-cl)

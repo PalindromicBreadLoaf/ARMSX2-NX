@@ -1039,6 +1039,8 @@ set(pcsx2FreeBSDSources
 set(pcsx2HorizonSources
 	CDVD/Horizon/DriveUtility.cpp
 	CDVD/Horizon/IOCtlSrc.cpp
+	Horizon/HorizonProfiler.cpp
+	Horizon/HorizonProfiler.h
 	)
 
 # Linux headers

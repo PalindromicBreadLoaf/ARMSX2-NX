@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include "common/Horizon/Horizon.h"
+#include "common/Horizon/HorizonProfiling.h"
 
 namespace
 {
@@ -197,11 +198,13 @@ void Threading::Thread::SetStackSize(u32 size)
 void* Threading::Thread::ThreadProc(void* param)
 {
 	std::unique_ptr<EntryPoint> entry(static_cast<EntryPoint*>(param));
+	Horizon::ReserveCore3ForCallingThread();
 	void* const key = static_cast<void*>(pthread_self());
 	{
 		std::lock_guard lock(s_thread_handle_map_mutex);
 		s_thread_handle_map[key] = threadGetCurHandle();
 	}
+	Horizon::Profiling::RegisterCurrentThread("Worker");
 	(*entry)();
 	{
 		std::lock_guard lock(s_thread_handle_map_mutex);
@@ -259,5 +262,5 @@ Threading::ThreadHandle& Threading::Thread::operator=(Thread&& thread)
 
 void Threading::SetNameOfCurrentThread(const char* name)
 {
-	(void)name;
+	Horizon::Profiling::RegisterCurrentThread(name);
 }

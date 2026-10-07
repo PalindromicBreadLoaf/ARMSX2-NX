@@ -8,6 +8,7 @@
 #include "common/Horizon/Horizon.h"
 #include "common/Horizon/HorizonFastmem.h"
 #include "common/Path.h"
+#include "common/Threading.h"
 
 #include "pcsx2/Achievements.h"
 #include "pcsx2/Config.h"
@@ -420,9 +421,15 @@ namespace
 
 	void InputPollLoop()
 	{
+		Threading::SetNameOfCurrentThread("Input Poll");
+		if (!Horizon::PinCallingThreadToCore3())
+			Horizon::ReserveCore3ForCallingThread();
 		bool prev_menu_combo = false;
 		while (!s_input_stop.load(std::memory_order_relaxed))
 		{
+			if (!hidGetSharedmemAddr())
+				return;
+
 			std::array<u64, NUM_LOCAL_PLAYERS> held{};
 			for (u32 player = 0; player < NUM_LOCAL_PLAYERS; player++)
 			{

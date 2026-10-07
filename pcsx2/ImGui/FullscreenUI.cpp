@@ -37,6 +37,10 @@
 #include "SIO/Pad/Pad.h"
 #include "SIO/Sio.h"
 
+#ifdef __SWITCH__
+#include "Horizon/HorizonProfiler.h"
+#endif
+
 #include "IconsFontAwesome.h"
 #include "IconsPromptFont.h"
 #include "imgui.h"
@@ -1677,7 +1681,11 @@ void FullscreenUI::DrawPauseMenu(MainWindowType type)
 			ImVec2(10.0f, 10.0f), ImGuiWindowFlags_NoBackground))
 	{
 		static constexpr u32 submenu_item_count[] = {
+#ifdef __SWITCH__
+			12, // None
+#else
 			11, // None
+#endif
 			4, // Exit
 			3, // Achievements
 		};
@@ -1791,6 +1799,19 @@ void FullscreenUI::DrawPauseMenu(MainWindowType type)
 					s_current_main_window = MainWindowType::None;
 					RequestChangeDisc();
 				}
+
+#ifdef __SWITCH__
+				if (ActiveButton(HorizonProfiler::IsRunning() ? FSUI_ICONSTR(ICON_FA_STOPWATCH, "Stop Profile Capture") :
+																FSUI_ICONSTR(ICON_FA_STOPWATCH, "Capture Profile"),
+						false))
+				{
+					ClosePauseMenu();
+					if (HorizonProfiler::IsRunning())
+						HorizonProfiler::RequestStop();
+					else
+						HorizonProfiler::Start();
+				}
+#endif
 
 				if (ActiveButton(FSUI_ICONSTR(ICON_FA_SLIDERS, "Settings"), false))
 					SwitchToSettings();

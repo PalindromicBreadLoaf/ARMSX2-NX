@@ -199,6 +199,8 @@ elseif(HORIZON)
 		Horizon/HorizonHostSys.cpp
 		Horizon/HorizonMisc.cpp
 		Horizon/HorizonNet.cpp
+		Horizon/HorizonProfiling.cpp
+		Horizon/HorizonProfiling.h
 		Horizon/HorizonThreads.cpp
 		Horizon/HorizonTime.h
 		Horizon/compat/ifaddrs.h
