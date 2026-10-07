@@ -104,6 +104,7 @@ bool GSIsDumpRecording();
 // Not the same question as the BackThreadMode setting, which downgrades to lockstep when the
 // split is unsupported, so this is the only way to tell whether the mode really engaged.
 bool GSHasFrontParser();
+void GSDrainBackQueue();
 void GSStopGSDump();
 bool GSBeginCapture(std::string filename);
 void GSEndCapture();

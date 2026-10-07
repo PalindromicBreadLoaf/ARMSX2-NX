@@ -534,6 +534,7 @@ void MTGS::MainLoop()
 						case Command::AsyncCall:
 							{
 								AsyncCallType* const func = (AsyncCallType*)tag.pointer;
+								GSDrainBackQueue();
 								(*func)();
 								delete func;
 							}

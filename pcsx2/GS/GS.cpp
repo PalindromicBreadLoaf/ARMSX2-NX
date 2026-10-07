@@ -303,8 +303,8 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 	g_gs_renderer->UpdateRenderFixes();
 
 	// GV7-1d-ii: instantiate the front parser only when the back thread really
-	// engaged (the renderer ctor falls back to inline records on a non-Vulkan
-	// HW device). An EE-thread read of *live* local memory forces single-object
+	// engaged (unsupported devices fall back to inline records).
+	// An EE thread read of live local memory forces single-object
 	// (lockstep) — see below for why that is not every EE-thread read.
 	if (GSConfig.BackThreadMode == GSBackThreadMode::Pipelined && g_gs_renderer->IsBackThreadRunning())
 	{
@@ -364,7 +364,7 @@ static void CloseGSRenderer()
 // parses on this thread, so one drain up front quiesces the back thread for the
 // whole call. No-op when the back thread is off (the default), and g_gs_renderer
 // can legitimately be null while g_gs_device exists: the device is created first.
-static void DrainBackQueueBeforeDeviceMutation()
+void GSDrainBackQueue()
 {
 	if (g_gs_renderer)
 		g_gs_renderer->DrainBackQueue();
@@ -390,7 +390,7 @@ bool GSreopen(bool recreate_device, bool recreate_renderer, GSRendererType new_r
 	// than blocking. Nor is there a backlog to chew through — SubmitVsync drains
 	// before ExecVsyncRecord and present never queues, so the queue is empty on
 	// entry and the Flush above is the only producer.
-	DrainBackQueueBeforeDeviceMutation();
+	GSDrainBackQueue();
 
 	if (recreate_device && !recreate_renderer)
 	{
@@ -750,7 +750,7 @@ void GSPresentCurrentFrame()
 	// externally synchronize; Adreno's driver faults inside vkCmdBeginRenderPass rather than
 	// erroring, and both threads abort. Reproduced on an Adreno 740 by pausing with the GS back
 	// thread enabled.
-	DrainBackQueueBeforeDeviceMutation();
+	GSDrainBackQueue();
 
 	g_gs_renderer->PresentCurrentFrame();
 }
@@ -786,7 +786,7 @@ bool GSHasDisplayWindow()
 
 void GSResizeDisplayWindow(u32 width, u32 height, float scale)
 {
-	DrainBackQueueBeforeDeviceMutation();
+	GSDrainBackQueue();
 
 	g_gs_device->ResizeWindow(width, height, scale);
 	ImGuiManager::WindowResized();
@@ -794,7 +794,7 @@ void GSResizeDisplayWindow(u32 width, u32 height, float scale)
 
 void GSUpdateDisplayWindow()
 {
-	DrainBackQueueBeforeDeviceMutation();
+	GSDrainBackQueue();
 
 	if (!g_gs_device->UpdateWindow())
 	{
@@ -815,7 +815,7 @@ void GSSetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 	Console.WriteLnFmt(Color_StrongCyan, "Setting vsync mode: {}{}", modes[static_cast<size_t>(mode)],
 		allow_present_throttle ? " (throttle allowed)" : "");
 
-	DrainBackQueueBeforeDeviceMutation();
+	GSDrainBackQueue();
 
 	g_gs_device->SetVSyncMode(mode, allow_present_throttle);
 }

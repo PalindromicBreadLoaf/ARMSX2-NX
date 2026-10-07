@@ -788,15 +788,15 @@ void GSRenderer::EndPresentFrame()
 
 void GSRenderer::SubmitVsync(u32 field, bool registers_written)
 {
+	DrainBackQueue();
 	GSBackQueue::VsyncRecord rec;
 	rec.field = field;
 	rec.registers_written = registers_written;
-	rec.idle_frame = IsIdleFrame(); // front-computable: compares serials against the last frame's
+	rec.idle_frame = IsIdleFrame();
 
 	// VSYNC is never queued: present runs on the MTGS thread behind a drain, so
 	// the back thread stays off the GSDevice on present paths entirely (which
 	// is also what keeps SW + GL-present devices legal in queued modes).
-	DrainBackQueue();
 	ExecVsyncRecord(rec);
 }
 
