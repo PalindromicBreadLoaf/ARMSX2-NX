@@ -8,6 +8,7 @@ enum ShaderCatalogInstallError: LocalizedError {
     case tooLarge(Int)
     case statedNoBytes
     case unusableLink
+    case unreachable
     case sizeMismatch(expected: Int, received: Int)
     case hashMismatch(expected: String)
     case serverRefused(Int)
@@ -15,26 +16,22 @@ enum ShaderCatalogInstallError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .tooLarge(let bytes):
-            return "The catalogue states this preset is \(bytes) bytes, which is past what this build will download. Nothing was fetched."
-        case .statedNoBytes:
-            return "The catalogue states this preset is empty, so nothing was fetched."
-        case .unusableLink:
-            return "This preset's catalogue path is not usable, so nothing was fetched."
-        case .sizeMismatch(let expected, let received):
-            return "The download is \(received) bytes and the catalogue states \(expected). Nothing was installed."
-        case .hashMismatch(let expected):
-            return "The download does not match its SHA-256 of \(expected). Nothing was installed."
-        case .serverRefused(let code):
-            return "The catalogue server answered with \(code) for this preset. Nothing was installed."
+        case .tooLarge, .statedNoBytes, .unusableLink:
+            return "This shader can't be downloaded."
+        case .unreachable:
+            return "Can't reach the shader server. Check your connection and try again."
+        case .sizeMismatch, .hashMismatch:
+            return "The download was damaged, so nothing was installed. Try again."
+        case .serverRefused:
+            return "The shader server didn't send this shader. Try again later."
         case .importFailed(let reason):
             return reason
         }
     }
 }
 
-/// Written into every installed folder so a later build can tell what a pack came from and at
-/// which upstream pin, and hidden so `ShaderPresetLibrary.scan()` never lists it as content.
+/// Records the catalogue entry and upstream pin a folder came from. Hidden, so
+/// `ShaderPresetLibrary.scan()` skips it.
 struct ShaderCatalogMarker: Codable {
     let id: String
     let pin: String
@@ -47,9 +44,9 @@ struct ShaderCatalogMarker: Codable {
 @MainActor
 final class ShaderCatalogInstaller: ObservableObject {
     @Published private(set) var installing: Set<String> = []
-    @Published var errors: [String: String] = [:]
-    /// Catalogue ids with a marker on disk, so a row knows itself installed across relaunches.
-    @Published private(set) var installed: Set<String> = []
+    @Published private(set) var errors: [String: String] = [:]
+    /// Catalogue id to the folder holding its marker, so a row shows installed after a relaunch.
+    @Published private(set) var installed: [String: String] = [:]
 
     static let stagingPrefix = "shader-download-"
     private static let maxDownloadBytes = 32 * 1024 * 1024
@@ -61,7 +58,19 @@ final class ShaderCatalogInstaller: ObservableObject {
     }
 
     func refreshInstalled() {
-        installed = Set(Self.markers().keys)
+        installed = Self.markers()
+    }
+
+    func presetToken(for entry: ShaderCatalogEntry) -> String? {
+        guard let folder = installed[entry.id], SkinAssetPath.isSafeRelative(entry.id),
+              let pack = ShaderPresetLibrary.userRoot?.appendingPathComponent(folder, isDirectory: true)
+        else { return nil }
+        let path = entry.id + "." + ShaderPresetLibrary.presetExtension
+        // A zip with .slang files loses the top folder they share, so crt/crt-geom lands as crt-geom.slangp.
+        let stripped = path.firstIndex(of: "/").map { String(path[path.index(after: $0)...]) }
+        return [path, stripped].compactMap { $0 }
+            .compactMap { ShaderPresetLibrary.token(for: pack.appendingPathComponent($0)) }
+            .first { ShaderPresetLibrary.resolve($0) != nil }
     }
 
     func install(_ entry: ShaderCatalogEntry, pin: String) async {
@@ -79,8 +88,7 @@ final class ShaderCatalogInstaller: ObservableObject {
     }
 
     private func perform(_ entry: ShaderCatalogEntry, pin: String) async throws {
-        // The manifest states the size in advance, so a refusal costs no transfer. The largest
-        // zip in the published run is under a megabyte; this is a fence, not a limit.
+        // The manifest states the size, so an oversized entry is refused before any transfer.
         guard entry.zip.bytes > 0 else { throw ShaderCatalogInstallError.statedNoBytes }
         guard entry.zip.bytes <= Self.maxDownloadBytes else {
             throw ShaderCatalogInstallError.tooLarge(entry.zip.bytes)
@@ -89,20 +97,8 @@ final class ShaderCatalogInstaller: ObservableObject {
             throw ShaderCatalogInstallError.unusableLink
         }
 
-        let staged = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(Self.stagingPrefix)\(UUID().uuidString).zip")
-        let (temporary, response) = try await URLSession.shared.download(from: source)
-        // URLSession hands over a temp file the caller owns. If the move below throws it is
-        // still ours and nothing else will remove it; after a successful move it is gone and
-        // this is a no-op.
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        try? FileManager.default.removeItem(at: staged)
-        try FileManager.default.moveItem(at: temporary, to: staged)
+        let staged = try await Self.stage(source)
         defer { try? FileManager.default.removeItem(at: staged) }
-        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            throw ShaderCatalogInstallError.serverRefused(http.statusCode)
-        }
-        try Task.checkCancellation()
 
         let received = Int(((try? FileManager.default.attributesOfItem(atPath: staged.path))?[.size]
             as? NSNumber)?.int64Value ?? 0)
@@ -125,8 +121,7 @@ final class ShaderCatalogInstaller: ObservableObject {
         }
         let folder = ShaderPresetLibrary.userRoot?.appendingPathComponent(name, isDirectory: true)
 
-        // The extract itself is not interruptible, so cancelling during it removes the pack
-        // afterwards rather than stopping it. Better than a lie about when cancelling works.
+        // Extraction can't be interrupted, so a cancel during it removes the pack afterwards.
         if Task.isCancelled {
             if let folder { try? FileManager.default.removeItem(at: folder) }
             throw CancellationError()
@@ -164,8 +159,7 @@ final class ShaderCatalogInstaller: ObservableObject {
 
     // MARK: - Staging
 
-    /// `defer` does not run when iOS kills a backgrounded app mid-download, which is the
-    /// ordinary outcome rather than an edge case, so the next launch sweeps what it left.
+    /// Removes downloads left in tmp when iOS killed the app mid-download, where defer never ran.
     static func sweepStagedDownloads() {
         let temporary = FileManager.default.temporaryDirectory
         let contents = (try? FileManager.default.contentsOfDirectory(
@@ -175,7 +169,33 @@ final class ShaderCatalogInstaller: ObservableObject {
         }
     }
 
-    private nonisolated static func sha256(of url: URL) throws -> String {
+    static func stage(_ source: URL) async throws -> URL {
+        let staged = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(stagingPrefix)\(UUID().uuidString).zip")
+        let temporary: URL
+        let response: URLResponse
+        do {
+            (temporary, response) = try await URLSession.shared.download(from: source)
+        } catch {
+            throw ShaderCatalogInstallError.unreachable
+        }
+        // The temp file stays ours until the move succeeds, so this removes it if the move throws.
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try? FileManager.default.removeItem(at: staged)
+        try FileManager.default.moveItem(at: temporary, to: staged)
+        do {
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                throw ShaderCatalogInstallError.serverRefused(http.statusCode)
+            }
+            try Task.checkCancellation()
+        } catch {
+            try? FileManager.default.removeItem(at: staged)
+            throw error
+        }
+        return staged
+    }
+
+    nonisolated static func sha256(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()

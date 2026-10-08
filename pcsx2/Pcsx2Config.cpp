@@ -170,7 +170,6 @@ namespace EmuFolders
 	std::string GameSettings;
 	std::string Textures;
 	std::string InputProfiles;
-	std::string Videos;
 
 	static bool ShouldUsePortableMode();
 	static std::string GetPortableModePath();
@@ -466,11 +465,11 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	vu0Overflow = true;
 	//vu0ExtraOverflow = false;
 	//vu0SignOverflow = false;
-	//vu0Underflow = false;
+	//vu0ExactMode = false;
 	vu1Overflow = true;
 	//vu1ExtraOverflow = false;
 	//vu1SignOverflow = false;
-	//vu1Underflow = false;
+	//vu1ExactMode = false;
 
 	fpuOverflow = true;
 	//fpuExtraOverflow = false;
@@ -507,6 +506,8 @@ void Pcsx2Config::RecompilerOptions::ApplySanityCheck()
 		vuIsOk = vuIsOk && vu0Overflow;
 	if (vu0SignOverflow)
 		vuIsOk = vuIsOk && vu0ExtraOverflow;
+	if (vu0ExactMode)
+		vuIsOk = vuIsOk && vu0SignOverflow;
 
 	if (!vuIsOk)
 	{
@@ -514,7 +515,7 @@ void Pcsx2Config::RecompilerOptions::ApplySanityCheck()
 		vu0Overflow = RecompilerOptions().vu0Overflow;
 		vu0ExtraOverflow = RecompilerOptions().vu0ExtraOverflow;
 		vu0SignOverflow = RecompilerOptions().vu0SignOverflow;
-		vu0Underflow = RecompilerOptions().vu0Underflow;
+		vu0ExactMode = RecompilerOptions().vu0ExactMode;
 	}
 
 	vuIsOk = true;
@@ -523,6 +524,8 @@ void Pcsx2Config::RecompilerOptions::ApplySanityCheck()
 		vuIsOk = vuIsOk && vu1Overflow;
 	if (vu1SignOverflow)
 		vuIsOk = vuIsOk && vu1ExtraOverflow;
+	if (vu1ExactMode)
+		vuIsOk = vuIsOk && vu1SignOverflow;
 
 	if (!vuIsOk)
 	{
@@ -530,7 +533,7 @@ void Pcsx2Config::RecompilerOptions::ApplySanityCheck()
 		vu1Overflow = RecompilerOptions().vu1Overflow;
 		vu1ExtraOverflow = RecompilerOptions().vu1ExtraOverflow;
 		vu1SignOverflow = RecompilerOptions().vu1SignOverflow;
-		vu1Underflow = RecompilerOptions().vu1Underflow;
+		vu1ExactMode = RecompilerOptions().vu1ExactMode;
 	}
 }
 
@@ -550,11 +553,11 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(vu0Overflow);
 	SettingsWrapBitBool(vu0ExtraOverflow);
 	SettingsWrapBitBool(vu0SignOverflow);
-	SettingsWrapBitBool(vu0Underflow);
+	SettingsWrapBitBool(vu0ExactMode);
 	SettingsWrapBitBool(vu1Overflow);
 	SettingsWrapBitBool(vu1ExtraOverflow);
 	SettingsWrapBitBool(vu1SignOverflow);
-	SettingsWrapBitBool(vu1Underflow);
+	SettingsWrapBitBool(vu1ExactMode);
 
 	SettingsWrapBitBool(fpuOverflow);
 	SettingsWrapBitBool(fpuExtraOverflow);
@@ -578,7 +581,7 @@ void Pcsx2Config::RecompilerOptions::SetEEClampMode(u32 value)
 
 u32 Pcsx2Config::RecompilerOptions::GetVUClampMode() const
 {
-	return vu0SignOverflow ? 3 : (vu0ExtraOverflow ? 2 : (vu0Overflow ? 1 : 0));
+	return vu0ExactMode ? 4 : (vu0SignOverflow ? 3 : (vu0ExtraOverflow ? 2 : (vu0Overflow ? 1 : 0)));
 }
 
 bool Pcsx2Config::RecompilerOptions::operator!=(const RecompilerOptions& right) const
@@ -693,15 +696,6 @@ const char* Pcsx2Config::GSOptions::BlendingLevelNames[] = {
 	"Maximum",
 	nullptr};
 
-const char* Pcsx2Config::GSOptions::CaptureContainers[] = {
-	"mp4",
-	"mkv",
-	"mov",
-	"avi",
-	"wav",
-	"mp3",
-	nullptr};
-const char* Pcsx2Config::GSOptions::DEFAULT_CAPTURE_CONTAINER = "mp4";
 
 const char* Pcsx2Config::AchievementsOptions::OverlayPositionNames[(size_t)AchievementOverlayPosition::MaxCount + 1] = {
 	"TopLeft",
@@ -720,15 +714,16 @@ const char* Pcsx2Config::GSOptions::GetRendererName(GSRendererType type)
 	switch (type)
 	{
 			// clang-format off
-		case GSRendererType::Auto:  return "Auto";
-		case GSRendererType::DX11:  return "Direct3D 11";
-		case GSRendererType::DX12:  return "Direct3D 12";
-		case GSRendererType::Metal: return "Metal";
-		case GSRendererType::OGL:   return "OpenGL";
-		case GSRendererType::VK:    return "Vulkan";
-		case GSRendererType::SW:    return "Software";
-		case GSRendererType::Null:  return "Null";
-		default:                    return "";
+		case GSRendererType::Auto:   return "Auto";
+		case GSRendererType::DX11:   return "Direct3D 11";
+		case GSRendererType::DX12:   return "Direct3D 12";
+		case GSRendererType::Metal:  return "Metal";
+		case GSRendererType::OGL:    return "OpenGL";
+		case GSRendererType::VK:     return "Vulkan";
+		case GSRendererType::SW:     return "Software";
+		case GSRendererType::Null:   return "Null";
+		case GSRendererType::NullHW: return "Null (HW)";
+		default:                     return "";
 			// clang-format on
 	}
 }
@@ -752,12 +747,12 @@ Pcsx2Config::GSOptions::GSOptions()
 	UseDebugDevice = false;
 	UseBlitSwapChain = false;
 	DisableShaderCache = false;
+	PrecompilePipelines = true;
 	DisableFramebufferFetch = false;
-	DisablePS2DepthQuantization = false;
 	DisableVertexShaderExpand = false;
-	EnableAdrenoFramebufferFetch = false;
 	ForceMaliFramebufferFetch = false;
 	SkipDuplicateFrames = true;
+	AdvancedFrameDisplay = false;
 	OsdMessagesPos = OsdOverlayPos::TopLeft;
 	OsdPerformancePos = OsdOverlayPos::TopRight;
 	OsdShowSpeed = false;
@@ -776,7 +771,6 @@ Pcsx2Config::GSOptions::GSOptions()
 	OsdShowSettings = false;
 	OsdshowPatches = false;
 	OsdShowInputs = false;
-	OsdShowVideoCapture = true;
 	OsdShowInputRec = true;
 	OsdShowTextureReplacements = false;
 
@@ -820,10 +814,6 @@ Pcsx2Config::GSOptions::GSOptions()
 	LoadTextureReplacementsAsync = true;
 	PrecacheTextureReplacements = false;
 
-	EnableVideoCapture = true;
-	EnableVideoCaptureParameters = false;
-	EnableAudioCapture = true;
-	EnableAudioCaptureParameters = false;
 }
 
 bool Pcsx2Config::GSOptions::operator==(const GSOptions& right) const
@@ -872,8 +862,10 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(UpscaleMultiplier) &&
 
 		OpEqu(AccurateBlendingUnit) &&
+		OpEqu(CopyRoadMaximumBlendingLevel) &&
 		OpEqu(TextureFiltering) &&
 		OpEqu(TexturePreloading) &&
+		OpEqu(TextureUpscale) &&
 		OpEqu(GSDumpCompression) &&
 		OpEqu(HWDownloadMode) &&
 		OpEqu(CASMode) &&
@@ -905,11 +897,12 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(UserHacks_BilinearHack) &&
 		OpEqu(OverrideTextureBarriers) &&
 		OpEqu(DepthFeedbackMode) &&
-		OpEqu(BackThreadMode) &&
+		OpEqu(BackThread) &&
 		OpEqu(BackThreadUseCore3) &&
 
 		OpEqu(CAS_Sharpness) &&
 		OpEqu(FSR_Sharpness) &&
+		OpEqu(SGSR_Sharpness) &&
 		OpEqu(ShadeBoost_Brightness) &&
 		OpEqu(ShadeBoost_Contrast) &&
 		OpEqu(ShadeBoost_Saturation) &&
@@ -934,19 +927,10 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(LsfgMultiplier) &&
 		OpEqu(LsfgDllPath) &&
 		OpEqu(LsfgPerformance) &&
+		OpEqu(LsfgFp16) &&
 		OpEqu(LsfgFlowScale) &&
 		OpEqu(LsfgTargetRate) &&
 
-		OpEqu(CaptureContainer) &&
-		OpEqu(VideoCaptureCodec) &&
-		OpEqu(VideoCaptureFormat) &&
-		OpEqu(VideoCaptureParameters) &&
-		OpEqu(AudioCaptureCodec) &&
-		OpEqu(AudioCaptureParameters) &&
-		OpEqu(VideoCaptureBitrate) &&
-		OpEqu(VideoCaptureWidth) &&
-		OpEqu(VideoCaptureHeight) &&
-		OpEqu(AudioCaptureBitrate) &&
 
 		OpEqu(Adapter) &&
 		OpEqu(AndroidGpuProfileOverride) &&
@@ -963,7 +947,7 @@ bool Pcsx2Config::GSOptions::operator!=(const GSOptions& right) const
 bool Pcsx2Config::GSOptions::IsRestartOption(const char* ini_key)
 {
 	// INI key names for the fields compared in RestartOptionsAreEqual below; keep the
-	// two in sync. Names match the field names except BackThreadMode, which is stored
+	// two in sync. Names match the field names except BackThread, which is stored
 	// as "GSBackThreadMode".
 	static constexpr const char* keys[] = {
 		"Renderer",
@@ -972,10 +956,9 @@ bool Pcsx2Config::GSOptions::IsRestartOption(const char* ini_key)
 		"DebugLabels",
 		"UseBlitSwapChain",
 		"DisableShaderCache",
+		"PrecompilePipelines",
 		"DisableFramebufferFetch",
-		"DisablePS2DepthQuantization",
 		"DisableVertexShaderExpand",
-		"EnableAdrenoFramebufferFetch",
 		"ForceMaliFramebufferFetch",
 		"OverrideTextureBarriers",
 		"DepthFeedbackMode",
@@ -1003,14 +986,13 @@ bool Pcsx2Config::GSOptions::RestartOptionsAreEqual(const GSOptions& right) cons
 		   OpEqu(DebugLabels) &&
 		   OpEqu(UseBlitSwapChain) &&
 		   OpEqu(DisableShaderCache) &&
+		   OpEqu(PrecompilePipelines) &&
 		   OpEqu(DisableFramebufferFetch) &&
-		   OpEqu(DisablePS2DepthQuantization) &&
 		   OpEqu(DisableVertexShaderExpand) &&
-		   OpEqu(EnableAdrenoFramebufferFetch) &&
 		   OpEqu(ForceMaliFramebufferFetch) &&
 		   OpEqu(OverrideTextureBarriers) &&
 		   OpEqu(DepthFeedbackMode) &&
-		   OpEqu(BackThreadMode) &&
+		   OpEqu(BackThread) &&
 		   OpEqu(BackThreadUseCore3) &&
 		   OpEqu(HWAA1) &&
 		   OpEqu(ExclusiveFullscreenControl);
@@ -1040,7 +1022,6 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapIntEnumEx(ScreenshotFormat, "ScreenshotFormat");
 	SettingsWrapEntry(ScreenshotQuality);
 	SettingsWrapBitBoolEx(OrganizeSnapshotsByGame, "OrganizeScreenshotsByGame");
-	SettingsWrapBitBoolEx(OrganizeVideoCaptureByGame, "OrganizeVideoCaptureByGame");
 	SettingsWrapEntry(StretchY);
 	SettingsWrapEntry(CustomAspectRatio);
 	SettingsWrapEntryEx(Crop[0], "CropLeft");
@@ -1060,12 +1041,12 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(DumpDrawLog);
 	SettingsWrapBitBool(UseBlitSwapChain);
 	SettingsWrapBitBool(DisableShaderCache);
+	SettingsWrapBitBool(PrecompilePipelines);
 	SettingsWrapBitBool(DisableFramebufferFetch);
-	SettingsWrapBitBool(DisablePS2DepthQuantization);
 	SettingsWrapBitBool(DisableVertexShaderExpand);
-	SettingsWrapBitBool(EnableAdrenoFramebufferFetch);
 	SettingsWrapBitBool(ForceMaliFramebufferFetch);
 	SettingsWrapBitBool(SkipDuplicateFrames);
+	SettingsWrapBitBool(AdvancedFrameDisplay);
 	SettingsWrapBitBool(OsdShowSpeed);
 	SettingsWrapBitBool(OsdShowFPS);
 	SettingsWrapBitBool(OsdShowVPS);
@@ -1082,7 +1063,6 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(OsdShowFrameTimes);
 	SettingsWrapBitBool(OsdShowVersion);
 	SettingsWrapBitBool(OsdShowHardwareInfo);
-	SettingsWrapBitBool(OsdShowVideoCapture);
 	SettingsWrapBitBool(OsdShowInputRec);
 	SettingsWrapBitBool(OsdShowTextureReplacements);
 	SettingsWrapBitBool(OsdBoldText);
@@ -1113,6 +1093,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapIntEnumEx(UserHacks_Limit24BitDepth, "UserHacks_Limit24BitDepth");
 	SettingsWrapBitBoolEx(UserHacks_EstimateTextureRegion, "UserHacks_EstimateTextureRegion");
 	SettingsWrapBitBoolEx(UserHacks_DrawBuffering, "UserHacks_DrawBuffering");
+	SettingsWrapBitBoolEx(UserHacks_RewriteLargeSTCoords, "UserHacks_RewriteLargeST");
 	SettingsWrapBitBoolEx(FXAA, "fxaa");
 	SettingsWrapBitBool(ShadeBoost);
 	SettingsWrapBitBoolEx(DumpGSData, "DumpGSData");
@@ -1134,11 +1115,6 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(LoadTextureReplacements);
 	SettingsWrapBitBool(LoadTextureReplacementsAsync);
 	SettingsWrapBitBool(PrecacheTextureReplacements);
-	SettingsWrapBitBool(EnableVideoCapture);
-	SettingsWrapBitBool(EnableVideoCaptureParameters);
-	SettingsWrapBitBool(VideoCaptureAutoResolution);
-	SettingsWrapBitBool(EnableAudioCapture);
-	SettingsWrapBitBool(EnableAudioCaptureParameters);
 
 	SettingsWrapIntEnumEx(LinearPresent, "linear_present_mode");
 	SettingsWrapIntEnumEx(InterlaceMode, "deinterlace_mode");
@@ -1164,6 +1140,16 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapIntEnumEx(AccurateBlendingUnit, "accurate_blending_unit");
 	SettingsWrapIntEnumEx(TextureFiltering, "filter");
 	SettingsWrapIntEnumEx(TexturePreloading, "texture_preloading");
+	{
+		// Persisted as an integer, so a hand-edited or newer value must not become an invalid
+		// enumerator. Read as an int: the enum is a u8, and a stored 257 would wrap onto 1.
+		int texture_upscale = static_cast<int>(TextureUpscale);
+		SettingsWrapEntryEx(texture_upscale, "TextureUpscale");
+		if (texture_upscale < static_cast<int>(GSTextureUpscaleMode::Off) ||
+			texture_upscale > static_cast<int>(GSTextureUpscaleMode::Raisr4x))
+			texture_upscale = static_cast<int>(GSTextureUpscaleMode::Off);
+		TextureUpscale = static_cast<GSTextureUpscaleMode>(texture_upscale);
+	}
 	SettingsWrapIntEnumEx(GSDumpCompression, "GSDumpCompression");
 	SettingsWrapIntEnumEx(HWDownloadMode, "HWDownloadMode");
 	SettingsWrapIntEnumEx(CASMode, "CASMode");
@@ -1171,6 +1157,8 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitfieldEx(CAS_Sharpness, "CASSharpness");
 	// Bitfield, not Entry: FSR_Sharpness is a u8, same as CAS_Sharpness above.
 	SettingsWrapBitfieldEx(FSR_Sharpness, "FSRSharpness");
+	// Bitfield for the same reason: u8.
+	SettingsWrapBitfieldEx(SGSR_Sharpness, "SGSRSharpness");
 	SettingsWrapBitfieldEx(Dithering, "dithering_ps2");
 	SettingsWrapBitfieldEx(MaxAnisotropy, "MaxAnisotropy");
 	SettingsWrapBitfieldEx(SWExtraThreads, "extrathreads");
@@ -1192,7 +1180,9 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapIntEnumEx(TriFilter, "TriFilter");
 	SettingsWrapBitfieldEx(OverrideTextureBarriers, "OverrideTextureBarriers");
 	SettingsWrapIntEnumEx(DepthFeedbackMode, "DepthFeedbackMode");
-	SettingsWrapIntEnumEx(BackThreadMode, "GSBackThreadMode");
+	// An integer on disk: 0 is off, any other value on. Older builds stored a four-way mode whose
+	// "on" value was 3, and the settings UIs bind the key as an integer.
+	BackThread = wrap.EntryBitfield(CURRENT_SETTINGS_SECTION, "GSBackThreadMode", BackThread ? 1 : 0, BackThread ? 1 : 0) != 0;
 	SettingsWrapEntryEx(BackThreadUseCore3, "GSBackThreadUseCore3");
 
 	SettingsWrapBitfield(ShadeBoost_Brightness);
@@ -1217,19 +1207,10 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitfieldEx(LsfgMultiplier, "LsfgMultiplier");
 	SettingsWrapEntryEx(LsfgDllPath, "LsfgDllPath");
 	SettingsWrapEntryEx(LsfgPerformance, "LsfgPerformance");
+	SettingsWrapEntryEx(LsfgFp16, "LsfgFp16");
 	SettingsWrapBitfieldEx(LsfgFlowScale, "LsfgFlowScale");
 	SettingsWrapBitfieldEx(LsfgTargetRate, "LsfgTargetRate");
 
-	SettingsWrapEntryEx(CaptureContainer, "CaptureContainer");
-	SettingsWrapEntryEx(VideoCaptureCodec, "VideoCaptureCodec");
-	SettingsWrapEntryEx(VideoCaptureFormat, "VideoCaptureFormat");
-	SettingsWrapEntryEx(VideoCaptureParameters, "VideoCaptureParameters");
-	SettingsWrapEntryEx(AudioCaptureCodec, "AudioCaptureCodec");
-	SettingsWrapEntryEx(AudioCaptureParameters, "AudioCaptureParameters");
-	SettingsWrapBitfieldEx(VideoCaptureBitrate, "VideoCaptureBitrate");
-	SettingsWrapBitfieldEx(VideoCaptureWidth, "VideoCaptureWidth");
-	SettingsWrapBitfieldEx(VideoCaptureHeight, "VideoCaptureHeight");
-	SettingsWrapBitfieldEx(AudioCaptureBitrate, "AudioCaptureBitrate");
 
 	SettingsWrapEntry(Adapter);
 	SettingsWrapEntry(AndroidGpuProfileOverride);
@@ -1315,6 +1296,8 @@ void Pcsx2Config::GSOptions::MaskUserHacks(bool respect_claims)
 		UserHacks_CPUCLUTRender = 0;
 	if (!keep(GSUserHackOverride::GPUTargetCLUT))
 		UserHacks_GPUTargetCLUTMode = GSGPUTargetCLUTMode::Disabled;
+	if (!keep(GSUserHackOverride::RewriteLargeST))
+		UserHacks_RewriteLargeSTCoords = false;
 
 	// No UI reaches these two, so there is nothing for a player to claim.
 	UserHacks_DisableSafeFeatures = false;
@@ -2114,6 +2097,25 @@ Pcsx2Config::AchievementsOptions::AchievementsOptions()
 	LBOverlays = true;
 }
 
+void Pcsx2Config::ArcadeOptions::LoadSave(SettingsWrapper& wrap)
+{
+	SettingsWrapSection("Arcade");
+	SettingsWrapEntry(ATAVerboseReads);
+	SettingsWrapEntry(RAMVerboseReads);
+	SettingsWrapEntry(SRAMVerboseReads);
+	SettingsWrapEntry(UARTVerbose);
+}
+
+bool Pcsx2Config::ArcadeOptions::operator==(const ArcadeOptions& right) const
+{
+	return OpEqu(ATAVerboseReads) && OpEqu(RAMVerboseReads) && OpEqu(SRAMVerboseReads) && OpEqu(UARTVerbose);
+}
+
+bool Pcsx2Config::ArcadeOptions::operator!=(const ArcadeOptions& right) const
+{
+	return !this->operator==(right);
+}
+
 void Pcsx2Config::AchievementsOptions::LoadSave(SettingsWrapper& wrap)
 {
 	SettingsWrapSection("Achievements");
@@ -2133,6 +2135,7 @@ void Pcsx2Config::AchievementsOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(LBOverlays);
 	SettingsWrapEntry(NotificationsDuration);
 	SettingsWrapEntry(LeaderboardsDuration);
+	SettingsWrapEntry(NotificationScale);
 	SettingsWrapIntEnumEx(OverlayPosition, "OverlayPosition");
 	SettingsWrapIntEnumEx(NotificationPosition, "NotificationPosition");
 	SettingsWrapEntry(InfoSoundName);
@@ -2144,13 +2147,14 @@ void Pcsx2Config::AchievementsOptions::LoadSave(SettingsWrapper& wrap)
 		//Clamp in case setting was updated manually using the INI
 		NotificationsDuration = std::clamp(NotificationsDuration, MINIMUM_NOTIFICATION_DURATION, MAXIMUM_NOTIFICATION_DURATION);
 		LeaderboardsDuration = std::clamp(LeaderboardsDuration, MINIMUM_NOTIFICATION_DURATION, MAXIMUM_NOTIFICATION_DURATION);
+		NotificationScale = std::clamp(NotificationScale, MINIMUM_NOTIFICATION_SCALE, MAXIMUM_NOTIFICATION_SCALE);
 	}
 }
 
 bool Pcsx2Config::AchievementsOptions::operator==(const AchievementsOptions& right) const
 {
 	return OpEqu(bitset) && OpEqu(NotificationsDuration) && OpEqu(LeaderboardsDuration) &&
-		   OpEqu(OverlayPosition) && OpEqu(NotificationPosition);
+		   OpEqu(NotificationScale) && OpEqu(OverlayPosition) && OpEqu(NotificationPosition);
 }
 
 bool Pcsx2Config::AchievementsOptions::operator!=(const AchievementsOptions& right) const
@@ -2238,6 +2242,7 @@ void Pcsx2Config::LoadSaveCore(SettingsWrapper& wrap)
 	Trace.LoadSave(wrap);
 
 	Achievements.LoadSave(wrap);
+	Arcade.LoadSave(wrap);
 
 	SettingsWrapEntry(GzipIsoIndexTemplate);
 	SettingsWrapEntry(PINESlot);
@@ -2547,7 +2552,6 @@ void EmuFolders::SetDefaults(SettingsInterface& si)
 	si.SetStringValue("Folders", "Cache", "cache");
 	si.SetStringValue("Folders", "Textures", "textures");
 	si.SetStringValue("Folders", "InputProfiles", "inputprofiles");
-	si.SetStringValue("Folders", "Videos", "videos");
 	si.SetStringValue("Folders", "DebuggerLayouts", "debuggerlayouts");
 	si.SetStringValue("Folders", "DebuggerSettings", "debuggersettings");
 }
@@ -2575,7 +2579,6 @@ void EmuFolders::LoadConfig(SettingsInterface& si)
 	Cache = LoadPathFromSettings(si, DataRoot, "Cache", "cache");
 	Textures = LoadPathFromSettings(si, DataRoot, "Textures", "textures");
 	InputProfiles = LoadPathFromSettings(si, DataRoot, "InputProfiles", "inputprofiles");
-	Videos = LoadPathFromSettings(si, DataRoot, "Videos", "videos");
 	DebuggerLayouts = LoadPathFromSettings(si, Settings, "DebuggerLayouts", "debuggerlayouts");
 	DebuggerSettings = LoadPathFromSettings(si, Settings, "DebuggerSettings", "debuggersettings");
 
@@ -2593,7 +2596,6 @@ void EmuFolders::LoadConfig(SettingsInterface& si)
 	Console.WriteLn("Cache Directory: %s", Cache.c_str());
 	Console.WriteLn("Textures Directory: %s", Textures.c_str());
 	Console.WriteLn("Input Profile Directory: %s", InputProfiles.c_str());
-	Console.WriteLn("Video Dumping Directory: %s", Videos.c_str());
 	Console.WriteLn("Debugger Layouts Directory: %s", DebuggerLayouts.c_str());
 	Console.WriteLn("Debugger Settings Directory: %s", DebuggerSettings.c_str());
 }
@@ -2614,7 +2616,6 @@ bool EmuFolders::EnsureFoldersExist()
 	result = FileSystem::CreateDirectoryPath(Cache.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(Textures.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(InputProfiles.c_str(), false) && result;
-	result = FileSystem::CreateDirectoryPath(Videos.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(DebuggerLayouts.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(DebuggerSettings.c_str(), false) && result;
 

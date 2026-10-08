@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "GS/Renderers/SW/GSSetupPrimCodeGenerator.arm64.h"
+#include "GS/Renderers/SW/GSBlockWalk.h"
+#include "GS/Renderers/SW/GSCoordinateWalk.h"
 #include "GS/Renderers/SW/GSVertexSW.h"
 
 #include "common/StringUtil.h"
@@ -9,8 +11,13 @@
 
 #include <cstdint>
 
-// On iOS dual-map JIT, write through the RW alias (rx + g_code_rw_offset).
-// Identity no-op elsewhere. Mirrors armGetWritableCodePtr in pcsx2/arm64/AsmHelpers.cpp.
+// On iOS dual-map JIT, write through the RW alias (rx + g_code_rw_offset);
+// identity elsewhere. Mirrors armGetWritableCodePtr in pcsx2/arm64/AsmHelpers.cpp.
+// TargetConditionals.h defines TARGET_OS_IPHONE; without it the gate below is
+// false on iOS and the RW alias is never used.
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #include "common/Darwin/DarwinMisc.h"
 static void* gsGetWritableCodePtr(void* rx_ptr)
@@ -52,7 +59,11 @@ GSSetupPrimCodeGenerator::GSSetupPrimCodeGenerator(u64 key, void* code, size_t m
 
 void GSSetupPrimCodeGenerator::Generate()
 {
-	const bool needs_shift = ((m_en.z || m_en.f) && m_sel.prim != GS_SPRITE_CLASS) || m_en.t || (m_en.c && m_sel.iip);
+	// Colour and fog lane offsets and steps are built by
+	// GSDrawScanline::SetupColourWalkTables, which the rasterizer calls after this
+	// code runs. Depth and the texture coordinate walk one vector at a time and
+	// still need the shift tables.
+	const bool needs_shift = (m_en.z && m_sel.prim != GS_SPRITE_CLASS) || m_en.t;
 	if (needs_shift)
 	{
 		armAsm->Mov(x4, reinterpret_cast<intptr_t>(g_const.m_shift));
@@ -84,31 +95,7 @@ void GSSetupPrimCodeGenerator::Depth()
 
 	if (m_sel.prim != GS_SPRITE_CLASS)
 	{
-		if (m_en.f)
-		{
-			// GSVector4 df = t.wwww();
-			armAsm->Add(_scratchaddr, _dscan, offsetof(GSVertexSW, t.w));
-			armAsm->Ld1r(v1.V4S(), MemOperand(_scratchaddr));
-
-			// m_local.d4.f = GSVector4i(df * 4.0f).xxzzlh();
-
-			armAsm->Fmul(v2.V4S(), v1.V4S(), v3.V4S());
-			armAsm->Fcvtzs(v2.V4S(), v2.V4S());
-			armAsm->Trn1(v2.V8H(), v2.V8H(), v2.V8H());
-
-			armAsm->Str(v2.V4S(), _local(d4.f));
-
-			for (int i = 0; i < (m_sel.notest ? 1 : 4); i++)
-			{
-				// m_local.d[i].f = GSVector4i(df * m_shift[i]).xxzzlh();
-
-				armAsm->Fmul(v2.V4S(), v1.V4S(), VRegister(4 + i, kFormat4S));
-				armAsm->Fcvtzs(v2.V4S(), v2.V4S());
-				armAsm->Trn1(v2.V8H(), v2.V8H(), v2.V8H());
-
-				armAsm->Str(v2.V4S(), _local(d[i].f));
-			}
-		}
+		// Fog's lane table and step come from the colour walk (GSColourWalk.h).
 
 		if (m_en.z)
 		{
@@ -172,22 +159,211 @@ void GSSetupPrimCodeGenerator::Texture()
 		return;
 	}
 
+	// Twice the triangle's area in 12.4 units squared, as an exact integer, and
+	// from it the mask the lag is gated on: all-ones where the trail is taken, zero
+	// where the setup inverts exactly (see GSCoordinateWalk.h).
+	//
+	// The position lane is the 12.4 word over sixteen, so FCVTZS at four fractional
+	// bits recovers it and the cross product runs in integers. The C++ reference
+	// forms the same integer the same way.
+	//
+	// Lines and points have no area and keep the lag.
+	if (m_sel.prim != GS_SPRITE_CLASS)
+	{
+		if (m_sel.prim == GS_TRIANGLE_CLASS)
+		{
+			const VRegister vp[3] = {d0, d1, d2};
+
+			for (int k = 0; k < 3; k++)
+			{
+				armAsm->Ldrh(w4, MemOperand(_index, sizeof(u16) * k));
+				armAsm->Lsl(w4, w4, 6); // * sizeof(GSVertexSW)
+				armAsm->Add(x4, _vertex, x4);
+				armAsm->Ldr(vp[k], MemOperand(x4, offsetof(GSVertexSW, p)));
+				armAsm->Fcvtzs(vp[k].V2S(), vp[k].V2S(), 4);
+			}
+
+			// d1 = p1 - p0, d2 = p2 - p0, then the cross as (d1.x*d2.y, d1.y*d2.x)
+			// and the difference of the pair.
+			armAsm->Sub(v1.V2S(), v1.V2S(), v0.V2S());
+			armAsm->Sub(v2.V2S(), v2.V2S(), v0.V2S());
+			armAsm->Rev64(v2.V2S(), v2.V2S());
+			armAsm->Smull(v0.V2D(), v1.V2S(), v2.V2S());
+			armAsm->Ext(v1.V16B(), v0.V16B(), v0.V16B(), 8);
+			armAsm->Sub(v0.V2D(), v0.V2D(), v1.V2D());
+			armAsm->Abs(v0.V2D(), v0.V2D());
+			armAsm->Fmov(x4, d0);
+
+			// A power of two clears every bit below its own, and zero is not one.
+			armAsm->Sub(x5, x4, 1);
+			armAsm->Tst(x4, x5);
+			armAsm->Cset(w5, eq);
+			armAsm->Cmp(x4, 0);
+			armAsm->Cset(w6, ne);
+			armAsm->And(w5, w5, w6);
+			armAsm->Cmp(w5, 0);
+			armAsm->Csetm(w6, eq);
+		}
+		else
+		{
+			armAsm->Mov(w6, -1);
+		}
+	}
+
 	// GSVector4 t = dscan.t;
 
 	armAsm->Ldr(v0, MemOperand(_dscan, offsetof(GSVertexSW, t)));
+
+	// The coordinate a triangle samples at trails the exact plane in the direction
+	// the walk is going, by less than a sixteenth of a texel (see CSetupPrim in
+	// GSDrawScanline.cpp). Sprites take nothing.
+	//
+	// A compare against zero leaves all-ones (-1) in the lanes that walk forward,
+	// so negating it gives the one unit the scanline subtracts, and zero on still
+	// and backward axes. The compare is on the step the walk actually takes, which
+	// on the affine route is the floored one: a gradient below a grid unit per
+	// pixel walks nowhere and does not trail.
+	//
+
+	if (m_sel.stqplane)
+	{
+		// The console's S, T and Q planes (GSPerspectivePlane.h). dscan.t holds the
+		// steps as integers, in units of g/2^14, already what the accumulator adds per
+		// pixel; nothing is floored here. There is no coordinate lag on this route (see
+		// CSetupPrim), and the lane offsets are the step times each lane's distance from
+		// the span's anchor. Every lane wraps at 32 bits, as the accumulator does.
+		//
+		// v0 holds dscan.t.
+		armAsm->Movi(_vscratch.V4S(), 0);
+		armAsm->Str(_vscratch, _local(tclag.u));
+		armAsm->Str(_vscratch, _local(tclag.v));
+
+		// m_local.d4.stq = step * 4;
+		armAsm->Shl(v2.V4S(), v0.V4S(), 2);
+		armAsm->Str(v2, MemOperand(_locals, offsetof(GSScanlineLocalData, d4.stq)));
+
+		armAsm->Mov(_scratchaddr, reinterpret_cast<intptr_t>(g_const.m_lane));
+
+		for (int j = 0; j < 3; j++)
+		{
+			// GSVector4i ds = step.xxxx(), dt = step.yyyy(), dq = step.zzzz();
+
+			armAsm->Dup(v2.V4S(), v0.V4S(), j);
+
+			for (int i = 0; i < (m_sel.notest ? 1 : 4); i++)
+			{
+				// m_local.d[i].s/t/q = ds/dt/dq * m_lane[i];
+
+				armAsm->Ldr(_vscratch, MemOperand(_scratchaddr, i * sizeof(g_const.m_lane[0])));
+				armAsm->Mul(v1.V4S(), v2.V4S(), _vscratch.V4S());
+
+				switch (j)
+				{
+					case 0: armAsm->Str(v1, _local(d[i].s)); break;
+					case 1: armAsm->Str(v1, _local(d[i].t)); break;
+					case 2: armAsm->Str(v1, _local(d[i].q)); break;
+				}
+			}
+		}
+
+		return;
+	}
+
+	if (m_sel.uvwalk)
+	{
+		// The texel accumulator is seed + n * floor(step) on a 12.15 grid
+		// (GSCoordinateWalk.h), so the per-pixel step is floored once, here, and every
+		// lane and vector offset below is an integer multiple of it. Truncating each
+		// product instead gives floor(n * step), a different sequence that does not
+		// match the console.
+		//
+		// FCVTMS rounds toward minus infinity, as dropping the bits below a fixed-point
+		// register does; the BIC puts the result on the UV grid (GS_UV_GRID_MASK).
+
+		// GSVector4i step = GSVector4i(t.floor()) & GS_UV_GRID_MASK;
+		armAsm->Fcvtms(v1.V4S(), v0.V4S());
+		armAsm->Bic(v1.V4S(), (1 << GS_UV_GRID_SHIFT) - 1, 0);
+
+		if (m_sel.prim != GS_SPRITE_CLASS)
+		{
+			// v0 held dscan.t and is spent: the step lives in v1 from here on, and
+			// w6 carries the area gate from the top of this function.
+			armAsm->Dup(v0.V4S(), w6);
+
+			for (int j = 0; j < 2; j++)
+			{
+				armAsm->Dup(_vscratch.V4S(), v1.V4S(), j);
+				armAsm->Cmgt(_vscratch.V4S(), _vscratch.V4S(), 0);
+				armAsm->And(_vscratch.V16B(), _vscratch.V16B(), v0.V16B());
+				armAsm->Neg(_vscratch.V4S(), _vscratch.V4S());
+				armAsm->Str(_vscratch, j == 0 ? _local(tclag.u) : _local(tclag.v));
+			}
+		}
+
+		// m_local.d4.stq = step * 4;
+		armAsm->Shl(v2.V4S(), v1.V4S(), 2);
+		armAsm->Str(v2, MemOperand(_locals, offsetof(GSScanlineLocalData, d4.stq)));
+
+		armAsm->Mov(_scratchaddr, reinterpret_cast<intptr_t>(g_const.m_lane));
+
+		for (int j = 0; j < 2; j++)
+		{
+			// GSVector4i ds = step.xxxx();
+			// GSVector4i dt = step.yyyy();
+
+			armAsm->Dup(v2.V4S(), v1.V4S(), j);
+
+			for (int i = 0; i < (m_sel.notest ? 1 : 4); i++)
+			{
+				// m_local.d[i].s/t = ds/dt * m_lane[i];
+
+				armAsm->Ldr(_vscratch, MemOperand(_scratchaddr, i * sizeof(g_const.m_lane[0])));
+				armAsm->Mul(v0.V4S(), v2.V4S(), _vscratch.V4S());
+
+				switch (j)
+				{
+					case 0: armAsm->Str(v0, _local(d[i].s)); break;
+					case 1: armAsm->Str(v0, _local(d[i].t)); break;
+				}
+			}
+		}
+
+		return;
+	}
+
+	if (m_sel.prim != GS_SPRITE_CLASS)
+	{
+		// A constant-Q triangle's own ST plane and a live divide take the same rule:
+		// a live divide at a power-of-two area does not trail either. v0 keeps dscan.t
+		// for the step below; v1 carries the area gate from the top of this function.
+		armAsm->Dup(v1.V4S(), w6);
+
+		for (int j = 0; j < 2; j++)
+		{
+			armAsm->Dup(_vscratch.V4S(), v0.V4S(), j);
+			armAsm->Fcmgt(_vscratch.V4S(), _vscratch.V4S(), 0.0);
+			armAsm->And(_vscratch.V16B(), _vscratch.V16B(), v1.V16B());
+			armAsm->Neg(_vscratch.V4S(), _vscratch.V4S());
+			armAsm->Str(_vscratch, j == 0 ? _local(tclag.u) : _local(tclag.v));
+		}
+	}
+
+	// The multiply is by m_shift[0], four pixels: one vector, not one block.
+	// Colour and fog take the eight-wide block (GSDrawScanline::SetupColourWalkTables);
+	// the coordinate does not, see GSBlockWalk.h and TheCoordinateStepStaysOneVector.
+	// Taking the block step here would advance the coordinate eight pixels every four.
+	//
+	// A constant-Q triangle's ST plane arrives as a 16.16 integer too and the
+	// scanline reads it the same way, but it is not snapped to the accumulator's
+	// grid, so this path keeps the float step.
+	//
+	// m_local.d4.stq = GSVector4i(t * 4.0f) or t * 4.0f;
 	armAsm->Fmul(v1.V4S(), v0.V4S(), v3.V4S());
 
 	if (m_sel.fst)
-	{
-		// m_local.d4.stq = GSVector4i(t * 4.0f);
 		armAsm->Fcvtzs(v1.V4S(), v1.V4S());
-		armAsm->Str(v1, MemOperand(_locals, offsetof(GSScanlineLocalData, d4.stq)));
-	}
-	else
-	{
-		// m_local.d4.stq = t * 4.0f;
-		armAsm->Str(v1, MemOperand(_locals, offsetof(GSScanlineLocalData, d4.stq)));
-	}
+
+	armAsm->Str(v1, MemOperand(_locals, offsetof(GSScanlineLocalData, d4.stq)));
 
 	for (int j = 0, k = m_sel.fst ? 2 : 3; j < k; j++)
 	{
@@ -199,32 +375,18 @@ void GSSetupPrimCodeGenerator::Texture()
 
 		for (int i = 0; i < (m_sel.notest ? 1 : 4); i++)
 		{
-			// GSVector4 v = ds/dt * m_shift[i];
+			// m_local.d[i].s/t/q = ds/dt/dq * m_shift[i];
 
 			armAsm->Fmul(v2.V4S(), v1.V4S(), VRegister(4 + i, 128, 4));
 
 			if (m_sel.fst)
-			{
-				// m_local.d[i].s/t = GSVector4i(v);
-
 				armAsm->Fcvtzs(v2.V4S(), v2.V4S());
 
-				switch (j)
-				{
-					case 0: armAsm->Str(v2, _local(d[i].s)); break;
-					case 1: armAsm->Str(v2, _local(d[i].t)); break;
-				}
-			}
-			else
+			switch (j)
 			{
-				// m_local.d[i].s/t/q = v;
-
-				switch (j)
-				{
-					case 0: armAsm->Str(v2, _local(d[i].s)); break;
-					case 1: armAsm->Str(v2, _local(d[i].t)); break;
-					case 2: armAsm->Str(v2, _local(d[i].q)); break;
-				}
+				case 0: armAsm->Str(v2, _local(d[i].s)); break;
+				case 1: armAsm->Str(v2, _local(d[i].t)); break;
+				case 2: armAsm->Str(v2, _local(d[i].q)); break;
 			}
 		}
 	}
@@ -239,68 +401,11 @@ void GSSetupPrimCodeGenerator::Color()
 
 	if (m_sel.iip)
 	{
-		// GSVector4 c = dscan.c;
-		armAsm->Ldr(v16, MemOperand(_dscan, offsetof(GSVertexSW, c)));
-
-		// GSVector4i tmp = GSVector4i(dscan.c * step_shift).xzyw();
-		// local.d4.c = tmp.uzp1_16(tmp); // Not currently in GSVector since that's mainly targeting x86 for now
-		armAsm->Fmul(v2.V4S(), v16.V4S(), v3.V4S());
-		armAsm->Fcvtzs(v2.V4S(), v2.V4S());
-		armAsm->Rev64(_vscratch.V4S(), v2.V4S());
-		armAsm->Uzp1(v2.V4S(), v2.V4S(), _vscratch.V4S());
-		armAsm->Uzp1(v2.V8H(), v2.V8H(), v2.V8H());
-		armAsm->Str(v2, MemOperand(_locals, offsetof(GSScanlineLocalData, d4.c)));
-
-		// GSVector4 dr = c.xxxx();
-		// GSVector4 db = c.zzzz();
-
-		armAsm->Dup(v0.V4S(), v16.V4S(), 0);
-		armAsm->Dup(v1.V4S(), v16.V4S(), 2);
-
-		for (int i = 0; i < (m_sel.notest ? 1 : 4); i++)
-		{
-			// VectorI r = VectorI(dr * shift[1 + i]);
-
-			armAsm->Fmul(v2.V4S(), v0.V4S(), VRegister(4 + i, kFormat4S));
-			armAsm->Fcvtzs(v2.V4S(), v2.V4S());
-
-			// VectorI b = VectorI(db * shift[1 + i]);
-
-			armAsm->Fmul(v3.V4S(), v1.V4S(), VRegister(4 + i, kFormat4S));
-			armAsm->Fcvtzs(v3.V4S(), v3.V4S());
-
-			// m_local.d[i].rb = r.trn1_16(b); // Not currently in GSVector since that's mainly targeting x86 for now
-			armAsm->Trn1(v2.V8H(), v2.V8H(), v3.V8H());
-			armAsm->Str(v2, _local(d[i].rb));
-		}
-
-		// GSVector4 c = dscan.c;
-
-		// GSVector4 dg = c.yyyy();
-		// GSVector4 da = c.wwww();
-
-		armAsm->Dup(v0.V4S(), v16.V4S(), 1);
-		armAsm->Dup(v1.V4S(), v16.V4S(), 3);
-
-		for (int i = 0; i < (m_sel.notest ? 1 : 4); i++)
-		{
-			// VectorI g = VectorI(dg * shift[1 + i]);
-
-			armAsm->Fmul(v2.V4S(), v0.V4S(), VRegister(4 + i, kFormat4S));
-			armAsm->Fcvtzs(v2.V4S(), v2.V4S());
-
-			// VectorI a = VectorI(da * shift[1 + i]);
-
-			armAsm->Fmul(v3.V4S(), v1.V4S(), VRegister(4 + i, kFormat4S));
-			armAsm->Fcvtzs(v3.V4S(), v3.V4S());
-
-			// m_local.d[i].ga = g.trn1_16(a); // Not currently in GSVector since that's mainly targeting x86 for now
-
-			armAsm->Trn1(v2.V8H(), v2.V8H(), v3.V8H());
-			armAsm->Str(v2, _local(d[i].ga));
-		}
+		// A gouraud primitive's colour lane table and step are built by
+		// GSDrawScanline::SetupColourWalkTables after this code runs. See GSColourWalk.h.
+		return;
 	}
-	else
+
 	{
 		// GSVector4i c = GSVector4i(vertex[index[last].c);
 

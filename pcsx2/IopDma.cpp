@@ -11,6 +11,7 @@
 
 #include "Sif.h"
 #include "DEV9/DEV9.h"
+#include "common/ARCADE.h"
 
 using namespace R3000A;
 
@@ -151,18 +152,19 @@ void psxDma6(u32 madr, u32 bcr, u32 chcr)
 
 void psxDma8(u32 madr, u32 bcr, u32 chcr)
 {
-	const int size = (bcr >> 16) * (bcr & 0xFFFF) * 8;
+	const int size = (bcr >> 16) * (bcr & 0xFFFF);
 
 	switch (chcr & 0x01000201)
 	{
 		case 0x01000201: //cpu to dev9 transfer
 			PSXDMA_LOG("*** DMA 8 - DEV9 mem2dev9 *** %lx addr = %lx size = %lx", chcr, madr, bcr);
-			DEV9writeDMA8Mem((u32*)iopPhysMem(madr), size);
+			DEV9writeDMA8Mem((u32*)iopPhysMem(madr), size * 4);
 			break;
 
 		case 0x01000200: //dev9 to cpu transfer
 			PSXDMA_LOG("*** DMA 8 - DEV9 dev9mem *** %lx addr = %lx size = %lx", chcr, madr, bcr);
-			DEV9readDMA8Mem((u32*)iopPhysMem(madr), size);
+			DEV9readDMA8Mem((u32*)iopPhysMem(madr), size * 4);
+			psxCpu->Clear(madr, size);
 			break;
 
 		default:
@@ -188,6 +190,11 @@ void psxDma9(u32 madr, u32 bcr, u32 chcr)
 	sif0.iop.end = false;
 
 	SIF0Dma();
+
+	// On an arcade board, clear DMA9's busy bit once SIF0 is idle, so each queued sceSifSetDma kicks
+	// again and reads its reused bounce buffer fresh; otherwise movies corrupt (PCSX2x6).
+	if (Arcade::IsActive() && !sif0.iop.busy)
+		HW_DMA9_CHCR &= ~0x01000000;
 }
 
 void psxDma10(u32 madr, u32 bcr, u32 chcr)

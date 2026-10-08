@@ -8,7 +8,10 @@
 #include "R3000A.h"
 #include "R5900.h"
 #include "ps2/BiosTools.h"
+#include "Config.h"
 #include "VMManager.h"
+#include "DEV9/ACJV.h"
+#include "common/ARCADE.h"
 
 #include <ctype.h>
 #include <fmt/format.h>
@@ -85,6 +88,30 @@ void Hle_SetHostRoot(const char* bootFilename)
 {
 	std::string path = Path::RealPath(bootFilename);
 	hostRoot = Path::ToNativePath(Path::GetDirectory(path));
+
+#if defined(__ANDROID__)
+	// A SAF content:// URI has no parent directory to derive a host: root from, and RealPath
+	// does not know the scheme: it sees a string that does not begin with '/', decides it is
+	// RELATIVE, and combines it with the working directory. What comes out exists nowhere, so
+	// host_path() below denies every read as "outside of ELF directory" and a game that loads
+	// through host: sits on its loading screen forever. That is the Biohazard Outbreak
+	// quick-load ELF on Android: the ELF itself boots (host_path has an explicit escape hatch
+	// for the override), and then every file it goes on to ask for is refused.
+	//
+	// Give host: its own real folder instead of deriving one. EmuFolders::DataRoot is a plain
+	// filesystem path on Android — set from Java at startup, not SAF — so the descendant checks
+	// work unchanged, and the user gets one known place to put the files such a game expects.
+	//
+	// Also covers a real path whose directory is simply gone, which fails the same way.
+	if (std::strncmp(bootFilename, "content://", 10) == 0 ||
+		hostRoot.empty() || !FileSystem::DirectoryExists(hostRoot.c_str()))
+	{
+		hostRoot = Path::Combine(EmuFolders::DataRoot, "hostfs");
+		FileSystem::EnsureDirectoryExists(hostRoot.c_str(), true);
+		Console.WriteLn("HLE Host: boot path has no usable directory; using the hostfs folder.");
+	}
+#endif
+
 	Console.WriteLn("HLE Host: Set 'host:' root path to: %s", hostRoot.c_str());
 }
 
@@ -549,6 +576,20 @@ namespace R3000A
 			// normalization; the downstream file open is content-URI aware.
 			if (!path.empty() && path == VMManager::Internal::GetELFOverride())
 				return std::string(path);
+
+#if defined(__ANDROID__)
+			// Fast boot asks for the override by its file name alone, host:<name>, since the host:
+			// root is meant to be its folder (eeloadHook, upstream ca03806a4c). A content:// URI has
+			// no folder: Hle_SetHostRoot points host: at the hostfs folder instead, the name found
+			// nothing there, and the BIOS fell back to its browser. An ELF picked through Android's
+			// file picker never started (#759, OPL: "Failed to read ELF being loaded:
+			// host:primary%3APs2%2FOPNPS2LD.ELF"). That name is the override, so it opens the override.
+			{
+				const std::string& elf_override = VMManager::Internal::GetELFOverride();
+				if (!path.empty() && elf_override.starts_with("content://") && path == Path::GetFileName(elf_override))
+					return elf_override;
+			}
+#endif
 
 			// We are NOT allowing to use the root of the host unit.
 			// For now it just supports relative folders from the location of the elf
@@ -1239,6 +1280,42 @@ namespace R3000A
 		}
 	} // namespace loadcore
 
+	// Namco System 246/256 (PCSX2x6): the DAEMON module's sec_checker thread (priority 126) races mcman
+	// for mcman_io_sema during card detection, so dongle file opens (mc0:ACCORE...) fail with fd=-6. On a
+	// real board the race doesn't show, the IOP scheduling being coarser. Arcade sessions only, and only
+	// while ACJV's "suppress DAEMON security thread" is on (the default); a console never gets here with
+	// anything to suppress, and a flag an arcade session left behind is dropped at its next call.
+	namespace thbase
+	{
+		static bool s_suppress_next_start = false;
+
+		int CreateThread_HLE()
+		{
+			if (!Arcade::IsActive() || !ACJV::IsSuppressDaemonEnabled())
+				return 0;
+			const u32 priority = iopMemRead32(a0 + 16);
+			if (priority >= 126)
+			{
+				Console.WriteLn("IOP: SUPPRESSING thread (pri=%d >= 126)", priority);
+				s_suppress_next_start = true;
+			}
+			return 0;
+		}
+
+		int StartThread_HLE()
+		{
+			if (!Arcade::IsActive() || !s_suppress_next_start)
+			{
+				s_suppress_next_start = false;
+				return 0;
+			}
+			s_suppress_next_start = false;
+			v0 = 0;
+			pc = ra;
+			return 1;
+		}
+	} // namespace thbase
+
 	namespace intrman
 	{
 		// clang-format off
@@ -1363,6 +1440,15 @@ namespace R3000A
 		MODULE(sysmem)
 			EXPORT_H( 14, Kprintf)
 		END_MODULE
+		// Arcade sessions only: the recompilers bake a found handler into the IOP code, so a console
+		// game never gets these calls compiled in at all.
+		if (Arcade::IsActive())
+		{
+			MODULE(thbase)
+				EXPORT_H(  4, CreateThread)
+				EXPORT_H(  6, StartThread)
+			END_MODULE
+		}
 
 		// Special case with ioman and iomanX
 		// They are mostly compatible excluding stat structures

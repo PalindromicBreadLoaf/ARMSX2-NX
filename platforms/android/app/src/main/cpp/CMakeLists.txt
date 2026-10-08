@@ -30,6 +30,26 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # Android is a non-desktop frontend: no Qt UI.
 set(ENABLE_QT_UI OFF CACHE BOOL "" FORCE)
 
+# This build has libadrenotools (added below), so the custom Vulkan driver
+# splice in VKLoader.cpp is compiled in. Other Android builds - the libretro
+# core the buildbot makes - do not.
+set(ARMSX2_USE_ADRENOTOOLS ON CACHE BOOL "" FORCE)
+
+# Same for the Oboe audio backend: SearchForStuff below adds the vendored
+# 3rdparty/oboe, and this is the only build that has it.
+set(ARMSX2_USE_OBOE ON CACHE BOOL "" FORCE)
+
+# This build vendors shaderc (3rdparty/shaderc) and links the `shaderc` target;
+# pcsx2/CMakeLists.txt leaves Shaderc::shaderc_shared alone when it sees this.
+#
+# Belt-and-braces, not load-bearing: this build's SearchForStuff only calls
+# find_package(Shaderc) in its "upstream desktop, not used by ARMSX2" branch, so
+# Shaderc::shaderc_shared is never created here and the TARGET test over there
+# already excludes us. It earns its keep the day this build's shaderc sourcing
+# changes - which is the day the two copies could otherwise both be linked, and
+# a duplicate-symbol pile is a poor way to find that out.
+set(ARMSX2_USE_BUNDLED_SHADERC ON CACHE BOOL "" FORCE)
+
 # The core's common/ and pcsx2/ CMakeLists guard on this sentinel (it is normally
 # set by the desktop top-level CMakeLists.txt, which the Android build bypasses).
 set(TOP_CMAKE_WAS_SOURCED TRUE)
@@ -206,6 +226,20 @@ target_link_libraries(savers log GLESv2 m)
 
 add_subdirectory(3rdparty/adrenotools)
 
+# pcsx2-gsrunner as an on-demand NDK executable for adb-shell replay runs on Android
+# devices. EXCLUDE_FROM_ALL keeps every APK build unchanged; build it explicitly with
+# --target pcsx2-gsrunner.
+add_subdirectory("${ARMSX2_ROOT}/pcsx2-gsrunner" "${CMAKE_BINARY_DIR}/pcsx2-gsrunner" EXCLUDE_FROM_ALL)
+
+# armsx2-driverdiag, the driver report as an adb-shell tool. Behind an option, not only
+# EXCLUDE_FROM_ALL: the Android Gradle plugin builds every executable target it finds, whatever
+# EXCLUDE_FROM_ALL says, so an app build must not see this target at all. It is never packaged.
+# Build it with -DARMSX2_BUILD_DRIVERDIAG=ON and --target armsx2-driverdiag.
+option(ARMSX2_BUILD_DRIVERDIAG "Add the armsx2-driverdiag command-line tool (never part of the app)" OFF)
+if(ARMSX2_BUILD_DRIVERDIAG)
+	add_subdirectory("${ARMSX2_ROOT}/pcsx2-driverdiag" "${CMAKE_BINARY_DIR}/pcsx2-driverdiag" EXCLUDE_FROM_ALL)
+endif()
+
 # librashader: RetroArch (.slangp) shader chains for the GS post-process path, for BOTH
 # the Vulkan and OpenGL(ES) renderers. Rust-built and fetched at configure time from a
 # pinned commit (see the subdir's CMakeLists for why it can't be vendored). OPTIONAL:
@@ -302,6 +336,7 @@ target_link_libraries(${ARMSX2_EMUCORE_LIBRARY_NAME} PRIVATE
 	shaderc
 	vixl
 	adrenotools
+	Zstd::Zstd
 	android
 	log
 )

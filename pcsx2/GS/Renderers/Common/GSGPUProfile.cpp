@@ -5,9 +5,12 @@
 
 #include <array>
 #include <cctype>
+#include <utility>
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
+#elif defined(__linux__)
+#include <cstdio>
 #endif
 
 namespace GpuProfileDetail
@@ -84,6 +87,32 @@ static std::string GetAndroidProperty(const char* name)
 	const int length = __system_property_get(name, value.data());
 	return (length > 0) ? std::string(value.data(), static_cast<size_t>(length)) : std::string();
 }
+#elif defined(__linux__)
+// SoC identity on Linux handhelds, which have no Android property service. The device-tree
+// compatible list is NUL-separated "vendor,board" strings, most specific first; on MediaTek it
+// names the chipset (e.g. "anbernic,rg477v" then "mediatek,mt6897"). The graphics APIs only
+// describe the GPU. Systems without a device tree contribute no hint.
+static std::string GetDeviceTreeCompatible()
+{
+	std::FILE* file = std::fopen("/proc/device-tree/compatible", "rb");
+	if (!file)
+		return std::string();
+
+	std::array<char, 512> buffer = {};
+	const size_t length = std::fread(buffer.data(), 1, buffer.size(), file);
+	std::fclose(file);
+
+	// NULs become spaces so a substring search cannot match across two entries.
+	std::string compatible;
+	compatible.reserve(length);
+	for (size_t i = 0; i < length; i++)
+		compatible.push_back((buffer[i] == '\0') ? ' ' : buffer[i]);
+
+	while (!compatible.empty() && compatible.back() == ' ')
+		compatible.pop_back();
+
+	return compatible;
+}
 #endif
 
 static std::string BuildHints(std::string_view gpu_vendor, std::string_view gpu_renderer_or_name,
@@ -95,6 +124,7 @@ static std::string BuildHints(std::string_view gpu_vendor, std::string_view gpu_
 	AppendHint(hints, "driver_name", driver_context.driver_name);
 	AppendHint(hints, "driver_info", driver_context.driver_info);
 	AppendHint(hints, "api_version", driver_context.api_version_string);
+	AppendHint(hints, "platform", driver_context.platform_hints);
 
 #if defined(__ANDROID__)
 	static constexpr const char* property_names[] = {
@@ -118,6 +148,8 @@ static std::string BuildHints(std::string_view gpu_vendor, std::string_view gpu_
 
 	for (const char* property_name : property_names)
 		AppendHint(hints, property_name, GetAndroidProperty(property_name));
+#elif defined(__linux__)
+	AppendHint(hints, "dt_compatible", GetDeviceTreeCompatible());
 #endif
 
 	return hints;
@@ -128,9 +160,8 @@ static bool LooksLikeMediaTekSoc(std::string_view lowered_hints)
 	if (GpuProfileDetail::ContainsAny(lowered_hints, {"mediatek", "dimensity", "helio"}))
 		return true;
 
-	// MediaTek board/platform properties commonly use compact part numbers such as mt6877 or
-	// mt6989z without spelling out the vendor. Require a token boundary and four digits to avoid
-	// treating an unrelated occurrence of "mt" as a chipset identifier.
+	// Bare part numbers such as mt6877 or mt6989z. Require a token boundary and four digits so an
+	// unrelated "mt" does not match.
 	for (size_t i = 0; i + 6 <= lowered_hints.size(); i++)
 	{
 		if (lowered_hints[i] != 'm' || lowered_hints[i + 1] != 't' ||
@@ -249,6 +280,21 @@ const char* GpuProfileDetector::ArchitectureToString(MobileGpuArchitecture value
 	}
 }
 
+u32 GpuProfileDetector::MaliValhallArch(MobileGpuArchitecture architecture)
+{
+	switch (architecture)
+	{
+		case MobileGpuArchitecture::MaliValhall1:
+			return 9;
+		case MobileGpuArchitecture::MaliValhall2:
+			return 10;
+		case MobileGpuArchitecture::MaliValhall3:
+			return 11;
+		default:
+			return 0;
+	}
+}
+
 static void ApplyResolvedProfile(GpuProfileSelection& selection, RuntimeGpuProfile runtime_profile,
 	GpuProfileDetail::ResolvedGpuProfile&& resolved)
 {
@@ -316,6 +362,8 @@ const char* GpuProfileDetector::BugToString(DriverBug value)
 		case DriverBug::BrokenExtendedDynamicState: return "BrokenExtendedDynamicState";
 		case DriverBug::BrokenPrimitiveTopologyDynamicState: return "BrokenPrimitiveTopologyDynamicState";
 		case DriverBug::BrokenGraphicsPipelineLibrary: return "BrokenGraphicsPipelineLibrary";
+		case DriverBug::BrokenRoaaDestinationRead: return "BrokenRoaaDestinationRead";
+		case DriverBug::BrokenBlendConstant: return "BrokenBlendConstant";
 		case DriverBug::Count:
 		default: return "Unknown";
 	}
@@ -340,17 +388,86 @@ const char* GpuProfileDetector::WorkaroundToString(DriverWorkaround value)
 		case DriverWorkaround::RewriteUniformIndexing: return "RewriteUniformIndexing";
 		case DriverWorkaround::ForceFifoPresent: return "ForceFifoPresent";
 		case DriverWorkaround::AlignSwapchainWidthTo32: return "AlignSwapchainWidthTo32";
+		case DriverWorkaround::DisableStencilBuffer: return "DisableStencilBuffer";
+		case DriverWorkaround::PreferVulkanRenderer: return "PreferVulkanRenderer";
+		case DriverWorkaround::PreferCachedStreamRingMemory: return "PreferCachedStreamRingMemory";
 		case DriverWorkaround::Count:
 		default: return "Unknown";
 	}
+}
+
+bool GpuProfileDetector::IsMaliSX2Driver(std::string_view driver_info)
+{
+	return driver_info.find("malisx2") != std::string_view::npos ||
+	       driver_info.find("libmali") != std::string_view::npos;
+}
+
+static void AppendName(std::string& list, std::string_view name)
+{
+	if (!list.empty())
+		list += ", ";
+	list += name;
+}
+
+static std::string OrNone(std::string list)
+{
+	return list.empty() ? std::string("none") : list;
+}
+
+std::string GpuProfileDetector::DescribeMatchedRules(const MobileDriverProfile& profile)
+{
+	std::string list;
+	for (u32 row = 0; row < DriverRuleCount(); row++)
+	{
+		const u64 bit = u64{1} << row;
+		if (!(profile.matched_rules & bit))
+			continue;
+		if (profile.exempted_rules & bit)
+			AppendName(list, std::string(DriverRuleId(row)) + " (exempt: malisx2)");
+		else
+			AppendName(list, DriverRuleId(row));
+	}
+	return OrNone(std::move(list));
+}
+
+std::string GpuProfileDetector::DescribeBugs(u64 mask)
+{
+	std::string list;
+	for (u8 i = 0; i < static_cast<u8>(DriverBug::Count); i++)
+	{
+		if (mask & BugMask(static_cast<DriverBug>(i)))
+			AppendName(list, BugToString(static_cast<DriverBug>(i)));
+	}
+	return OrNone(std::move(list));
+}
+
+std::string GpuProfileDetector::DescribeWorkarounds(u64 mask)
+{
+	std::string list;
+	for (u8 i = 0; i < static_cast<u8>(DriverWorkaround::Count); i++)
+	{
+		if (mask & (u64{1} << i))
+			AppendName(list, WorkaroundToString(static_cast<DriverWorkaround>(i)));
+	}
+	return OrNone(std::move(list));
+}
+
+std::string GpuProfileDetector::DescribeDeviceRules(const VulkanDeviceRules& rules)
+{
+	std::string list;
+	for (const VulkanDeviceRuleName& entry : VULKAN_DEVICE_RULE_NAMES)
+	{
+		if (rules.*entry.flag)
+			AppendName(list, entry.name);
+	}
+	return OrNone(std::move(list));
 }
 
 
 GpuProfileSelection GpuProfileDetector::Resolve(std::string_view override_value, std::string_view gpu_vendor,
 	std::string_view gpu_renderer_or_name)
 {
-	// No driver context: the driver profile stays in its conservative-fallback state, so callers
-	// that have not been taught to pass one behave exactly as before.
+	// No driver context: the driver profile stays in its conservative-fallback state.
 	return Resolve(override_value, gpu_vendor, gpu_renderer_or_name, MobileDriverContext{});
 }
 
@@ -364,8 +481,7 @@ GpuProfileSelection GpuProfileDetector::Resolve(std::string_view override_value,
 	const std::string lowered_override = GpuProfileDetail::ToLowerASCII(override_value);
 	selection.is_mediatek_soc = (lowered_override == "mediatek") || LooksLikeMediaTekSoc(lowered_hints);
 	selection.gs_tuning = GpuProfileDetail::MakeConservativeMobileGsTuning();
-	// Attached on every exit path so the driver profile is always populated, whether the family
-	// came from an override, from detection, or from nothing at all.
+	// Runs on every exit path so the driver profile is always populated.
 	const auto finalize = [&]() {
 		selection.driver = GpuProfileDetail::ResolveDriverProfile(selection, driver_context, lowered_hints);
 		return selection;
@@ -391,11 +507,10 @@ GpuProfileSelection GpuProfileDetector::Resolve(std::string_view override_value,
 
 	if (selection.override_mode == GpuProfileOverride::Xclipse)
 	{
-		// Samsung Xclipse (Exynos, AMD-RDNA2) has no dedicated resolver — there is no reliable
-		// SoC-property signature and its one hardware quirk (broken ROAA framebuffer fetch) is
-		// keyed off the Vulkan vendorID (GSDeviceVK::IsDeviceXclipse). Setting the runtime
-		// profile is enough for GSDeviceVK to force fbfetch off; keep the conservative GS
-		// tuning already assigned above.
+		// Samsung Xclipse has no dedicated resolver: no reliable SoC-property signature, and its
+		// broken ROAA framebuffer fetch is keyed off the Vulkan vendorID
+		// (GSDeviceVK::IsDeviceXclipse). The runtime profile is enough for GSDeviceVK to force
+		// fbfetch off; GS tuning stays conservative.
 		selection.runtime_profile = RuntimeGpuProfile::Xclipse;
 		return finalize();
 	}

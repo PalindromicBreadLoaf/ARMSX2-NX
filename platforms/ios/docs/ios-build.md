@@ -65,6 +65,10 @@ The IPA is written to:
 build-ios-xcode/ARMSX2-iOS-unsigned.ipa
 ```
 
+For a quicker development build, `./scripts/build-ios-ipa.sh --fast` turns off
+PCSX2 core LTO and compiles the Swift UI at `-Onone`. It builds in
+`build-ios-fast-xcode` and writes `ARMSX2-iOS-development.ipa` there.
+
 ## Automatic Signing
 
 If you have an Apple developer team and want Xcode automatic signing, regenerate
@@ -81,7 +85,7 @@ iOS device.
 
 - `build-ios-xcode/` is generated output and should not be committed.
 - The build target is iOS device arm64 by default.
-- Minimum iOS version is 17.0.
+- Minimum iOS version is 17.4.
 - JIT availability depends on how the app is signed and launched. Unsigned IPAs
   may need to be resigned or launched with a compatible sideloading/debug setup.
 - Do not rename low-level iOS JIT/runtime symbols unless you are intentionally

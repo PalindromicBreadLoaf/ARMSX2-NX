@@ -249,6 +249,8 @@ bool GSDevice11::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 		ShaderMacro sm_ps;
 		sm_ps.AddMacro("PIXEL_SHADER", 1);
+		sm_ps.AddMacro("PRIMID_MAX", GSShader::PRIMID_MAX);
+		sm_ps.AddMacro("PRIMID_MIN", GSShader::PRIMID_MIN);
 		sm_ps.AddMacro("HAS_BILN", static_cast<int>(shader.Biln()));
 		sm_ps.AddMacro("HAS_STENCIL_OUTPUT", static_cast<int>(shader.StencilOutput()));
 		sm_ps.AddMacro("HAS_INTEGER_OUTPUT", static_cast<int>(shader.IntegerOutputBpp() != 0));
@@ -582,6 +584,8 @@ bool GSDevice11::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		const std::string entry_point_macro = WrapEntryPointMacro(entry_point);
 		ShaderMacro sm_ps;
 		sm_ps.AddMacro("PIXEL_SHADER", 1);
+		sm_ps.AddMacro("PRIMID_MAX", GSShader::PRIMID_MAX);
+		sm_ps.AddMacro("PRIMID_MIN", GSShader::PRIMID_MIN);
 		sm_ps.AddMacro(entry_point_macro.c_str(), 1);
 		m_date.primid_init_ps[i] = m_shader_cache.GetPixelShader(m_dev.get(), *convert_hlsl, sm_ps.GetPtr(), entry_point.c_str());
 		if (!m_date.primid_init_ps[i])
@@ -614,6 +618,7 @@ bool GSDevice11::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 void GSDevice11::Destroy()
 {
 	delete m_null_texture;
+	m_null_texture = nullptr;
 	
 	GSDevice::Destroy();
 	DestroySwapChain();
@@ -731,7 +736,7 @@ void GSDevice11::SetFeatures(IDXGIAdapter1* adapter)
 
 	D3D11_FEATURE_DATA_D3D11_OPTIONS2 options2{};
 	m_dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &options2, sizeof(options2));
-	m_features.rov = m_uav_texture && options2.ROVsSupported;
+	m_features.rov = m_uav_texture && options2.TypedUAVLoadAdditionalFormats && options2.ROVsSupported;
 	for (u32 fmt = static_cast<u32>(GSTexture::Format::Color); fmt <= static_cast<u32>(GSTexture::Format::PrimID); fmt++)
 	{
 		if (GSTexture::IsShaderWriteFormat(static_cast<GSTexture::Format>(fmt)))
@@ -1098,12 +1103,34 @@ GSDevice::PresentResult GSDevice11::DoBeginPresent(bool frame_skip)
 	m_state.rtv = m_swap_chain_rtv.get();
 	m_state.rtv->AddRef();
 	m_state.current_rt = nullptr;
+
+	if (m_state.dsv_as_rtv)
+	{
+		m_state.dsv_as_rtv->Release();
+		m_state.dsv_as_rtv = nullptr;
+	}
+	m_state.current_ds_as_rt = nullptr;
+
 	if (m_state.dsv)
 	{
 		m_state.dsv->Release();
 		m_state.dsv = nullptr;
 	}
 	m_state.current_ds = nullptr;
+
+	if (m_state.rt_uav)
+	{
+		m_state.rt_uav->Release();
+		m_state.rt_uav = nullptr;
+	}
+	m_state.current_rt_uav = nullptr;
+
+	if (m_state.ds_uav)
+	{
+		m_state.ds_uav->Release();
+		m_state.ds_uav = nullptr;
+	}
+	m_state.current_ds_uav = nullptr;
 
 	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
 
@@ -1867,7 +1894,7 @@ void GSDevice11::DoMultiStretchRects(const MultiStretchRect* rects, u32 num_rect
 	DrawIndexedPrimitive();
 }
 
-void GSDevice11::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
+void GSDevice11::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const MergeTopBand* top_band, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
 {
 	const GSVector4 full_r(0.0f, 0.0f, 1.0f, 1.0f);
 	const bool feedback_write_2 = PMODE.EN2 && sTex[2] != nullptr && EXTBUF.FBIN == 1;
@@ -1891,6 +1918,8 @@ void GSDevice11::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		// 2nd output is enabled and selected. Copy it to destination so we can blend it with 1st output
 		// Note: value outside of dRect must contains the background color (c)
 		StretchRect(sTex[1], sRect[1], dTex, PMODE.SLBG ? dRect[2] : dRect[1], ShaderConvert::COPY, filter);
+		if (top_band[1].enabled)
+			StretchRect(sTex[1], top_band[1].src, dTex, top_band[1].dst, ShaderConvert::COPY, filter);
 	}
 
 	// Save 2nd output
@@ -1908,6 +1937,11 @@ void GSDevice11::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 	{
 		// 1st output is enabled. It must be blended
 		DoStretchRect(sTex[0], sRect[0], dTex, dRect[0], m_merge.ps[PMODE.MMOD].get(), m_merge.cb.get(), m_merge.bs.get(), filter);
+		if (top_band[0].enabled)
+		{
+			DoStretchRect(sTex[0], top_band[0].src, dTex, top_band[0].dst, m_merge.ps[PMODE.MMOD].get(), m_merge.cb.get(),
+				m_merge.bs.get(), filter);
+		}
 	}
 
 	if (feedback_write_1)
@@ -2017,6 +2051,15 @@ void GSDevice11::SetupPS(const PSSelector& sel, const GSHWDrawConfig::PSConstant
 
 	if (i == m_ps.end())
 	{
+		// af_in_src1 reroutes a fixed (AFIX) blend factor through the second fragment output, for a
+		// driver whose blend constant is broken. Only the Vulkan shader implements it, and only
+		// GSDeviceVK raises features.broken_blend_constant, so nothing reaches this today. If a
+		// driver-database entry ever does, the blend state moves to SRC1 factors while this shader
+		// keeps writing As, which is wrong colour and nothing else would say so.
+		if (sel.af_in_src1)
+			Console.Error("PS_AF_IN_SRC1 is not implemented in this backend's shader.");
+		pxAssert(!sel.af_in_src1);
+
 		ShaderMacro sm;
 
 		sm.AddMacro("PIXEL_SHADER", 1);
@@ -2040,10 +2083,13 @@ void GSDevice11::SetupPS(const PSSelector& sel, const GSHWDrawConfig::PSConstant
 		sm.AddMacro("PS_A_MASKED", sel.a_masked);
 		sm.AddMacro("PS_FBA", sel.fba);
 		sm.AddMacro("PS_FBMASK", sel.fbmask);
+		sm.AddMacro("PS_QUANTIZE_COLOR", sel.quantize_color);
+		sm.AddMacro("PS_SUBSTITUTE_ALPHA", sel.substitute_alpha);
 		sm.AddMacro("PS_LTF", sel.ltf);
 		sm.AddMacro("PS_TCOFFSETHACK", sel.tcoffsethack);
 		sm.AddMacro("PS_POINT_SAMPLER", sel.point_sampler);
 		sm.AddMacro("PS_REGION_RECT", sel.region_rect);
+		sm.AddMacro("PS_NATIVE_TEXEL_GRID", sel.native_texel_grid);
 		sm.AddMacro("PS_SHUFFLE", sel.shuffle);
 		sm.AddMacro("PS_SHUFFLE_SAME", sel.shuffle_same);
 		sm.AddMacro("PS_PROCESS_BA", sel.process_ba);
@@ -2060,6 +2106,7 @@ void GSDevice11::SetupPS(const PSSelector& sel, const GSHWDrawConfig::PSConstant
 		sm.AddMacro("PS_COLCLIP_HW", sel.colclip_hw);
 		sm.AddMacro("PS_RTA_CORRECTION", sel.rta_correction);
 		sm.AddMacro("PS_RTA_SRC_CORRECTION", sel.rta_source_correction);
+		sm.AddMacro("PS_REPLACEMENT_ALPHA_SNAP", sel.replacement_alpha_snap);
 		sm.AddMacro("PS_COLCLIP", sel.colclip);
 		sm.AddMacro("PS_BLEND_A", sel.blend_a);
 		sm.AddMacro("PS_BLEND_B", sel.blend_b);
@@ -2364,7 +2411,7 @@ void GSDevice11::RenderImGui()
 {
 	ImGui::Render();
 	const ImDrawData* draw_data = ImGui::GetDrawData();
-	if (draw_data->CmdListsCount == 0)
+	if (draw_data->CmdLists.Size == 0)
 		return;
 
 	UpdateImGuiTextures();
@@ -2398,7 +2445,7 @@ void GSDevice11::RenderImGui()
 	PSSetSamplerState(m_convert.ln.get());
 
 	// Render command lists
-	for (int n = 0; n < draw_data->CmdListsCount; n++)
+	for (int n = 0; n < draw_data->CmdLists.Size; n++)
 	{
 		const ImDrawList* cmd_list = draw_data->CmdLists[n];
 
@@ -2931,7 +2978,7 @@ void GSDevice11::OMSetRenderTargets(GSTexture* rt, GSTexture* ds_as_rt, GSTextur
 			m_state.dsv_as_rtv->Release();
 		if (dsv_as_rtv)
 			dsv_as_rtv->AddRef();
-		m_state.rtv = dsv_as_rtv;
+		m_state.dsv_as_rtv = dsv_as_rtv;
 		m_state.current_ds_as_rt = ds_as_rt;
 	}
 	if (m_state.dsv != dsv)
@@ -2989,6 +3036,7 @@ void GSDevice11::OMSetRenderTargets(GSTexture* rt, GSTexture* ds_as_rt, GSTextur
 	{
 		const GSVector2i size =
 			rt ? rt->GetSize() :
+			ds_as_rt ? ds_as_rt->GetSize() :
 			ds ? ds->GetSize() :
 			(rt_uav_tex && rt_uav_tex != m_null_texture) ? rt_uav_tex->GetSize() :
 			ds_uav_tex->GetSize();
@@ -3262,9 +3310,7 @@ void GSDevice11::DoRenderHW(GSHWDrawConfig& config)
 
 	if (config.blend_multi_pass.enable)
 	{
-		config.ps.no_color1 = config.blend_multi_pass.no_color1;
-		config.ps.blend_hw = config.blend_multi_pass.blend_hw;
-		config.ps.dither = config.blend_multi_pass.dither;
+		config.blend_multi_pass.ApplyTo(config.ps);
 		SetupPS(config.ps, &config.cb_ps, config.sampler);
 		SetupOM(config.depth, OMBlendSelector(config.colormask, config.blend_multi_pass.blend), config.blend_multi_pass.blend.constant);
 		Draw(config);

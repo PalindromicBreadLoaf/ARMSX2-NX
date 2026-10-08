@@ -4,8 +4,11 @@
 #pragma once
 
 #include "GSTextureCache.h"
+#include "GS/Renderers/HW/GSDrawAlphaMask.h"
 #include "GS/Renderers/Common/GSFunctionMap.h"
+#include "GS/Renderers/Common/GSNativeTexelGridPolicy.h"
 #include "GS/Renderers/Common/GSRenderer.h"
+#include "GS/Renderers/Common/GSSwPrimRender.h"
 #include "GS/Renderers/SW/GSTextureCacheSW.h"
 #include "GS/GSState.h"
 #include "GS/MultiISA.h"
@@ -209,15 +212,33 @@ private:
 	bool CanUseSwPrimRender(bool no_rt, bool no_ds, bool draw_sprite_tex);
 	bool (*SwPrimRender)(GSRendererHW&, bool invalidate_tc, bool add_ee_transfer);
 
+	bool SnapSpriteEdgesToPixelGrid();
+
 	template <bool linear>
 	void RoundSpriteOffset();
+
+	void CorrectSpriteCoverageForUpscale(GSTextureCache::Target* rt);
 
 	void DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Target* ds, GSTextureCache::Source* tex, const TextureMinMaxResult& tmm);
 
 	void ResetStates();
 	void HandleFlatShadedVertices();
-	void SetupIA(float target_scale, float sx, float sy, bool req_vert_backup, const bool no_rt);
+	/// Fills in the topology, the indices and the vertex offset for the draw's primitive class.
+	/// Returns false when the draw lights no pixel at all and must not be submitted.
+	bool SetupIA(float target_scale, float sx, float sy, bool req_vert_backup, const bool no_rt);
 	void EmulateTextureShuffleAndFbmask(GSTextureCache::Target* rt, GSTextureCache::Source* tex);
+	/// What the exact alpha-mask rules can do with this draw's alpha FBMSK without changing a
+	/// pixel -- clear it outright, have the shader write the target's known bits in its place, or
+	/// nothing -- and where nothing, why. The verdict drives the drop and the substitution below.
+	u8 DecideExactAlphaMaskDrop(const GSTextureCache::Target* rt, u32 fbmask);
+	void ResolveHeldAlphaMask();
+	/// The alpha mask this draw asked for, which is not the one the shader ends up emulating once
+	/// the exact drop has cleared it. See GSDrawAlphaMask.h.
+	u32 RequestedAlphaFbMask() const
+	{
+		return GSDrawAlphaMask::AsRequested(m_exact_alpha_drop_fbmask_a, m_conf.ps.fbmask != 0,
+			static_cast<u32>(m_conf.cb_ps.FbMask.a));
+	}
 	u32 EmulateChannelShuffle(GSTextureCache::Target* src, bool test_only, GSTextureCache::Target* rt = nullptr);
 	void EmulateBlending(int rt_alpha_min, int rt_alpha_max, DATEOptions& date_options, GSTextureCache::Target* rt,
 		bool can_scale_rt_alpha, bool& new_rt_alpha_scale);
@@ -231,15 +252,27 @@ private:
 	bool CanUseTexIsFB(const GSTextureCache::Target* rt, const GSTextureCache::Source* tex,
 		const TextureMinMaxResult& tmm);
 
+	/// The texel step per native pixel that every sprite of this draw agrees on, per axis, in the
+	/// GS's own sixteenths. False -- and both steps zeroed -- when the draw has no sprites or two of
+	/// them walk the texture at different rates, because the shader carries one step for the whole
+	/// draw. See GSNativeTexelGridPolicy.h.
+	bool GetAgreedSpriteTexelSteps(GSNativeTexelStep& step_u, GSNativeTexelStep& step_v) const;
+
+	/// Whether most of this draw, by area, shows each texel of its texture as a large block, so that
+	/// a generated upscale of the texture has to give way to the original texels.
+	/// See GSTexelAddressedDraw.h.
+	bool DrawReadsTexelsAsColours() const;
+	bool IsFastStencilShadowDraw() const;
+
 	void EmulateZbuffer(const GSTextureCache::Target* ds);
-	void EmulateAA1();
-	static void GetAlphaTestConfigPS(const u32 atst, const u8 aref, const bool invert_test, PS_ATST& ps_atst_out, float& aref_out);
+	void EmulateAA1(float target_scale);
 	void EmulateAlphaTest(DATEOptions& date_options);
 	void EmulateAlphaTestSecondPass();
 	void ConfigureDepthFeedback(bool rov_depth = false);
 
 	void CalculateAlphaRange(GSTextureCache::Target* rt, GSTextureCache::Target* ds, DATEOptions& date_options,
-		int& blend_alpha_min, int& blend_alpha_max, int& rt_new_alpha_min, int& rt_new_alpha_max);
+		int& blend_alpha_min, int& blend_alpha_max, int& rt_new_alpha_min, int& rt_new_alpha_max,
+		GSAlphaKnownBits::Known& rt_new_alpha_known, bool& rt_new_alpha_via_union);
 	void DetermineAlphaScaling(GSTextureCache::Target* rt, GSTextureCache::Source* tex,
 		bool req_source_update, int rt_new_alpha_max, bool& can_scale_rt_alpha, bool& new_scale_rt_alpha);
 
@@ -248,6 +281,7 @@ private:
 	void EmulateDATEGetConfig(DATEOptions& date, bool scale_rt_alpha, GSDevice::RecycledTexture& temp_ds);
 
 	void EmulateDither();
+	u32 GetDitherPhase(const GIFRegDIMX& DIMX, float scale);
 
 	void DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, const GSVector2i& rtsize,
 		const GSVector2i& unscaled_size, float& vs_scale_x, float& vs_scale_y);
@@ -294,6 +328,9 @@ private:
 	bool IsRTWritten();
 	bool IsRTWrittenLive(const GIFRegALPHA& ALPHA) override;
 	bool IsDepthAlwaysPassing();
+	/// The case IsDepthAlwaysPassing() cannot reach: the depth buffer still holds the value it was
+	/// cleared to in every pixel, so a GREATER or GEQUAL test against it is answerable.
+	bool AllDepthTestsPassOnClearedTarget(const GSTextureCache::Target* ds);
 	bool IsUsingCsInBlend();
 	bool IsUsingAsInBlend();
 
@@ -308,6 +345,14 @@ private:
 	bool m_process_texture = false;
 	bool m_downscale_source = false;
 
+	/// This draw samples the guest's own texels in place of a generated upscale
+	/// (GSTextureCache::GetNativeTexture). Set by EmulateTextureSampler. The source is still a
+	/// replacement, but the texture bound is not, so alpha snapping for packs does not apply.
+	bool m_source_is_native_texels = false;
+	// This draw is an alpha stencil counter going through the blend unit (GSFastStencilShadow.h).
+	// Decided in Draw() before the texture lookup, read by DrawPrims().
+	bool m_fast_stencil_shadow = false;
+
 	TextureShuffleInfo m_texture_shuffle;
 
 	u32 m_split_texture_shuffle_pages = 0;
@@ -316,6 +361,13 @@ private:
 	u32 m_split_texture_shuffle_start_TBP = 0;
 	u32 m_split_texture_shuffle_fbw = 0;
 
+	// GetDitherPhase's answer, and the two inputs it was computed from. A scale of -1 is the
+	// "nothing cached yet" mark, since no target ever has a negative scale and DIMX == 0 is a
+	// perfectly ordinary matrix.
+	u64 m_dither_phase_dimx = 0;
+	float m_dither_phase_scale = -1.0f;
+	u32 m_dither_phase = 0;
+
 	u32 m_last_channel_shuffle_fbmsk = 0;
 	u32 m_last_channel_shuffle_fbp = 0;
 	u32 m_last_channel_shuffle_tbp = 0;
@@ -323,8 +375,22 @@ private:
 	u32 m_channel_shuffle_width = 0;
 	GSVector4i m_channel_shuffle_src_valid = GSVector4i::zero();
 	bool m_full_screen_shuffle = false;
+	// EmulateChannelShuffle replaced this draw's sprites with a quad of its own. Reset per draw in
+	// DrawPrims; CorrectSpriteCoverageForUpscale leaves such a quad alone.
+	bool m_channel_shuffle_rebuilt_quad = false;
+	// The pixel-grid snap moved a sprite in this draw and wrote every sprite's far-edge sample
+	// limit into its ST. Reset per draw in DrawPrims.
+	bool m_sprite_edge_clamp = false;
+	std::vector<GSVector2> m_sprite_edge_limits;
 
 	GSTextureCache::Target* m_last_rt;
+
+	// GSAlphaBitLogicOp: the target whose last destination-alpha draw could have shared a stencil
+	// copy, and its DATM. A second such draw with only marks or nothing on that target in between
+	// takes Stencil DATE and reuses the copy.
+	GSTexture* m_date_chain_rt = nullptr;
+	u8 m_date_chain_datm = 0;
+	bool m_date_draw_shares_copy = false; ///< This draw's DATE keeps a shared copy true (set by EmulateDATESelectMethod).
 
 	GIFRegFRAME m_split_clear_start = {};
 	GIFRegZBUF m_split_clear_start_Z = {};
@@ -345,28 +411,67 @@ private:
 	GSHWDrawConfig m_conf = {};
 	HWCachedCtx m_cached_ctx;
 
+	// The alpha byte of FBMSK that the exact alpha drop cleared out of this draw, or
+	// GSDrawAlphaMask::NothingDropped. Reset per draw by ResetStates().
+	int m_exact_alpha_drop_fbmask_a = GSDrawAlphaMask::NothingDropped;
+
+	// An exact alpha-mask decision held over the blend selection. While fbmask is non-zero the
+	// shader has no mask but the blend decisions read the barrier that mask would have required,
+	// so the blend road cannot move because of the decision. ResolveHeldAlphaMask() settles it.
+	// Reset per draw by ResetStates().
+	struct HeldAlphaMask
+	{
+		u32 fbmask = 0; ///< FBMSK as the draw asked for it; zero means nothing is held
+		u32 ps_fbmask = 0; ///< the shader's four-channel nibble for that mask
+		bool substitute = false; ///< what is held is the substitution, not the drop
+		/// The two constants a standing substitution hands the shader. Applied in
+		/// ResolveHeldAlphaMask() rather than at the framebuffer-mask site, so a substitution
+		/// that gets put back leaves the constant buffer exactly as it found it.
+		GSDrawAlphaMask::Substitution substitution;
+	};
+	HeldAlphaMask m_held_alpha_mask;
+
 	// software sprite renderer state
-	std::vector<GSVertexSW> m_sw_vertex_buffer;
-	std::unique_ptr<GSTextureCacheSW::Texture> m_sw_texture[7 + 1];
-	std::unique_ptr<GSVirtualAlignedClass<32>> m_sw_rasterizer;
+	GSSwPrimRenderState m_sw_prim;
 
 public:
 	GSRendererHW();
 	virtual ~GSRendererHW() override;
 
 	__fi static GSRendererHW* GetInstance() { return static_cast<GSRendererHW*>(g_gs_renderer.get()); }
+
+	/// The software sprite road's scratch; tests reach its palette_block_copy switch through this.
+	GSSwPrimRenderState& GetSwPrimState() { return m_sw_prim; }
 	__fi HWCachedCtx* GetCachedCtx() { return &m_cached_ctx; }
 	__fi u32 GetLastChannelShuffleFBP() { return m_last_channel_shuffle_fbp; }
 	void Destroy() override;
 
 	void UpdateRenderFixes() override;
+	bool DrawClearsScanMask() const override;
+	bool HasMoveHook() const override { return m_mv != nullptr; }
 
 	bool CanUpscale() override;
 	float GetUpscaleMultiplier() override;
 	void Lines2Sprites();
 	bool VerifyIndices();
 	void ExpandLineIndices();
+	/// What LinesToPixelRuns() did with the draw. The three outcomes are not two: a draw the GS
+	/// lights no pixel for is not a draw the pixel runs could not take, and the fallback figure is
+	/// wrong for it -- it would paint a stripe the console never paints.
+	enum class LineRunResult
+	{
+		Converted, ///< The vertex buffer now holds the rectangles. Draw them.
+		NothingLit, ///< The GS lights no pixel for any line in the draw. Draw nothing.
+		Refused, ///< The draw is untouched and needs the expanded-line fallback.
+	};
+	LineRunResult LinesToPixelRuns(bool aa1);
+	/// Whether this AA1 line draw takes the vertex-shader expansion rather than the pixel runs,
+	/// which it does above native wherever the device can expand lines.
+	bool AA1LineExpandsAboveNative(float target_scale);
+	void SnapPointsToNativePixel();
 	GSVector4 RealignTargetTextureCoordinate(const GSTextureCache::Source* tex);
+	void ApplyNativeWTexOffset(const GSTextureCache::Source* tex, const GSTextureCache::Target* rt,
+		const GSTextureCache::Target* ds, GSVector2& texture_offset);
 	GSVector4i ComputeBoundingBoxRT(const GSVector2i& rtsize, float rtscale);
 	GSVector4i ComputeBoundingBoxTex(const GSVector2i& texsize, const GSVector4i& coverage, const GSVector4i& region, float texscale);
 	void MergeSprite(GSTextureCache::Source* tex);

@@ -20,10 +20,14 @@ function(detect_operating_system)
 		message(STATUS "Building for iOS.")
 	elseif(APPLE AND NOT IOS)
 		message(STATUS "Building for MacOS.")
-	elseif(APPLE AND IOS)
-		message(STATUS "Building for iOS.")
 	elseif(HORIZON)
 		message(STATUS "Building for Horizon.")
+	elseif(ANDROID)
+		# Its own branch rather than folding into LINUX. This function only
+		# reports, but the LINUX-guarded code elsewhere in the build reaches for
+		# udev, D-Bus and a runtime page-size probe, none of which exist under
+		# the NDK — so Android must not answer to LINUX anywhere.
+		message(STATUS "Building for Android.")
 	elseif(LINUX)
 		message(STATUS "Building for Linux.")
 	elseif(BSD)
@@ -59,7 +63,11 @@ function(get_git_version_info)
 	set(PCSX2_GIT_TAG "")
 	set(PCSX2_GIT_HASH "")
 	if (GIT_FOUND AND EXISTS ${PROJECT_SOURCE_DIR}/.git)
-		EXECUTE_PROCESS(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} describe --tags
+		# --exclude nightly-*: nightly tags are the nearest tags on master, so a plain
+		# `describe --tags` reports the build as e.g. "nightly-20260917-18-gabc" instead of
+		# the release the tree is actually based on. write_svnrev_h below accepts the
+		# undecorated version tags ARMSX2 uses (2.6.9) as well as upstream's v2.9.30.
+		EXECUTE_PROCESS(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} describe --tags --exclude nightly-*
 			OUTPUT_VARIABLE PCSX2_GIT_REV
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 			ERROR_QUIET)
@@ -87,7 +95,7 @@ function(get_git_version_info)
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 			ERROR_QUIET)
 
-		EXECUTE_PROCESS(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} log -1 --format=%cd --date=local
+		EXECUTE_PROCESS(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${CMAKE_COMMAND} -E env TZ=UTC ${GIT_EXECUTABLE} log -1 --format=%cd --date=local
 			OUTPUT_VARIABLE PCSX2_GIT_DATE
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 			ERROR_QUIET)
@@ -113,7 +121,7 @@ function(get_git_version_info)
 endfunction()
 
 function(write_svnrev_h)
-	if ("${PCSX2_GIT_TAG}" MATCHES "^v([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+	if ("${PCSX2_GIT_TAG}" MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
 		file(WRITE ${CMAKE_BINARY_DIR}/common/include/svnrev.h
 			"#define GIT_TAG \"${PCSX2_GIT_TAG}\"\n"
 			"#define GIT_TAGGED_COMMIT 1\n"
@@ -124,7 +132,7 @@ function(write_svnrev_h)
 			"#define GIT_HASH \"${PCSX2_GIT_HASH}\"\n"
 			"#define GIT_DATE \"${PCSX2_GIT_DATE}\"\n"
 		)
-	elseif ("${PCSX2_GIT_REV}" MATCHES "^v([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+	elseif ("${PCSX2_GIT_REV}" MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
 		file(WRITE ${CMAKE_BINARY_DIR}/common/include/svnrev.h
 			"#define GIT_TAG \"${PCSX2_GIT_TAG}\"\n"
 			"#define GIT_TAGGED_COMMIT 0\n"
@@ -239,6 +247,14 @@ function(disable_compiler_warnings_for_target target)
 endfunction()
 
 function(detect_page_size)
+	# Allow a build to pin the page size rather than take the machine's, by
+	# pre-setting HOST_PAGE_SIZE (e.g. -DHOST_PAGE_SIZE=4096). Also the only way
+	# through here when cross-compiling, where the try_run below is fatal. The
+	# Android and iOS copies of this file already work this way.
+	if(DEFINED HOST_PAGE_SIZE)
+		message(STATUS "Host page size (preset): ${HOST_PAGE_SIZE}")
+		return()
+	endif()
 	message(STATUS "Determining host page size")
 	set(detect_page_size_file ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/CMakeTmp/src.c)
 	file(WRITE ${detect_page_size_file} "

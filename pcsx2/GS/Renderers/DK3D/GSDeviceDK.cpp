@@ -54,16 +54,19 @@ namespace
 		u32 fbmask, scanmsk, date;
 		u32 depth_fmt, urban_chaos, tales;
 		u32 automatic_lod, manual_lod;
+		u32 quantize_color, substitute_alpha, replacement_alpha_snap, native_texel_grid;
 	};
-	static_assert(sizeof(DKTfxSelector) == 208);
+	static_assert(sizeof(DKTfxSelector) == 224);
 	static_assert(sizeof(GSHWDrawConfig::VSConstantBuffer) == 48);
-	static_assert(sizeof(GSHWDrawConfig::PSConstantBuffer) == 272);
+	static_assert(sizeof(GSHWDrawConfig::PSConstantBuffer) == 288);
 	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, ChannelShuffleOffset) == 144);
 	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, TCOffsetHack) == 152);
 	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, STScale) == 160);
 	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, DitherMatrix) == 176);
 	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, ScaleFactor) == 240);
 	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, LineCovScale) == 256);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, SubstituteAlphaKeep) == 260);
+	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, NativeTexelGrid) == 272);
 
 	// Translate a PSSelector into the tfx ubershader's cbSel uniform
 	DKTfxSelector MakeTfxSelector(const GSHWDrawConfig::PSSelector& ps, bool has_tex)
@@ -123,6 +126,10 @@ namespace
 		sel.tales = ps.tales_of_abyss_hle;
 		sel.automatic_lod = ps.automatic_lod;
 		sel.manual_lod = ps.manual_lod;
+		sel.quantize_color = ps.quantize_color;
+		sel.substitute_alpha = ps.substitute_alpha;
+		sel.replacement_alpha_snap = ps.replacement_alpha_snap;
+		sel.native_texel_grid = ps.native_texel_grid;
 		return sel;
 	}
 
@@ -1086,7 +1093,7 @@ void GSDeviceDK::RenderImGui()
 {
 	ImGui::Render();
 	const ImDrawData* draw_data = ImGui::GetDrawData();
-	if (!draw_data || draw_data->CmdListsCount == 0 || !m_imgui_shaders_ok || !m_frame_active || m_present_slot < 0)
+	if (!draw_data || draw_data->CmdLists.Size == 0 || !m_imgui_shaders_ok || !m_frame_active || m_present_slot < 0)
 		return;
 
 	UpdateImGuiTextures();
@@ -1160,7 +1167,7 @@ void GSDeviceDK::RenderImGui()
 
 	const GSVector4i rt_bounds = GSVector4i(0, 0, m_present_width, m_present_height);
 
-	for (int n = 0; n < draw_data->CmdListsCount; n++)
+	for (int n = 0; n < draw_data->CmdLists.Size; n++)
 	{
 		const ImDrawList* cmd_list = draw_data->CmdLists[n];
 
@@ -1552,13 +1559,15 @@ u32 GSDeviceDK::SelectTfxVariant(const GSHWDrawConfig& config)
 
 	// Heavy per-pixel effects the specialised variants fold out entirely
 	const bool special = (ps.channel != 0 || ps.depth_fmt != 0 ||
-		ps.urban_chaos_hle || ps.tales_of_abyss_hle || ps.shuffle || ps.dither);
+		ps.urban_chaos_hle || ps.tales_of_abyss_hle || ps.shuffle || ps.dither ||
+		ps.quantize_color || ps.substitute_alpha);
 
 	const bool extra_pass = config.blend_multi_pass.enable || config.alpha_second_pass.enable;
 
 	const bool simple_sample = (ps.ltf == 0 && ps.aem_fmt == 0 &&
 		ps.region_rect == 0 && ps.adjs == 0 && ps.adjt == 0 && ps.automatic_lod == 0 &&
-		ps.manual_lod == 0 && ps.wms < 2 && ps.wmt < 2);
+		ps.manual_lod == 0 && ps.wms < 2 && ps.wmt < 2 &&
+		ps.replacement_alpha_snap == 0 && ps.native_texel_grid == 0);
 
 	// Feedback draws bind RtSampler, so they can use the feedback variants
 	if (config.require_one_barrier || config.require_full_barrier)
@@ -2247,7 +2256,7 @@ GSTexture* GSDeviceDK::CreateSurface(GSTexture::Usage usage, int width, int heig
 }
 
 void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
-	const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
+	const MergeTopBand* top_band, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
 {
 #ifdef __SWITCH__
 	if (!dTex)
@@ -2300,7 +2309,11 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 	// It is then overwritten by the background again below.
 	const bool composite_output2 = src1 && PMODE.EN2 && (PMODE.SLBG == 0 || feedback_write_2_but_blend_bg);
 	if (composite_output2)
+	{
 		DoStretchRectImpl(src1, sRect[1], dst, dRect[1], &m_copy_fsh, linear);
+		if (top_band[1].enabled)
+			DoStretchRectImpl(src1, top_band[1].src, dst, top_band[1].dst, &m_copy_fsh, linear);
+	}
 
 	// Capture circuit 2 into the feedback buffer before output 1 is blended.
 	if (feedback_write_2 && composite_output2 && can_yuv)
@@ -2324,10 +2337,14 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 			GSVector4::store<false>(ub.BGColor, bg_color);
 			ub.mmod = PMODE.MMOD;
 			DoStretchRectImpl(src0, sRect[0], dst, dRect[0], &m_merge_fsh, linear, &ub, sizeof(ub), false, 0xf, true);
+			if (top_band[0].enabled)
+				DoStretchRectImpl(src0, top_band[0].src, dst, top_band[0].dst, &m_merge_fsh, linear, &ub, sizeof(ub), false, 0xf, true);
 		}
 		else
 		{
 			DoStretchRectImpl(src0, sRect[0], dst, dRect[0], &m_copy_fsh, linear);
+			if (top_band[0].enabled)
+				DoStretchRectImpl(src0, top_band[0].src, dst, top_band[0].dst, &m_copy_fsh, linear);
 		}
 	}
 
@@ -2346,14 +2363,16 @@ void GSDeviceDK::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 
 	const bool linear = (filter == Filter::Biln);
 
-	// cb0: vec4 ZrH + uint mode
+	// cb0: vec4 ZrH + vec4 FieldPad + uint mode
 	struct
 	{
 		float ZrH[4];
+		float FieldPad[4];
 		u32 mode;
 		u32 pad[3];
 	} ub = {};
 	GSVector4::store<false>(ub.ZrH, cb.ZrH);
+	GSVector4::store<false>(ub.FieldPad, cb.FieldPad);
 	ub.mode = static_cast<u32>(shader);
 
 	DoStretchRectImpl(static_cast<GSTextureDK*>(sTex), sRect, static_cast<GSTextureDK*>(dTex), dRect,

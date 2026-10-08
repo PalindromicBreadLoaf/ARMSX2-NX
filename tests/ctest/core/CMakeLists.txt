@@ -1,17 +1,33 @@
 add_pcsx2_test(core_test
 	ee_fpu_regfile_tests.cpp
 	ee_clamp_mode_tests.cpp
+	vu_clamp_mode_tests.cpp
 	ee_fpu_reloc_tests.cpp
 	patch_tests.cpp
 	savestate_legacy_tests.cpp
 	settings_precedence_tests.cpp
+	gsrunner_affinity_tests.cpp
+	texture_upscale_setting_tests.cpp
 	MockMemoryInterface.h
 	StubHost.cpp
+)
+
+# gsrunner_affinity_tests.cpp includes the runner's own -affinity parse header; the flag
+# decides which cores a measurement round runs on, so it is worth a test even though the
+# runner itself has no test binary.
+target_include_directories(core_test PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR}/../../../pcsx2-gsrunner
 )
 
 if(ARCH_ARM64)
 	# Phase 0.6: ARM64 JIT toolchain smoke test (emit + execute ARM64 code).
 	target_sources(core_test PRIVATE arm64_emit_test.cpp)
+	target_sources(core_test PRIVATE arm64_lane_gather_tests.cpp)
+endif()
+
+# GSLsfg.cpp only builds with the Vulkan renderer, so its structural-PE-check test follows it.
+if(USE_VULKAN)
+	target_sources(core_test PRIVATE lsfg_dll_check_tests.cpp)
 endif()
 
 # The recompiler differential-test harness drives the arm64 JIT through

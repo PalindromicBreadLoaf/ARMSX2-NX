@@ -47,6 +47,7 @@ struct GSMTLPresentPSUniform
 struct GSMTLInterlacePSUniform
 {
 	vector_float4 ZrH;
+	vector_float4 field_pad; ///< see InterlaceConstantBuffer: (first undrawn device row, first drawn row below it, 0, 0)
 };
 
 struct GSMTLCASPSUniform
@@ -142,9 +143,11 @@ struct GSMTLMainPSUniform
 	vector_float4 scale_factor;
 
 	float line_cov_scale;
-	float _pad0;
-	float _pad1;
-	float _pad2;
+	unsigned int substitute_alpha_keep;
+	unsigned int substitute_alpha_value;
+	unsigned int dither_phase;
+
+	vector_float4 native_texel_grid;
 };
 
 enum GSMTLAttributes
@@ -166,6 +169,7 @@ enum GSMTLFnConstants
 	GSMTLConstantIndex_FRAMEBUFFER_FETCH,
 	GSMTLConstantIndex_DEPTH_FEEDBACK,
 	GSMTLConstantIndex_ROV_NEEDS_R32,
+	GSMTLConstantIndex_BROKEN_SHADER_DEPTH,
 	GSMTLConstantIndex_FST,
 	GSMTLConstantIndex_IIP,
 	GSMTLConstantIndex_VS_POINT_SIZE,
@@ -196,6 +200,8 @@ enum GSMTLFnConstants
 	GSMTLConstantIndex_PS_READ16_SRC,
 	GSMTLConstantIndex_PS_WRITE_RG,
 	GSMTLConstantIndex_PS_FBMASK,
+	GSMTLConstantIndex_PS_QUANTIZE_COLOR,
+	GSMTLConstantIndex_PS_SUBSTITUTE_ALPHA,
 	GSMTLConstantIndex_PS_BLEND_A,
 	GSMTLConstantIndex_PS_BLEND_B,
 	GSMTLConstantIndex_PS_BLEND_C,
@@ -205,6 +211,7 @@ enum GSMTLFnConstants
 	GSMTLConstantIndex_PS_COLCLIP_HW,
 	GSMTLConstantIndex_PS_RTA_CORRECTION,
 	GSMTLConstantIndex_PS_RTA_SRC_CORRECTION,
+	GSMTLConstantIndex_PS_REPLACEMENT_ALPHA_SNAP,
 	GSMTLConstantIndex_PS_COLCLIP,
 	GSMTLConstantIndex_PS_BLEND_MIX,
 	GSMTLConstantIndex_PS_ROUND_INV,
@@ -224,6 +231,7 @@ enum GSMTLFnConstants
 	GSMTLConstantIndex_PS_AUTOMATIC_LOD,
 	GSMTLConstantIndex_PS_MANUAL_LOD,
 	GSMTLConstantIndex_PS_REGION_RECT,
+	GSMTLConstantIndex_PS_NATIVE_TEXEL_GRID,
 	GSMTLConstantIndex_PS_SCANMSK,
 	GSMTLConstantIndex_PS_AA1,
 	GSMTLConstantIndex_PS_ABE,

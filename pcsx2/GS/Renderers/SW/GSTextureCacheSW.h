@@ -5,6 +5,7 @@
 
 #include "GS/Renderers/Common/GSRenderer.h"
 #include "GS/Renderers/Common/GSFastList.h"
+#include "GS/Renderers/SW/GSSwTextureDirty.h"
 #include <unordered_set>
 
 class GSTextureCacheSW
@@ -26,6 +27,14 @@ public:
 		u32 m_valid[GS_MAX_PAGES];
 		std::array<u16, GS_MAX_PAGES> m_erase_it;
 		const u32* RESTRICT m_sharedbits;
+
+		// Pixel buffer kept across Reset(). m_buff_size: grow-only capacity. m_buff_stale: shape
+		// changed, so Update() must zero what earlier draws wrote. m_dirty / m_valid_dirty track
+		// those bytes so no blanket memset is needed. Invariant in GSSwTextureDirty.h.
+		size_t m_buff_size = 0;
+		bool m_buff_stale = false;
+		GSSwTextureDirty m_dirty;
+		GSSwTextureDirty m_valid_dirty;
 
 		// m_valid
 		// fast mode: each u32 bits map to the 32 blocks of that page

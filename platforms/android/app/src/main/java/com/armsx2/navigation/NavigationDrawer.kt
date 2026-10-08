@@ -76,7 +76,8 @@ private val ExitRed = Color(0xFFE60012)
 // Community/project links for the drawer's About section. Plain https on purpose: Android App
 // Links hand these to the Discord/GitHub apps when they're installed and fall back to the
 // browser when they aren't, so there's no app-specific scheme to special-case.
-private const val DiscordUrl = "https://discord.gg/2Tynvwhc4A"
+/** Our Discord invite. Also where new texture packs are sent (TextureOnlineSection). */
+internal const val DiscordUrl = "https://discord.gg/2Tynvwhc4A"
 private const val GithubUrl = "https://github.com/ARMSX2/ARMSX2"
 private const val WebsiteUrl = "https://armsx2.net/"
 
@@ -111,6 +112,9 @@ private data class DrawerItem(
     val iconRes: Int? = null,
     // Null = tint the icon like the row's text. Only the trophy pins a fixed colour.
     val iconTint: Color? = null,
+    // A full-colour picture drawn in the glyph's place and box, so it sits with the emoji rows around
+    // it (the arcade logo among the managers).
+    val glyphIcon: Int? = null,
     val onAction: (() -> Unit)? = null,
     // Overlay the live "friends online" count on this row's glyph. Only Friends uses it — the
     // point is to be visible from the drawer without opening the screen.
@@ -193,6 +197,9 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
         // Boot straight into the PS2 system BIOS with no disc — distinct from "BIOS Location"
         // below, which only points the emulator at your BIOS file.
         DrawerItem("bios.boot.title", "▶️", onAction = { MainActivityRuntime.startBios(); onDismiss() }),
+        // Pick a file and run it, without it joining the library. Sits next to Boot BIOS because
+        // both are "start something that is not a library entry".
+        DrawerItem("action.launchGame", "📂", onAction = { MainActivityRuntime.promptLaunchGame(); onDismiss() }),
         DrawerItem("ra.title", "🏆", AppRoute.Achievements, iconRes = com.armsx2.R.drawable.ic_trophy,
             iconTint = TrophyGold),
         DrawerItem("action.settings", "⚙️", AppRoute.Settings()),
@@ -208,6 +215,9 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
         DrawerItem("tab.controls", "🕹️", AppRoute.ControllerManager),
         DrawerItem("patches.dialog.patchesAndCheats", "🪄", AppRoute.PatchManager),
         DrawerItem("renderer.section.texturePacks", "🖌️", AppRoute.TextureManager),
+        // Namco System 246/256 arcade games: their folder, boot files, BIOS and imports. The ARMSX2
+        // logo in PCSX2x6's red.
+        DrawerItem("arcade.title", "👾", AppRoute.Arcade, glyphIcon = com.armsx2.R.drawable.ic_arcade),
     )
     // Link-out rows: they reuse the existing onAction path (like Boot BIOS) rather than a
     // destination, so they leave the drawer via startActivity and close it behind them.
@@ -282,11 +292,17 @@ private fun DrawerSection(
     )
     items.forEachIndexed { index, item ->
         DrawerRow(
-            controllerId = "drawer.${item.destination?.let { it::class.simpleName } ?: item.titleKey}",
+            // Keyed by titleKey, NOT by the destination class: SettingsControllerNav keys both
+            // register() and setPosition() by this id, so two rows sharing one id collapse into a
+            // single entry at whichever row composed last -- and the other becomes unreachable by
+            // controller while still clickable by touch. Every row here happens to carry a distinct
+            // destination today, but that is luck; titleKeys are unique by construction.
+            controllerId = "drawer.${item.titleKey}",
             title = str(item.titleKey),
             glyph = item.glyph,
             iconRes = item.iconRes,
             iconTint = item.iconTint,
+            glyphIcon = item.glyphIcon,
             friendsBadge = item.friendsBadge,
             selected = item.destination != null && sameDestination(selected, item.destination),
             onClick = { item.onAction?.invoke() ?: item.destination?.let(onNavigate) },
@@ -303,6 +319,7 @@ private fun DrawerRow(
     // Null tints the icon like the row's text. Only the trophy wants a fixed brand colour;
     // the About rows' marks must follow the row so they don't render gold.
     iconTint: Color? = null,
+    glyphIcon: Int? = null,
     friendsBadge: Boolean = false,
     selected: Boolean,
     onClick: () -> Unit,
@@ -323,7 +340,11 @@ private fun DrawerRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (iconRes != null) {
+            if (glyphIcon != null) {
+                Box(Modifier.width(32.dp)) {
+                    com.armsx2.ui.common.GlyphSizedImage(glyph, 22.sp, painterResource(glyphIcon), FontWeight.Bold)
+                }
+            } else if (iconRes != null) {
                 Box(Modifier.width(32.dp), contentAlignment = Alignment.Center) {
                     Icon(painterResource(iconRes), contentDescription = null, tint = iconTint ?: contentColor, modifier = Modifier.size(24.dp))
                 }
@@ -351,6 +372,7 @@ private fun sameDestination(current: AppRoute, target: AppRoute): Boolean = when
     AppRoute.ControllerManager -> current is AppRoute.ControllerManager
     AppRoute.PatchManager -> current is AppRoute.PatchManager
     AppRoute.TextureManager -> current is AppRoute.TextureManager
+    AppRoute.Arcade -> current is AppRoute.Arcade
     AppRoute.Achievements -> current is AppRoute.Achievements
     AppRoute.Language -> current is AppRoute.Language
     AppRoute.News -> current is AppRoute.News

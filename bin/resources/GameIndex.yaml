@@ -2037,8 +2037,7 @@ SCAJ-20125:
   name: "Tekken 5"
   region: "NTSC-Unk"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -2050,8 +2049,7 @@ SCAJ-20126:
   name: "Tekken 5"
   region: "NTSC-Unk"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -2508,6 +2506,8 @@ SCAJ-20190:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCAJ-20191:
   name: "Super Robot Taisen OG - Original Generations Gaiden [Limited Edition]"
   region: "NTSC-Unk"
@@ -2577,8 +2577,7 @@ SCAJ-20199:
   name: "Tekken 5 [PlayStation2 the Best]"
   region: "NTSC-Unk"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -2730,6 +2729,8 @@ SCAJ-30011:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCCS-40001:
   name: "捉猴啦 2"
   name-sort: "Zhuo Hou La 2"
@@ -4288,8 +4289,7 @@ SCED-53538:
   name: "Tekken 5 [Demo]"
   region: "PAL-M5"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -4641,6 +4641,8 @@ SCED-54680:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCED-54682:
   name: "UPS2 Speciale Platinum 2007"
   region: "PAL-M5"
@@ -4710,6 +4712,7 @@ SCES-50000:
     gpuPaletteConversion: 2 # Lots of CLUTs in large textures.
     cpuSpriteRenderBW: 1 # Fixes car textures.
     cpuSpriteRenderLevel: 1 # Needed for above.
+    rewriteLargeSTCoords: 1 # Fix reflections on cars.
 SCES-50001:
   name: "Tekken Tag Tournament"
   region: "PAL-M5"
@@ -5982,8 +5985,7 @@ SCES-53202:
   region: "PAL-M5"
   compat: 5
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -6002,6 +6004,7 @@ SCES-53247:
   gsHWFixes:
     roundSprite: 1 # Fixes misaligned text.
     autoFlush: 2 # Fixes sun luminosity.
+    nativeScaling: 2 # Helps align sun occasional.
   patches:
     CBBC2E7F:
       content: |-
@@ -6405,6 +6408,8 @@ SCES-54206:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCES-54219:
   name: "Buzz! Junior - Jungle Party"
   region: "PAL-M7"
@@ -7341,6 +7346,44 @@ SCKA-20027:
     halfPixelOffset: 2 # Aligns post effects.
     nativeScaling: 1 # Fixes post effects.
     textureInsideRT: 1 # Fixes post shuffles.
+  patches:
+    A3643EB1:
+      content: |-
+        comment=Rearranging COP2 ops to avoid macflag bad stuff.
+        // Solves door problems, possibly other issues later on.
+        patch=0,EE,0010bc88,word,48468800
+        patch=0,EE,0010bc8c,word,4BEC682C
+        patch=0,EE,0010bc94,word,4B8D617D
+        patch=0,EE,0010bc98,word,4A0002FF
+        patch=0,EE,0012a358,word,48468800
+        patch=0,EE,0012a35c,word,4BEC682C
+        patch=0,EE,0012a364,word,4B8D617D
+        patch=0,EE,0012a368,word,4A0002FF
+        patch=0,EE,0012a680,word,48468800
+        patch=0,EE,0012a684,word,4BEC682C
+        patch=0,EE,0012a68c,word,4B8D617D
+        patch=0,EE,0012a690,word,4A0002FF
+        patch=0,EE,0012aafc,word,48468800
+        patch=0,EE,0012ab00,word,4BEC682C
+        patch=0,EE,0012ab04,word,4B8D617D
+        patch=0,EE,0012ab08,word,4A6D617C
+        patch=0,EE,0012ab0c,word,4A0002FF
+        patch=0,EE,001644cc,word,48468800
+        patch=0,EE,001644d0,word,4BEC682C
+        patch=0,EE,001644d8,word,4B8D617D
+        patch=0,EE,001644dc,word,4A0002FF
+        patch=0,EE,001ae958,word,48468800
+        patch=0,EE,001ae95c,word,4BEC682C
+        patch=0,EE,001ae960,word,4BED617D
+        patch=0,EE,001ae968,word,4A0002FF
+        patch=0,EE,001bd410,word,48588800
+        patch=0,EE,001bd41c,word,4A5DEF40
+        patch=0,EE,001bd62c,word,48588800
+        patch=0,EE,001bd638,word,4A5DEF40
+        patch=0,EE,001bd9cc,word,48588800
+        patch=0,EE,001bd9d8,word,4A5DEF40
+        patch=0,EE,001bdf90,word,48588800
+        patch=0,EE,001bdf9c,word,4A5DEF40
 SCKA-20028:
   name: "이코 [PlayStation 2 BigHit Series]"
   name-en: "Ico [PlayStation 2 BigHit Series]"
@@ -7539,8 +7582,7 @@ SCKA-20049:
   name-en: "Tekken 5"
   region: "NTSC-K"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -7823,8 +7865,7 @@ SCKA-20081:
   name-en: "Tekken 5 [PlayStation 2 BigHit Series]"
   region: "NTSC-K"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -8268,6 +8309,8 @@ SCKA-30006:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCKA-30007:
   name: "God of War 2 [PlayStation 2 BigHit Series]" # No listed Korean name on ReDump
   region: "NTSC-K"
@@ -8278,6 +8321,8 @@ SCKA-30007:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCKA-80003:
   name: "라쳇 & 클랭크: 공구전사 리로디드 [Public Beta]" # Undumped on ReDump as of 2025-08-28
   name-sort: "Ratchet & Clank - Gonggu Jeonsa Reloaded [Public Beta]"
@@ -9427,7 +9472,7 @@ SCPS-15097:
     - "SCPS-55001"
 SCPS-15098:
   name: "Formula One 2005"
-  name-sort: "ふぉみゅらー わん 2005"
+  name-sort: "ふぉーみゅら わん 2005"
   name-en: "Formula One 2005"
   region: "NTSC-J"
 SCPS-15099:
@@ -10919,8 +10964,8 @@ SCPS-56016:
     autoFlush: 1 # Corrects shadows (Currently still broken even with this).
     getSkipCount: "GSC_DTGames"
 SCPS-72001:
-  name: "GRAN TURISMO 3 A-spec [MEGA HITS!]"
-  name-sort: "ぐらんつーりすも 3 A-spec [MEGA HITS!]"
+  name: "GRAN TURISMO3 A-spec [MEGA HITS!]"
+  name-sort: "ぐらんつーりすも3 A-spec [MEGA HITS!]"
   name-en: "Gran Turismo 3 - A-Spec [MEGA HITS!]"
   region: "NTSC-J"
   gsHWFixes: *gran-turismo-3-gs-fixes
@@ -12233,6 +12278,40 @@ SCUS-97429:
   compat: 5
   speedHacks:
     instantVU1: 0 # Fixes misaligned effects such as exhausts during boosting.
+  patches:
+    3091E6FB:
+      content: |-
+        author=bmdhacks
+        // Softlock on "Saving Data" after writing a profile. Also upstream PCSX2 #6935.
+        //
+        // The save itself succeeds. The auto-save process notifies the lobby menu manager,
+        // which only advances if none of its children are busy -- and base-menu answers
+        // "busy" unconditionally while it is animating. The success path records nothing, so
+        // a success landing in that window is dropped, and the auto-save process has already
+        // exited. Only the failure path sets the retry byte at +0x180, which is why ejecting
+        // the memory card is the known workaround: it forces a failure.
+        //
+        // Store the destination state's type-slot offset in that byte instead of a flag
+        // (0x298 success, 0x21C card-status) and dispatch on it from the state's existing
+        // per-frame retry, so a success arriving mid-animation is applied once the menus
+        // settle. A real card failure still goes where it always did.
+        //
+        // The lobby code lives in a DGO loaded from disc, so the writes are gated on the
+        // original words being resident. The first gate tests a halfword the patch itself
+        // changes, so the block applies once per load and is then inert.
+        patch=1,EE,D1326454,extended,0C000007
+        patch=1,EE,D1326464,extended,0B000298
+        patch=1,EE,D1326466,extended,0A009C63
+        patch=1,EE,21326454,extended,12E30013
+        patch=1,EE,21326458,extended,24020298
+        patch=1,EE,213264A0,extended,2402021C
+        patch=1,EE,213264F8,extended,2402021C
+        patch=1,EE,21326630,extended,10800011
+        patch=1,EE,2132665C,extended,8EF90773
+        patch=1,EE,21326660,extended,9EC40180
+        patch=1,EE,21326668,extended,0064182D
+        patch=1,EE,2132666C,extended,9C630000
+        patch=1,EE,21326674,extended,AEC3004C
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves reflection quality.
     roundSprite: 1 # Fix lines in the sky.
@@ -12479,6 +12558,8 @@ SCUS-97481:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCUS-97482:
   name: "God of War II - The Colossus Battle [Demo]"
   region: "NTSC-U"
@@ -12489,6 +12570,8 @@ SCUS-97482:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SCUS-97483:
   name: "Gran Turismo 4 MX-5 Edition [Demo]"
   region: "NTSC-U"
@@ -12935,6 +13018,7 @@ SCUS-97584:
     autoFlush: 2
     preloadFrameData: 1
     nativeScaling: 2 # Fixes post-processing.
+    halfPixelOffset: 4 # Aligns post bloom.
 SCUS-97589:
   name: "NBA '08 featuring The Life Vol.3"
   region: "NTSC-U"
@@ -13334,7 +13418,7 @@ SLAJ-25066:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -13426,6 +13510,7 @@ SLAJ-25080:
   name-sort: "Godfather, The"
   region: "NTSC-Unk"
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
 SLAJ-25081:
@@ -13478,7 +13563,7 @@ SLAJ-25094:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -13659,7 +13744,7 @@ SLED-51211:
   gsHWFixes:
     gpuTargetCLUT: 1 # Fixes bloom and sun rendering in front of everything.
     autoFlush: 1 # Fixes bloom and sun rendering in front of everything.
-    halfPixelOffset: 2 # Aligns bloom effect.
+    halfPixelOffset: 4 # Aligns bloom effect.
     bilinearUpscale: 2 # Reduces color banding of the sun glare.
     nativeScaling: 2 # Fixes post lighting.
   roundModes:
@@ -14081,7 +14166,7 @@ SLED-53512:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -14128,7 +14213,7 @@ SLED-53637:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -14688,13 +14773,9 @@ SLES-50120:
   name: "Rumble Racing"
   region: "PAL-M3"
   compat: 5
-  gsHWFixes:
-    minimumBlendingLevel: 3 # Fixes car shadows.
 SLES-50121:
   name: "Rumble Racing"
   region: "PAL-Unk"
-  gsHWFixes:
-    minimumBlendingLevel: 3 # Fixes car shadows.
 SLES-50126:
   name: "Quake III - Revolution"
   region: "PAL-M3"
@@ -16879,7 +16960,7 @@ SLES-51044:
   gsHWFixes:
     gpuTargetCLUT: 1 # Fixes bloom and sun rendering in front of everything.
     autoFlush: 1 # Fixes bloom and sun rendering in front of everything.
-    halfPixelOffset: 2 # Aligns bloom effect.
+    halfPixelOffset: 4 # Aligns bloom effect.
     bilinearUpscale: 2 # Reduces color banding of the sun glare.
     nativeScaling: 2 # Fixes post lighting.
   roundModes:
@@ -20827,6 +20908,9 @@ SLES-52584:
 SLES-52585:
   name: "Burnout 3 - Takedown"
   region: "PAL-F-G-I"
+  memcardFilters: # Used for storage of network information on the memory card.
+    - "SLES-52585"
+    - "PSCD-20001"
   clampModes:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
@@ -21353,6 +21437,7 @@ SLES-52741:
   region: "PAL-E"
   gsHWFixes:
     halfPixelOffset: 5 # Fixes depth line and edge garbage.
+    nativeScaling: 4 # Softens and aligns bloom.
 SLES-52745:
   name: "Hugo - Cannon Cruise"
   region: "PAL-M4"
@@ -21934,6 +22019,7 @@ SLES-52940:
   region: "PAL-M3"
   gsHWFixes:
     halfPixelOffset: 5 # Fixes double image and aligns glow effects.
+    nativeScaling: 2 # Fixes depth blur.
 SLES-52941:
   name: "Gungrave - Overdose"
   region: "PAL-M3"
@@ -22030,7 +22116,7 @@ SLES-52968:
   gsHWFixes:
     gpuTargetCLUT: 1 # Fixes bloom and sun rendering in front of everything.
     autoFlush: 1 # Fixes bloom and sun rendering in front of everything.
-    halfPixelOffset: 2 # Aligns bloom effect.
+    halfPixelOffset: 4 # Aligns bloom effect.
     bilinearUpscale: 2 # Reduces color banding of the sun glare.
     nativeScaling: 2 # Fixes post lighting.
   roundModes:
@@ -23629,7 +23715,7 @@ SLES-53506:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -23650,7 +23736,7 @@ SLES-53507:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -23697,7 +23783,7 @@ SLES-53524:
   name: "Mortal Kombat - Shaolin Monks"
   region: "PAL-M5"
   clampModes:
-    eeClampMode: 3 # Full EE clamp — fixes geometry/effects.
+    eeClampMode: 3 # Fixes stretched menu text: panel sizes come from divides that only mode 3 rounds like the console.
   gsHWFixes:
     halfPixelOffset: 5 # Fixes effect alignment.
     autoFlush: 2 # Fixes bloom intensity
@@ -23705,7 +23791,7 @@ SLES-53525:
   name: "Mortal Kombat - Shaolin Monks"
   region: "PAL-G"
   clampModes:
-    eeClampMode: 3 # Full EE clamp — fixes geometry/effects.
+    eeClampMode: 3 # Fixes stretched menu text: panel sizes come from divides that only mode 3 rounds like the console.
   gsHWFixes:
     halfPixelOffset: 5 # Fixes effect alignment.
     autoFlush: 2 # Fixes bloom intensity
@@ -25208,6 +25294,7 @@ SLES-53967:
   name-sort: "Godfather, The"
   region: "PAL-M6"
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
     nativeScaling: 2 # Fixes post effects.
@@ -25215,6 +25302,7 @@ SLES-53968:
   name: "Parrain, Le"
   region: "PAL-F"
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
     nativeScaling: 2 # Fixes post effects.
@@ -25222,6 +25310,7 @@ SLES-53969:
   name: "Pate, Der"
   region: "PAL-G"
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
     nativeScaling: 2 # Fixes post effects.
@@ -25229,6 +25318,7 @@ SLES-53970:
   name: "Padrino, Il"
   region: "PAL-I"
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
     nativeScaling: 2 # Fixes post effects.
@@ -25236,6 +25326,7 @@ SLES-53971:
   name: "Padrino, El"
   region: "PAL-S"
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
     nativeScaling: 2 # Fixes post effects.
@@ -26216,6 +26307,7 @@ SLES-54317:
   compat: 5
   gsHWFixes:
     halfPixelOffset: 4 # Fixes alignment on fire effects.
+    nativeScaling: 2 # Softens and aligns bloom on fire effects.
 SLES-54319:
   name: "Biker Mice from Mars"
   region: "PAL-M5"
@@ -27213,6 +27305,7 @@ SLES-54581:
   region: "PAL-M5"
   gsHWFixes:
     halfPixelOffset: 5 # Fixes depth line and edge garbage.
+    nativeScaling: 4 # Softens and aligns bloom.
 SLES-54582:
   name: "International Tennis Pro"
   region: "PAL-E"
@@ -27351,7 +27444,7 @@ SLES-54627:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -27563,7 +27656,7 @@ SLES-54681:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -31335,7 +31428,7 @@ SLKA-25039:
   gsHWFixes:
     gpuTargetCLUT: 1 # Fixes bloom and sun rendering in front of everything.
     autoFlush: 1 # Fixes bloom and sun rendering in front of everything.
-    halfPixelOffset: 2 # Aligns bloom effect.
+    halfPixelOffset: 4 # Aligns bloom effect.
     bilinearUpscale: 2 # Reduces color banding of the sun glare.
     nativeScaling: 2 # Fixes post lighting.
   roundModes:
@@ -32145,6 +32238,9 @@ SLKA-25206:
   name: "번아웃3 테이크다운"
   name-en: "Burnout 3 - Takedown"
   region: "NTSC-K"
+  memcardFilters: # Used for storage of network information on the memory card.
+    - "SLKA-25206"
+    - "PSCD-30001"
   clampModes:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
@@ -32474,7 +32570,7 @@ SLKA-25260:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -32712,7 +32808,7 @@ SLKA-25304:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -33815,7 +33911,7 @@ SLPM-55004:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -34001,7 +34097,7 @@ SLPM-55036:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -34380,8 +34476,8 @@ SLPM-55108:
   name-en: "Fate - Unlimited Codes"
   region: "NTSC-J"
   compat: 5
-  roundModes:
-    eeRoundMode: 0 # Fixes bow porjectile trajectories.
+  clampModes:
+    eeClampMode: 3 # Archer's Trap Shot arrow reaches the opponent.
 SLPM-55109:
   name: "MAJOR LEAGUE BASEBALL 2K8"
   name-sort: "めじゃー りーぐ べーすぼーる 2K8"
@@ -35356,6 +35452,7 @@ SLPM-60109:
     gpuPaletteConversion: 2 # Lots of CLUTs in large textures.
     cpuSpriteRenderBW: 1 # Fixes car textures.
     cpuSpriteRenderLevel: 1 # Needed for above.
+    rewriteLargeSTCoords: 1 # Fix reflections on cars.
 SLPM-60112:
   name: "フレースヴェルグ [体験版]"
   name-sort: "ふれーすヴぇるぐ [たいけんばん]"
@@ -37109,6 +37206,8 @@ SLPM-61161:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SLPM-61162:
   name: "ドラゴンボールZ スパーキング！ メテオ [体験版]"
   name-sort: "どらごんぼーるZ すぱーきんぐ めてお [たいけんばん]"
@@ -41415,7 +41514,7 @@ SLPM-65029:
   name-en: "Anime Eikaiwa - Tondemo Nezumi Daikatsuyaku"
   region: "NTSC-J"
 SLPM-65030:
-  name: "決戦&決戦II スーパーバリューセット [決戦ディスク]"
+  name: "決戦&決戦2 スーパーバリューセット [決戦ディスク]"
   name-sort: "けっせん&けっせん2 すーぱーばりゅーせっと [けっせんでぃすく]"
   name-en: "Kesse & Kessen2 Super Value Set [Kessen Disc]"
   region: "NTSC-J"
@@ -45383,6 +45482,9 @@ SLPM-65719:
   name-sort: "ばーんあうと3 ていくだうん"
   name-en: "Burnout 3 - Takedown"
   region: "NTSC-J"
+  memcardFilters: # Used for storage of network information on the memory card.
+    - "SLPM-65719"
+    - "PSCD-00004"
   clampModes:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
@@ -45725,7 +45827,7 @@ SLPM-65768:
   region: "NTSC-J"
 SLPM-65769:
   name: "ポップンミュージック10 コントローラセット"
-  name-sort: "ぽっぷんみゅーじっく [こんとろーらせっと]"
+  name-sort: "ぽっぷんみゅーじっく10 [こんとろーらせっと]"
   name-en: "Pop'n music 10 [Controller Set]"
   region: "NTSC-J"
 SLPM-65770:
@@ -45847,6 +45949,7 @@ SLPM-65791:
   region: "NTSC-J"
   gsHWFixes:
     halfPixelOffset: 5 # Fixes double image and aligns glow effects.
+    nativeScaling: 2 # Fixes depth blur.
 SLPM-65793:
   name: "SSX3 [EA BEST HITS]"
   name-sort: "SSX3 [EA BEST HITS]"
@@ -47744,7 +47847,7 @@ SLPM-66108:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -51241,7 +51344,7 @@ SLPM-66652:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -51810,7 +51913,7 @@ SLPM-66739:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -53420,6 +53523,8 @@ SLPM-67013:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SLPM-67014:
   name: "戦国無双2 猛将伝"
   name-sort: "せんごくむそう2 もうしょうでん"
@@ -53442,6 +53547,8 @@ SLPM-67017:
     alignSprite: 1 # Fixes water vertical lines.
     autoFlush: 1 # Fixes sun occlusion.
     nativeScaling: 1 # Fixes light blooms.
+    recommendedBlendingLevel: 3 # Full-screen haze is blended by destination alpha; hardware applies half of it below High.
+    recommendedHWAA1: 1 # HUD digits and menu prompts lose their edge rows without AA1.
 SLPM-67502:
   name: "Devil May Cry" # No listed Korean name on ReDump
   region: "NTSC-K"
@@ -54774,6 +54881,7 @@ SLPS-20001:
     gpuPaletteConversion: 2 # Lots of CLUTs in large textures.
     cpuSpriteRenderBW: 1 # Fixes car textures.
     cpuSpriteRenderLevel: 1 # Needed for above.
+    rewriteLargeSTCoords: 1 # Fix reflections on cars.
 SLPS-20002:
   name: "撞球 ビリヤードマスター2"
   name-sort: "どうきゅう びりやーどますたー2"
@@ -58186,7 +58294,7 @@ SLPS-25138:
   region: "NTSC-J"
 SLPS-25139:
   name: "Baldur's Gate - DARK ALLIANCE - [限定版]"
-  name-sort: "ばるだーずげーと だーくあらいあんす 1[げんていばん]"
+  name-sort: "ばるだーずげーと だーくあらいあんす [げんていばん]"
   name-en: "Baldur's Gate - Dark Alliance [Limited Edition]"
   region: "NTSC-J"
   compat: 5
@@ -58197,7 +58305,7 @@ SLPS-25139:
     gpuPaletteConversion: 1 # Reduces hashcache size and improves performance.
 SLPS-25140:
   name: "Baldur's Gate - DARK ALLIANCE - [通常版]"
-  name-sort: "ばるだーずげーと だーくあらいあんす 1[つうじょうばん]"
+  name-sort: "ばるだーずげーと だーくあらいあんす [つうじょうばん]"
   name-en: "Baldur's Gate - Dark Alliance [Standard Edition]"
   region: "NTSC-J"
   gsHWFixes:
@@ -59063,7 +59171,7 @@ SLPS-25290:
     halfPixelOffset: 5 # Fixes alignment of shuffles and post-processing.
 SLPS-25291:
   name: "Baldur's Gate - DARK ALLIANCE - [PCCW Japan The BEST]"
-  name-sort: "ばるだーずげーと だーくあらいあんす 1[PCCW Japan The BEST]"
+  name-sort: "ばるだーずげーと だーくあらいあんす [PCCW Japan The BEST]"
   name-en: "Baldur's Gate - Dark Alliance [PCCW The Best]"
   region: "NTSC-J"
   compat: 5
@@ -59454,7 +59562,7 @@ SLPS-25351:
   gsHWFixes:
     gpuTargetCLUT: 1 # Fixes bloom and sun rendering in front of everything.
     autoFlush: 1 # Fixes bloom and sun rendering in front of everything.
-    halfPixelOffset: 2 # Aligns bloom effect.
+    halfPixelOffset: 4 # Aligns bloom effect.
     bilinearUpscale: 2 # Reduces color banding of the sun glare.
     nativeScaling: 2 # Fixes post lighting.
   roundModes:
@@ -60465,8 +60573,7 @@ SLPS-25510:
   region: "NTSC-J"
   compat: 5
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -60568,7 +60675,6 @@ SLPS-25529:
   gsHWFixes:
     halfPixelOffset: 4 # Aligns DoF effects.
     nativeScaling: 2 # Fixes post effects.
-    getSkipCount: "GSC_UltramanFightingEvolution"
 SLPS-25530:
   name: "餓狼伝 Breakblow"
   name-sort: "がろうでん Breakblow"
@@ -62306,7 +62412,6 @@ SLPS-25800:
   gsHWFixes:
     halfPixelOffset: 4 # Aligns DoF effects.
     nativeScaling: 2 # Fixes post effects.
-    getSkipCount: "GSC_UltramanFightingEvolution"
 SLPS-25801:
   name: "今日からマ王！ 眞マ国の休日"
   name-sort: "きょうからまおう しんまこくのきゅうじつ"
@@ -63467,6 +63572,7 @@ SLPS-71502:
     gpuPaletteConversion: 2 # Lots of CLUTs in large textures.
     cpuSpriteRenderBW: 1 # Fixes car textures.
     cpuSpriteRenderLevel: 1 # Needed for above.
+    rewriteLargeSTCoords: 1 # Fix reflections on cars.
 SLPS-72501:
   name: "ファイナルファンタジーⅩ [MEGA HITS!]"
   name-sort: "ふぁいなるふぁんたじー10 [MEGA HITS!]"
@@ -63802,8 +63908,7 @@ SLPS-73223:
   name-en: "Tekken 5 [PlayStation2 the Best]"
   region: "NTSC-J"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -64470,6 +64575,7 @@ SLUS-20002:
     gpuPaletteConversion: 2 # Lots of CLUTs in large textures.
     cpuSpriteRenderBW: 1 # Fixes car textures.
     cpuSpriteRenderLevel: 1 # Needed for above.
+    rewriteLargeSTCoords: 1 # Fix reflections on cars.
 SLUS-20003:
   name: "Portal Runner"
   region: "NTSC-U"
@@ -65131,9 +65237,6 @@ SLUS-20173:
 SLUS-20174:
   name: "Rumble Racing"
   region: "NTSC-U"
-  compat: 5
-  gsHWFixes:
-    minimumBlendingLevel: 3 # Fixes car shadows.
 SLUS-20175:
   name: "Mobile Suit Gundam - Journey to Jaburo"
   region: "NTSC-U"
@@ -65495,6 +65598,8 @@ SLUS-20250:
   name: "Stuntman"
   region: "NTSC-U"
   compat: 5
+  clampModes:
+    vu0ClampMode: 4 # Fixes VU0 macro adds landing a ULP short of the console's adder.
   gameFixes:
     - BlitInternalFPSHack # Fixes internal FPS detection.
   gsHWFixes:
@@ -66773,7 +66878,7 @@ SLUS-20497:
   gsHWFixes:
     gpuTargetCLUT: 1 # Fixes bloom and sun rendering in front of everything.
     autoFlush: 1 # Fixes bloom and sun rendering in front of everything.
-    halfPixelOffset: 2 # Aligns bloom effect.
+    halfPixelOffset: 4 # Aligns bloom effect.
     bilinearUpscale: 2 # Reduces color banding of the sun glare.
     nativeScaling: 2 # Fixes post lighting.
   roundModes:
@@ -68874,6 +68979,7 @@ SLUS-20885:
   compat: 5
   gsHWFixes:
     halfPixelOffset: 5 # Fixes depth line and edge garbage.
+    nativeScaling: 4 # Softens and aligns bloom.
 SLUS-20886:
   name: "Sitting Ducks"
   region: "NTSC-U"
@@ -69398,6 +69504,7 @@ SLUS-20969:
   compat: 5
   gsHWFixes:
     halfPixelOffset: 5 # Fixes double image and aligns glow effects.
+    nativeScaling: 2 # Fixes depth blur.
 SLUS-20970:
   name: "Rumble Roses"
   region: "NTSC-U"
@@ -69620,8 +69727,6 @@ SLUS-21005:
   compat: 5
   gsHWFixes:
     autoFlush: 1 # Fixes effects.
-    cpuSpriteRenderBW: 2 # Fixes ghosting/trailing on hardware renderers (with autoFlush).
-    cpuSpriteRenderLevel: 2 # Needed for above.
     roundSprite: 1 # Fixes upscaling artifacts.
     halfPixelOffset: 5 # Fixes post bloom positioning.
     nativeScaling: 4 # Fixes lighting effects due to upscaling.
@@ -69946,7 +70051,7 @@ SLUS-21050:
   compat: 5
   memcardFilters: # Used for storage of network information on the memory card.
     - "SLUS-21050"
-    - "PSCD-10088"
+    - "PSCD10088"
   clampModes:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
@@ -70001,8 +70106,7 @@ SLUS-21059:
   region: "NTSC-U"
   compat: 5
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -70154,7 +70258,7 @@ SLUS-21087:
   region: "NTSC-U"
   compat: 5
   clampModes:
-    eeClampMode: 3 # Full EE clamp — fixes geometry/effects.
+    eeClampMode: 3 # Fixes stretched menu text: panel sizes come from divides that only mode 3 rounds like the console.
   gsHWFixes:
     halfPixelOffset: 5 # Fixes effect alignment.
     autoFlush: 2 # Fixes bloom intensity
@@ -70577,8 +70681,7 @@ SLUS-21160:
   name: "Tekken 5 [Demo]"
   region: "NTSC-U"
   clampModes:
-    eeClampMode: 3 # Fixes camera and stops constant coin noises on Pirates Cove.
-    vu1ClampMode: 2 # Fixes broken effects.
+    eeClampMode: 2 # Fixes camera and stops constant coin noises on Pirates Cove.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves effect rendering on various levels.
     halfPixelOffset: 4 # Align post.
@@ -71107,7 +71210,7 @@ SLUS-21242:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -71618,6 +71721,7 @@ SLUS-21306:
   compat: 5
   gsHWFixes:
     halfPixelOffset: 4 # Fixes alignment on fire effects.
+    nativeScaling: 2 # Softens and aligns bloom on fire effects.
 SLUS-21307:
   name: "Ice Age 2 - The Meltdown"
   region: "NTSC-U"
@@ -72200,6 +72304,7 @@ SLUS-21385:
   region: "NTSC-U"
   compat: 5
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
     nativeScaling: 2 # Fixes post effects.
@@ -72329,6 +72434,7 @@ SLUS-21406:
   name-sort: "Godfather, The - Limited Edition"
   region: "NTSC-U"
   gsHWFixes:
+    minimumBlendingLevel: 3 # Fixes lamp light: destination alpha above 128 has no fixed-function expression.
     textureInsideRT: 1 # Required for complex offset shuffles.
     halfPixelOffset: 2 # Fixes center line in post-processing.
     nativeScaling: 2 # Fixes post effects.
@@ -73262,8 +73368,6 @@ SLUS-21588:
   name: "Avatar - The Last Airbender - The Burning Earth"
   region: "NTSC-U"
   compat: 5
-  gsHWFixes:
-    minimumBlendingLevel: 3 # Fixes missing lighting and skin color.
 SLUS-21589:
   name: "Pinball Hall of Fame - The Williams Collection"
   region: "NTSC-U"
@@ -73312,7 +73416,7 @@ SLUS-21596:
     vuClampMode: 3 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -74541,8 +74645,6 @@ SLUS-21804:
   name: "Avatar - The Last Airbender - Into the Inferno"
   region: "NTSC-U"
   compat: 5
-  gsHWFixes:
-    minimumBlendingLevel: 3 # Fixes missing lighting and skin color.
 SLUS-21805:
   name: "Hasbro Family Game Night"
   region: "NTSC-U"
@@ -75940,6 +76042,7 @@ SLUS-29132:
   region: "NTSC-U"
   gsHWFixes:
     halfPixelOffset: 5 # Fixes double image and aligns glow effects.
+    nativeScaling: 2 # Fixes depth blur.
 SLUS-29133:
   name: "Namco Transmission Demo Disc Vol.2"
   region: "NTSC-U"
@@ -76037,7 +76140,7 @@ SLUS-29153:
     vuClampMode: 0 # Fixes buggy lighting in the garage.
   gsHWFixes:
     recommendedBlendingLevel: 3 # Improves car reflections.
-    halfPixelOffset: 2 # Fixes depth lines.
+    halfPixelOffset: 4 # Fixes depth lines.
     autoFlush: 2 # Fixes blur and obscures sun behind objects.
     gpuTargetCLUT: 1 # Fixes sun penetrating bridges (along with HPO special).
     bilinearUpscale: 2 # Smooths out sun glare textures like native.
@@ -76405,6 +76508,7 @@ TCES-53247:
   gsHWFixes:
     roundSprite: 1 # Fixes misaligned text.
     autoFlush: 2 # Fixes sun luminosity.
+    nativeScaling: 2 # Helps align sun occasional.
 TCES-53286:
   name: "Jak X Beta Trial Code"
   region: "PAL-E"
@@ -76743,6 +76847,7 @@ TLES-52940:
   region: "PAL-E"
   gsHWFixes:
     halfPixelOffset: 5 # Fixes double image and aligns glow effects.
+    nativeScaling: 2 # Fixes depth blur.
 TLES-53544:
   name: "Pro Evolution Soccer 5 Beta Trial Code"
   region: "PAL-E"

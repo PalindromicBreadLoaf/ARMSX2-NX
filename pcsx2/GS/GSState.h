@@ -7,6 +7,7 @@
 #include "GS/GSPerfMon.h"
 #include "GS/GSLocalMemory.h"
 #include "GS/GSVertexKick.h"
+#include "GS/GSVertexKickKernel.h"
 #include "GS/GSBackQueue.h"
 #include "GS/GSDrawingContext.h"
 #include "GS/GSDrawingEnvironment.h"
@@ -59,6 +60,10 @@ public:
 	// first — the back thread may otherwise be mid-draw on the same GSDevice.
 	void DrainBackQueue();
 
+	/// Stops the back thread after draining it. Called by GS.cpp when the split cannot engage
+	/// after all; with no front object the renderer then parses and draws single-threaded.
+	void StopBackThread();
+
 	static constexpr int GetSaveStateSize(int version);
 
 private:
@@ -93,8 +98,6 @@ private:
 	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerSTQRGBAXYZF2[8] = {};
 	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerSTQRGBAXYZ2[8] = {};
 
-	template<u32 prim, bool auto_flush> void GIFPackedRegHandlerSTQRGBAXYZF2(const GIFPackedReg* RESTRICT r, u32 size);
-	template<u32 prim, bool auto_flush> void GIFPackedRegHandlerSTQRGBAXYZ2(const GIFPackedReg* RESTRICT r, u32 size);
 	void GIFPackedRegHandlerNOP(const GIFPackedReg* RESTRICT r, u32 size);
 
 	template<int i> void ApplyTEX0(GIFRegTEX0& TEX0);
@@ -186,6 +189,34 @@ private:
 	bool EnsureAsyncReadbackMemory();
 
 protected:
+	// One qword of a tag through the per-descriptor handler table, which is the
+	// path Transfer takes for TYPE_UNKNOWN.
+	//
+	// Two callers. GIFPackedRegHandlerLayout uses it to walk a tag record by
+	// record while m_dirty_gs_regs is live, because the flush point the fused
+	// arm collapses into one call is only exact once the flag has cleared -- so
+	// this is a shipped path, not a test hook. And the differential suite
+	// (tests/ctest/core/gs/gs_kick_kernel_tests.cpp) replays a whole tag a qword
+	// at a time and compares that against the fused handler for the same layout;
+	// that replay is the oracle every fused layout is checked against, and the
+	// handler table it needs is private.
+	void ReplayPackedQword(u32 reg, const GIFPackedReg* RESTRICT r)
+	{
+		(this->*m_fpGIFPackedRegHandlers[reg & 0xF])(r);
+	}
+
+	// Unpublishes the stage-3c fused handlers, so Transfer replays their tags a
+	// qword at a time -- which is what the binary before the stage does. The
+	// differential suite drives one GIF packet through Transfer twice, once with
+	// them and once without, and that is the only way to compare SetTag, the
+	// dispatch and the handler as one thing. Nothing in the emulator calls this
+	// either; UpdateVertexKick publishes them again on the next prim change.
+	void UnpublishLayoutHandlers()
+	{
+		for (GIFPackedRegHandlerC& e : m_fpGIFPackedRegHandlersLayoutC)
+			e = nullptr;
+	}
+
 	// Executor-owned HOST->LOCAL write cursor (advanced by wi() across transfer
 	// slices; mirrored back into m_tr.x/y inline for savestate coherence).
 	int m_exec_tr_x = 0;
@@ -241,6 +272,14 @@ protected:
 		int m_backed_up_ctx = 0;
 		u32 m_dirty_regs = 0;
 		GSVector4i draw_rect = GSVector4i::zero();
+		// draw_rect asked on the native pixel grid, whatever the upscale (see
+		// GSVertexKernels::PrimNativeDrawRect). Read by CheckOverlapVertsSlow and by
+		// nothing else -- draw_rect above keeps the shipped rounding because it
+		// reaches the texture cache. Equal to draw_rect at native resolution, by
+		// construction rather than by a branch. Only maintained while
+		// GSConfig.UserHacks_DrawBuffering is set, which is the only way the
+		// heuristic that reads it is reachable.
+		GSVector4i native_draw_rect = GSVector4i::zero();
 		bool related_draw = false;
 	};
 
@@ -298,6 +337,18 @@ protected:
 		GSVector4i* temp_rect;
 		const GSVector4i* scissor_in;
 
+		// The same accumulation on the native pixel grid, for the draw-buffering
+		// overlap heuristic. Shares acc_state: every accepted prim contributes to
+		// both, an empty native rect contributing the union's identity element
+		// rather than nothing, so "did this chunk accumulate, and does it replace or
+		// union" has one answer. Only tracked when draw buffering is on
+		// (track_native, i.e. GSState::m_track_native_draw_rect); the rect is dead
+		// state otherwise, and at the native grid it would be a second copy of the
+		// same number.
+		GSVector4i native_acc_rect;
+		GSVector4i* temp_native_rect;
+		bool track_native;
+
 		__fi void Load(GSState& s)
 		{
 			vb = s.m_vertex;
@@ -313,6 +364,8 @@ protected:
 			acc_state = 0;
 			temp_rect = &s.temp_draw_rect;
 			scissor_in = &s.m_context->scissor.in;
+			temp_native_rect = &s.temp_native_draw_rect;
+			track_native = s.m_track_native_draw_rect;
 		}
 
 		__fi void Store() const
@@ -327,6 +380,12 @@ protected:
 			{
 				const GSVector4i merged = (acc_state == 2) ? acc_rect : temp_rect->runion(acc_rect);
 				*temp_rect = merged.rintersect(*scissor_in);
+
+				if (track_native)
+				{
+					const GSVector4i nat = (acc_state == 2) ? native_acc_rect : temp_native_rect->runion(native_acc_rect);
+					*temp_native_rect = nat.rintersect(*scissor_in);
+				}
 			}
 		}
 	};
@@ -342,8 +401,135 @@ protected:
 
 	void RefreshKickMirror();
 
+	// One kick-mirror entry for a vertex of `primclass`. Which coordinate space
+	// the outcode compares in, and how wide a band is, both follow the cull grid
+	// (GSVertexKick.h): bands against the banded bounds at native, raw 12.4
+	// against the plain cull rect everywhere else. primclass is a constant at the
+	// hot call site, so the selection folds away there.
+	__fi GSVertexKernels::CullMirrorEntry MakeKickMirror(int primclass, int wx, int wy) const
+	{
+		const bool rounded = (primclass == GS_TRIANGLE_CLASS || primclass == GS_SPRITE_CLASS);
+		const int shift = !rounded ? 0 :
+		                             ((primclass == GS_SPRITE_CLASS) ? m_cull_grid.sprite_shift : m_cull_grid.shift);
+
+		if (shift == 4)
+			return GSVertexKernels::MakeCullMirrorEntry<true>(wx, wy, m_cull_bounds_band, 4);
+
+		// shift 0 means this class has no grid, so nothing reads the bands; pack
+		// them at the native width rather than at a degenerate one.
+		return GSVertexKernels::MakeCullMirrorEntry<false>(wx, wy, m_cull_bounds_raw, (shift != 0) ? shift : 4,
+			m_cull_grid.band_bias_x, m_cull_grid.band_bias_y);
+	}
+
+	// The cull grid the current config asks for.
+	static GSVertexKernels::CullGrid ConfigCullGrid();
+
+	// The cull grid this object's engine samples on. The hardware renderer's depends on the upscale
+	// and the half-pixel-offset mode, so it is ConfigCullGrid(); the software renderer is always
+	// native; the front parser culls for whichever engine is behind it. UpdateSettings re-applies
+	// it on every settings change, so no input of the grid can change without the grid following.
+	virtual GSVertexKernels::CullGrid EngineCullGrid() const { return ConfigCullGrid(); }
+
+public:
+	// The cull grid a scale and a half-pixel-offset mode ask for. Pure and public
+	// so gs_vertex_tests can pin the mode decisions without standing up a GS.
+	// `native_scale_targets`: some targets may render at scale 1 while the rest render at `scale`
+	// (native scaling, native palette draws), so the grid has to hold both sets of sample points.
+	static GSVertexKernels::CullGrid CullGridFor(float scale, GSHalfPixelOffset hpo, bool native_scale_targets = false);
+
+protected:
+
 	template <u32 prim, bool auto_flush> void VertexKick(u32 skip);
 	template <u32 prim, bool auto_flush> void VertexKickDirect(u32 skip, u32 xraw, u32 yraw, const GSVector4i& v0, const GSVector4i& v1, VertexKickCursor& c);
+
+	// The two fused packed-vertex handlers and the two batch shapes behind them.
+	// They sit here rather than with the other GIF handlers because the
+	// differential suite (tests/ctest/core/gs/gs_kick_kernel_tests.cpp) drives both
+	// batch shapes through a GSState-derived probe and compares the results.
+	template<u32 prim, bool auto_flush> void GIFPackedRegHandlerSTQRGBAXYZF2(const GIFPackedReg* RESTRICT r, u32 size);
+	template<u32 prim, bool auto_flush> void GIFPackedRegHandlerSTQRGBAXYZ2(const GIFPackedReg* RESTRICT r, u32 size);
+	// The layouts stage 3c added, all through one handler: they differ only in
+	// where the record's descriptors sit and which of them it omits, and that is
+	// a template parameter of the parse.
+	template<u32 prim, GSVertexKernels::PackedLayout layout, bool auto_flush>
+	void GIFPackedRegHandlerLayout(const GIFPackedReg* RESTRICT r, u32 size);
+	template<u32 prim, GSVertexKernels::PackedLayout layout> void KickPackedBatchLegacy(const GIFPackedReg* RESTRICT r, u32 count);
+	template<u32 prim, GSVertexKernels::PackedLayout layout, bool auto_flush> void KickPackedBatchKernel(const GIFPackedReg* RESTRICT r, u32 count);
+	template<u32 prim, GSVertexKernels::PackedLayout layout> void KickPackedOneStaged(const GIFPackedReg* RESTRICT rv);
+	template<u32 prim, GSVertexKernels::PackedLayout layout> void KickPackedStagedRun(const GIFPackedReg* RESTRICT r, u32 count);
+	template<u32 prim, GSVertexKernels::PackedLayout layout> void KickPackedOneLegacy(const GIFPackedReg* RESTRICT rv, u64 uvfog, GSLimit24BitDepth depth_clamp);
+	template<u32 prim> bool KickKernelApplies();
+	// Which (prim, layout) pairs stage 3c instantiates a fused handler for.
+	//
+	// NOT every pair that could exist. A pair costs its handler, its staged loop,
+	// its per-vertex batch and -- if it takes the kernel -- RunChunk, the driver and
+	// the seam kick, which is about 17 KB of .text each with VertexKick inlined into
+	// three of them. Instantiating all twelve cost 256 KB, and the two titles that
+	// paid for it on the SD865 run none of them.
+	//
+	// So the set is the one the corpus asks for, counted over all 24 dumps under
+	// both renderers. Four pairs carry 54,716 of the 55,316 fused-layout handler
+	// calls the corpus makes; the two it leaves out are gow2's triangle-strip
+	// {ST, XYZ2} (592 calls) and dirge's triangle-list {RGBAQ, XYZ2} (8), which
+	// together are 1.1% and are not worth 10 KB of footprint on the titles that
+	// never run them. Everything not below keeps a null in the table, and
+	// Transfer replays the tag a qword at a time -- which is exact, and is what
+	// the tag got before SetTag learned to name it.
+	template <u32 prim, GSVertexKernels::PackedLayout layout>
+	static constexpr bool LayoutHandlerExists()
+	{
+		if constexpr (prim == GS_TRIANGLESTRIP)
+		{
+			// outrun-a/-b and mgs3's NOP-padded triple, 13,900 handler calls
+			// across the corpus; spiderman3's and stuntman's {RGBAQ, XYZ2},
+			// 13,560; and the UV triple, which is the whole triangle stream of
+			// both Baldur's Gate: Dark Alliance titles.
+			return layout == GSVertexKernels::PackedLayout::NopTripleXYZF2 ||
+				   layout == GSVertexKernels::PackedLayout::PairRGBAQXYZ2 ||
+				   layout == GSVertexKernels::PackedLayout::UvTripleXYZF2;
+		}
+		else if constexpr (prim == GS_SPRITE)
+		{
+			// spiderman3's whole sprite stream: {ST, XYZ2} 25,368 calls and
+			// {UV, XYZ2} 1,796.
+			return layout == GSVertexKernels::PackedLayout::PairSTQXYZ2 ||
+				   layout == GSVertexKernels::PackedLayout::PairUVXYZ2;
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	// And which of those enter the two-pass kernel, which is the expensive half:
+	// RunChunk, its driver and its seam kick are about 9 KB of .text a pair.
+	//
+	// Sprites never enter it -- they are auto_flush = true at both GameDB levels
+	// and under the software renderer, so they stay on the staged loop, and
+	// 27,164 sprite handler calls across the corpus produced ZERO kernel entries.
+	// Both triangle-strip pairs enter it -- the NOP-padded triple 12,214 times
+	// and {RGBAQ, XYZ2} 11,600 -- and that is all of it.
+	template <u32 prim, GSVertexKernels::PackedLayout layout>
+	static constexpr bool LayoutUsesKernel()
+	{
+		return prim == GS_TRIANGLESTRIP && LayoutHandlerExists<prim, layout>();
+	}
+
+	// The fused handler for a (prim, layout) pair, or null when the corpus shows
+	// no traffic for it. A null entry makes Transfer replay the tag a qword at a
+	// time, which is exact.
+	template<u32 prim, GSVertexKernels::PackedLayout layout, bool auto_flush>
+	static constexpr GIFPackedRegHandlerC LayoutHandlerOrNull();
+	// The latched Q a tag with an ST descriptor leaves behind, with the two
+	// fix-ups GIFPackedRegHandlerSTQ applies.
+	void StoreLatchedQ(const GIFPackedReg* RESTRICT stq);
+
+	// Which arm the two fused handlers take. Nothing in the emulator writes this:
+	// it is not a settings key and not an env gate, it exists so the differential
+	// suite can drive one register run through both arms and compare every byte
+	// the kick leaves behind.
+	static bool s_fused_kick_use_kernel;
+
 
 	// following functions need m_vt to be initialized
 
@@ -376,7 +562,22 @@ protected:
 	bool IsMipMapActive();
 	bool IsCoverageAlpha();
 	bool IsCoverageAlphaFixedOne();
+	bool AA1LineCoverageFromPixelRuns();
+	bool AA1LineCoverageFromPixelRunsLive(bool tme, bool tcc);
 	virtual bool IsCoverageAlphaSupported();
+	// Whether the engine builds the console's own S, T and Q planes for the current draw
+	// (GSVertexQDivide.h GSUseConsolePlane). Then the texel rounding in DrawRecordTail
+	// must not touch the vertices: the console's plane is the same at every Z, and the
+	// rounding only fires under a constant one. Software renderer on ARM64 only.
+	virtual bool BuildsConsolePlane() { return false; }
+	// Which auto-flush rule ResetHandlers arms. The decision belongs to the renderer's DRAW
+	// ENGINE, not the process's renderer type: a renderer can run the SW engine as a fallback
+	// floor under a hardware GSCurrentRenderer, and the two flush shapes produce different
+	// pixels on self-texturing draws. ⚠️ ResetHandlers runs from the GSState constructor,
+	// where this virtual resolves to the base — an override is inert until the derived
+	// constructor calls ResetHandlers() again (GSRendererSW does). A future front parser
+	// (GSFrontState) fronting a SW-engine renderer needs the same override.
+	virtual GSHWAutoFlushLevel GetAutoFlushLevel() const;
 	// GV7-1d-ii: back-half of the split front's kick-time coverage-alpha query
 	// (HW only): cached-ctx/alpha-minmax from this object's last executed draw,
 	// the caller's live ALPHA passed in.
@@ -438,6 +639,10 @@ public:
 	GIFPath m_path[4] = {};
 	const GIFRegPRIM* PRIM = nullptr;
 	GSPrivRegSet* m_regs = nullptr;
+	// What the current draw reads of m_regs, captured when it was flushed (FlushPrim). Draw-time
+	// code reads this, never m_regs, because under the split the draw runs after MTGS may have
+	// written the next frame's registers.
+	GSBackQueue::DrawPrivRegs m_draw_priv = {};
 	GSLocalMemory m_mem;
 	GSDrawingEnvironment m_env = {};
 	GSDrawingEnvironment m_prev_env = {};
@@ -445,6 +650,10 @@ public:
 	const GSDrawingEnvironment* m_draw_env = &m_env;
 	GSDrawingContext* m_context = nullptr;
 	GSVector4i temp_draw_rect;
+	// temp_draw_rect on the native pixel grid. Tracks temp_draw_rect at every write
+	// site so the two cannot drift; read only by CheckOverlapVertsSlow, through
+	// m_env_buffers[i].native_draw_rect.
+	GSVector4i temp_native_draw_rect;
 	// Owned by the renderer, which opens and closes it on the present path. The transfer
 	// and ReadFIFO packets that fill it are produced on the parse path, which is the front
 	// object under the split — hence GetDumpSink() rather than a bare m_dump read. Both
@@ -457,14 +666,44 @@ public:
 	bool m_are_quads = false;
 	bool m_are_quads_shuffle = false;
 	bool m_nativeres = false;
+	// The sample-point grid the per-prim cull rounds onto (GSVertexKick.h). Set
+	// from config beside m_nativeres, which keeps its own, narrower meaning: the
+	// scale is exactly 1. The software engine pins this native the same way it
+	// pins m_nativeres.
+	GSVertexKernels::CullGrid m_cull_grid = GSVertexKernels::MakeCullGrid(4, 4);
+	// Whether the vertex kick maintains the native-grid draw rect beside the
+	// shipped one. Only where it can differ: draw buffering on, and a grid that is
+	// not the native one. At the native grid the two rects are the same value by
+	// construction, so tracking there is pure cost -- measured at +1.1% to +3.8% of
+	// GS-thread CPU on the three drawBuffering dumps in the corpus.
+	bool m_track_native_draw_rect = false;
+
+	// Set them together: forgetting the second is a silent cost above native and a
+	// silently stale rect below it.
+	__fi void SetCullGrid(const GSVertexKernels::CullGrid& grid)
+	{
+		m_cull_grid = grid;
+		m_track_native_draw_rect = GSConfig.UserHacks_DrawBuffering && grid.shift != 4;
+	}
 	bool m_mipmap = false;
 	bool m_texflush_flag = false;
+	// This engine draws the alpha stencil counter through the blend unit, so IsAutoFlushDraw leaves the
+	// counter unsplit (GSFastStencilShadow.h). Engine identity, never a config key: only GSRendererHW's
+	// constructor sets it, from its device's fast_stencil_shadow bit, and the software engine keeps
+	// splitting at whatever level its own key gives. A member because the predicate runs per primitive.
+	bool m_unsplit_stencil_counter = false;
 	bool m_isPackedUV_HackFlag = false;
 	bool m_channel_shuffle = false;
 	bool m_using_temp_z = false;
 	bool m_temp_z_full_copy = false;
 	bool m_in_target_draw = false;
 	bool m_channel_shuffle_finish = false;
+	// What GetAutoFlushLevel() answered when ResetHandlers last armed the parse
+	// handlers. Read by IsAutoFlushDraw, so the predicate and the handler table are
+	// decided by one value at one moment; reading the virtual per primitive would be
+	// a call on the vertex path, and reading GSConfig would put the two back out of
+	// step. Lands in the padding after the bool run above, so no member moves.
+	GSHWAutoFlushLevel m_autoflush_level = GSHWAutoFlushLevel::Disabled;
 
 	u32 m_target_offset = 0;
 	u8 m_scanmask_used = 0;
@@ -472,6 +711,12 @@ public:
 	int m_backed_up_ctx = 0;
 	std::vector<GSUploadQueue> m_draw_transfers;
 	NoGapsType m_primitive_covers_without_gaps;
+	/// Whether the union of this draw's sprites covers m_r, under both of the pixel conventions
+	/// the tree rasterises with. Deliberately NOT folded into m_primitive_covers_without_gaps:
+	/// widening that value tells the render-target-alpha-scale sites the draw overwrites the whole
+	/// target and moves pixels on titles that have nothing to do with this rule. One reader only,
+	/// GSRendererHW::CalculateAlphaRange.
+	bool m_primitive_union_covers_rect = false;
 	GSVector4i m_r = {};
 	GSVector4i m_r_no_scissor = {};
 
@@ -606,9 +851,17 @@ public:
 	virtual void InvalidateVideoMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r) {}
 	virtual void InvalidateLocalMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r, bool clut = false) {}
 
+	/// True when this renderer's draws clear SCANMSK in the parse environment (the GSC_IRem hook).
+	/// The split front asks the back, and repeats the clear on its own environment.
+	virtual bool DrawClearsScanMask() const { return false; }
+
+	/// True when a local-to-local move can be taken by a GameDB move hook, which leaves TRXDIR at
+	/// 2 where the ordinary move sets it to 3.
+	virtual bool HasMoveHook() const { return false; }
+
 	virtual void Move();
 
-	// GV-7 front/back seam (SEAM-AUDIT.md): the front builds a self-contained
+	// The front/back seam: the front builds a self-contained
 	// record, the Exec*Record executor consumes it — inline today, on the back
 	// thread once GV7-1 lands. The executor owns the HOST->LOCAL write cursor
 	// across transfer slices.
@@ -618,20 +871,19 @@ public:
 	void SubmitClutLoad(const GIFRegTEX0& TEX0, const GIFRegTEXCLUT& TEXCLUT);
 	void ExecClutLoadRecord(const GSBackQueue::ClutLoadRecord& rec);
 	void ExecDrawRecord(const GSBackQueue::DrawRecord& rec);
+	GSBackQueue::DrawPrivRegs CaptureDrawPrivRegs();
 	void DrawRecordTail(u64 draw_serial);
 	void SubmitPcrtcSync();
 	void ExecPcrtcSyncRecord(const GSBackQueue::PcrtcSyncRecord& rec);
 
-	// GV7-1: sampled from GSConfig.BackThreadMode at construction (the option is
-	// restart-required, so it can't change under a live GSState). Off = the
-	// front-side seam functions skip the record round-trip entirely and call the
-	// executor tails against live state; any other mode builds records.
+	// True only on the front parser object of the split: its seam functions build
+	// records and push them to the back thread. Everywhere else they skip the
+	// record round-trip and call the executor tails against live state.
 	bool m_back_records = false;
 
 	// GV7-1d-ii: the front<->back channel (record ring + wake semaphore + pool
-	// arenas/free rings, GSBackQueue.h). Single-object modes use this object's
-	// own storage; the two-object pipelined split points the front parser
-	// object's m_chan at the back object's channel. The destructor frees
+	// arenas/free rings, GSBackQueue.h). The back renderer object owns it; the
+	// front parser object's m_chan points at the back object's channel. The destructor frees
 	// m_chan_storage's pooled arrays — only ever this object's own storage, so
 	// a front pointing elsewhere frees nothing it doesn't own.
 	GSBackQueue::Channel m_chan_storage;
@@ -677,21 +929,16 @@ public:
 	void RotateTransferPayload();
 	void ExecReleasePayloadRecord(const GSBackQueue::ReleasePayloadRecord& rec);
 
-	// GV7-1d: the back thread (modes Lockstep and, for now, Pipelined — true
-	// pipelining needs the front-object split, so Pipelined runs lockstep until
-	// then). Lockstep = drain after every push, which is what makes executing
-	// against the shared single-object state safe. VSYNC records are NOT queued:
-	// present runs on the MTGS thread after a drain, so the back thread never
-	// touches the GSDevice on present paths (and for SW, at all). Queued modes
-	// engage only for Vulkan and SW renderers — a GL device is context-bound to
-	// the MTGS thread and HW draws would issue GL calls from the wrong thread.
-	bool m_back_queued = false;
-	bool m_back_lockstep = false;
+	// GV7-1d: the back thread, started by the back renderer object's constructor.
+	// VSYNC records are NOT queued: present runs on the MTGS thread after a drain,
+	// so the back thread never touches the GSDevice on present paths (and for SW,
+	// at all). The split engages only for Vulkan and SW renderers — a GL device is
+	// context-bound to the MTGS thread and HW draws would issue GL calls from the
+	// wrong thread (GSBackThreadPolicy.h).
 	std::thread m_back_thread;
 	std::atomic<bool> m_back_thread_exit{false};
 
 	void StartBackThread();
-	void StopBackThread();
 	void BackThreadLoop();
 	void ExecRecordSlot(const GSBackQueue::RecordSlot& slot);
 	virtual void ExecVsyncRecord(const GSBackQueue::VsyncRecord& rec);
@@ -699,6 +946,8 @@ public:
 	template <typename T>
 	void PushRecord(GSBackQueue::RecordType type, const T& rec)
 	{
+		// One producer: the ring is single-producer, and the MTGS thread is the only one allowed.
+		pxAssert(std::this_thread::get_id() == m_chan->drain_thread);
 		for (;;)
 		{
 			GSBackQueue::RecordSlot* slot = m_chan->ring.BeginPush();
@@ -710,16 +959,11 @@ public:
 				m_chan->sema.NotifyOfWork();
 				break;
 			}
-			std::this_thread::yield(); // ring full — backpressure
+			// Ring full: sleep until the back has retired a batch.
+			m_chan->space.Wait([this]() {
+				return GSBackQueue::RecordRing::Capacity() - m_chan->ring.Size() >= GSBackQueue::Channel::kRingRefill;
+			});
 		}
-
-		// Spin-then-sleep: records usually execute in microseconds, so the spin
-		// catches nearly every drain without the futex round-trip. Lockstep is
-		// still per-record synchronization and inherently slow (measured 30->6
-		// fps on MQ65 with plain WaitForEmpty) — it's the bisect rung, not a
-		// shipping mode.
-		if (m_back_lockstep)
-			m_chan->sema.WaitForEmptyWithSpin();
 	}
 
 	GSVector4i GetTEX0Rect(GSDrawingContext prev_ctx);
@@ -774,18 +1018,66 @@ public:
 		float bbox_scale = 1.0f, u32* max_size = nullptr);
 	PRIM_OVERLAP PrimitiveOverlap(bool save_drawlist = false);
 	bool SpriteDrawWithoutGaps();
-	void CalculatePrimitiveCoversWithoutGaps();
+	bool SpriteUnionCoversDrawRect();
+	/// Sets m_primitive_covers_without_gaps, and m_primitive_union_covers_rect unless `union_cover`
+	/// is false: that flag has one reader on the GPU road, and the sprite-union test behind it is
+	/// the costly part for a draw of many sprites.
+	void CalculatePrimitiveCoversWithoutGaps(bool union_cover = true);
 	GIFRegTEX0 GetTex0Layer(u32 lod);
+	template <u32 primclass>
+	void RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool check_clamp_mode);
+	void RewriteVerticesIfLargeST(const GSVector4& large_val, bool check_clamp_mode);
+
+	// Side table for the two-pass kernel: the window position and the cull
+	// metadata of every vertex in a chunk, as two parallel arrays (see
+	// GSVertexKickKernel::Buffers). Members rather than kernel locals so pass
+	// one's stores and pass two's loads reach them off a register base instead of
+	// the frame.
+	//
+	// The stage-3c layouts' fused handlers, indexed by
+	// (GIFPath::type - GIFPath::TYPE_NOPSTQRGBAXYZF2). A null entry means the
+	// layout is recognised but nothing fuses it for the live prim, and Transfer
+	// replays its descriptors one qword at a time -- which is exact, and is what
+	// keeps four layouts from having to be instantiated for the prims that never
+	// carry them.
+	//
+	// A SECOND ARRAY rather than four more entries in m_fpGIFPackedRegHandlersC,
+	// for exactly the reason the comment below gives: growing that array moves
+	// every member declared after it, and those are the ones the whole front end
+	// reads on every vertex. Measured -- four extra entries there shifted the
+	// object offsets the fused handlers use by 0x40 and changed 1,600
+	// instructions across them, buying nothing.
+	GIFPackedRegHandlerC m_fpGIFPackedRegHandlersLayoutC[GIF_REG_COMPLEX_COUNT - 2] = {};
+	// The same, per prim, as SetPrimHandlers built them; UpdateVertexKick
+	// publishes the live prim's column into the table above.
+	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerLayout[GIF_REG_COMPLEX_COUNT - 2][8] = {};
+
+	// The live tag's descriptor offsets, copied out of the GIFPath by Transfer
+	// just before it calls one of those. The handler signature is fixed by the
+	// table it is called through, and the two contiguous triple layouts never read
+	// this, so it costs one 16-byte copy per NOP-padded or two-register tag and
+	// nothing at all on the shipped path.
+	GIFPackedLayout m_packed_layout = {3, 0, 1, 2};
+
+	// LAST IN THE CLASS ON PURPOSE, and it must stay last. This is 2 KB of scratch
+	// that only the kernel touches. Declared anywhere else it pushes every member
+	// after it 2 KB further from `this`, which moves hot fields the rest of the
+	// front end reads -- for no benefit to anything, since nothing but the kernel
+	// reads these. Declared in the middle of the class it cost the autoflush
+	// handler, which never runs the kernel, measurable time on both the M2 and the
+	// SD865.
+	alignas(16) u64 m_kick_side_xyp[GSVertexKickKernel::kChunkVertices] = {};
+	alignas(16) u64 m_kick_side_meta[GSVertexKickKernel::kChunkVertices] = {};
+
 };
 
-// GV7-1d-ii: the front parser object of the two-object pipelined split
-// (SEAM-AUDIT.md §7). Owns all parse state (env, vertex kick, draw buffering,
+// The front parser object of the two-object pipelined split. Owns all parse
+// state (env, vertex kick, draw buffering,
 // transfer staging, CLUT decision) and emits records into the back renderer's
 // channel; the back object executes them on the back thread, installing record
 // state into its own members. The front never draws, and reaches the
 // authoritative local memory / texture cache only through m_mem_target after a
-// drain. Created by GS.cpp only when the back thread engaged under
-// GSBackThreadMode::Pipelined.
+// drain. Created by GS.cpp only when the back thread engaged (GS multi-threading on).
 class GSFrontState final : public GSState
 {
 public:
@@ -799,6 +1091,9 @@ public:
 	// that draw EXECUTED, so it drains the back queue — memoized per
 	// (draw epoch, live ALPHA) so at most one drain per AA1 draw.
 	bool IsCoverageAlphaSupported() override;
+
+	// The back object's grid: this object culls the primitives the back will draw.
+	GSVertexKernels::CullGrid EngineCullGrid() const override { return m_back->m_cull_grid; }
 
 	// Once per frame, after the (drained) vsync executed on the back object:
 	// re-mirror present-side state the back mutated (Merge's scanmask

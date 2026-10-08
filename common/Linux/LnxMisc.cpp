@@ -89,17 +89,63 @@ u64 GetAvailablePhysicalMemory()
 	return (static_cast<u64>(info.freeram) + static_cast<u64>(info.bufferram)) * static_cast<u64>(info.mem_unit);
 }
 
+// On AArch64 every tick consumer (frame limiter, present pacer, perf metrics) derives time from
+// the architected timer: GetCPUTicks() reads CNTVCT_EL0 and GetTickFrequency() returns the rate
+// it ticks at. CNTFRQ_EL0 is supposed to hold that rate, but it is only as good as the firmware
+// that wrote it, and two kinds of firmware have been seen getting it wrong:
+// 1. Exynos 88xx boards on LineageOS-family ROMs leave it at 0. Ticks-per-frame collapses to 0,
+//    Throttle() never sleeps, and speed control is dead.
+// 2. A Galaxy S22 Ultra (Exynos 2200) on stock Samsung firmware holds a different garbage value on
+//    each core: 0 on the A510s, roughly 1.4 to 4 GHz on the A710s and the X2, while CNTVCT_EL0
+//    ticks at 25.6 MHz on all of them (the kernel takes the real rate from the device tree, which
+//    userspace cannot see). With a 3.46 GHz reading, Throttle() waits ~135x too long per frame.
+// So CNTFRQ_EL0 is read once, checked against how fast CNTVCT_EL0 actually advances relative to
+// CLOCK_MONOTONIC over ~1ms, and the validated value is kept. It is never read again: on a
+// device like case 2, a later read on another core could return a different number. If the
+// check fails we fall back to the CLOCK_MONOTONIC nanosecond domain.
+#if defined(__aarch64__)
+// Returns the validated counter frequency, or 0 if the architected timer can't be trusted.
+static u64 ArchTimerFrequency()
+{
+	static const u64 frequency = []() -> u64 {
+		u64 freq = 0;
+		asm volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+		// Real generic timers run in the MHz range (19.2/24/25.6/26/50 MHz), up to 1 GHz with FEAT_ECV.
+		if (freq < 1000000u || freq > 1050000000u)
+			return 0;
+
+		struct timespec t0, t1;
+		u64 v0, v1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		asm volatile("mrs %0, cntvct_el0" : "=r"(v0)::"memory");
+		u64 elapsed_ns;
+		do
+		{
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			elapsed_ns = (t1.tv_sec - t0.tv_sec) * 1000000000ULL + (t1.tv_nsec - t0.tv_nsec);
+		} while (elapsed_ns < 1000000ULL);
+		asm volatile("mrs %0, cntvct_el0" : "=r"(v1)::"memory");
+
+		const u64 measured_freq = ((v1 - v0) * 1000000000ULL) / elapsed_ns;
+		const s64 diff = static_cast<s64>(freq) - static_cast<s64>(measured_freq);
+		if (std::abs(diff) > static_cast<s64>(freq / 4))
+			return 0;
+
+		return freq;
+	}();
+	return frequency;
+}
+#endif
+
 u64 GetTickFrequency()
 {
 #if defined(__aarch64__)
 	// Frequency of the architected virtual counter read by GetCPUTicks() (e.g. 19.2MHz on
 	// Snapdragon 865, 24MHz on Apple M2, 1GHz on ARMv8.6+ with FEAT_ECV).
-	u64 freq;
-	asm volatile("mrs %0, cntfrq_el0" : "=r"(freq));
-	return freq;
-#else
-	return 1000000000; // unix measures in nanoseconds
+	if (const u64 freq = ArchTimerFrequency())
+		return freq;
 #endif
+	return 1000000000; // unix measures in nanoseconds
 }
 
 u64 GetCPUTicks()
@@ -111,14 +157,16 @@ u64 GetCPUTicks()
 	// Linux always enables EL0 counter access since its own vDSO fast path requires it. Resolution
 	// is coarser than 1ns (~52ns at 19.2MHz), which is ample for every consumer of this clock; all
 	// consumers must convert through GetTickFrequency() rather than assuming nanoseconds.
-	u64 val;
-	asm volatile("mrs %0, cntvct_el0" : "=r"(val)::"memory");
-	return val;
-#else
+	if (ArchTimerFrequency())
+	{
+		u64 val;
+		asm volatile("mrs %0, cntvct_el0" : "=r"(val)::"memory");
+		return val;
+	}
+#endif
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (static_cast<u64>(ts.tv_sec) * 1000000000ULL) + ts.tv_nsec;
-#endif
 }
 
 std::string GetOSVersionString()

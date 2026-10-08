@@ -1,5 +1,7 @@
 package com.armsx2.input
 
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.runtime.mutableStateOf
 import com.armsx2.runtime.MainActivityRuntime
 import kr.co.iefriends.pcsx2.NativeApp
@@ -24,11 +26,25 @@ object Lightgun {
     private const val KEY_PORT = "lightgun.port"
     /** Off-screen reload margin, as a fraction of the shorter screen edge. */
     private const val EDGE_RELOAD_FRAC = 0.06f
+    /** How long a calibration shot holds Recalibrate: several polls, under the core's 12-poll exchange. */
+    private const val CALIBRATION_PRESS_MS = 150L
 
     /** Mirrors the pref so Compose recomposes. */
     val enabled = mutableStateOf(false)
     /** USB port index: 0 = Port 1, 1 = Port 2. */
     val port = mutableStateOf(0)
+
+    /**
+     * Whether the touchscreen is a gun right now: a GunCon 2 is attached, or an arcade game is running
+     * whose controls are a light gun or a touch panel. The arcade board has no GunCon 2; native sends
+     * the same aim and shots to its gun or panel instead (ArcadeGunButton), as player 1.
+     */
+    val active: Boolean
+        get() = enabled.value || com.armsx2.arcade.Arcade.usesGunLayer
+
+    /** The port the shots go to: player 1's on an arcade board. */
+    private val gunPort: Int
+        get() = if (com.armsx2.arcade.Arcade.usesGunLayer) 0 else port.value
 
     fun load() {
         enabled.value = MainActivityRuntime.prefs.getBoolean(KEY_ENABLED, false)
@@ -92,15 +108,43 @@ object Lightgun {
 
     private var triggerDown = false
 
+    /** Cal was tapped: the next touch on the screen is a calibration shot, not a trigger pull. */
+    val calibrateNext = mutableStateOf(false)
+
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val releaseCalibration = Runnable {
+        runCatching { NativeApp.usbLightgunButton(gunPort, NativeApp.GUNCON_RECALIBRATE, false) }
+    }
+
     /**
-     * Aim at a window pixel coordinate.
+     * Aim at a touch position, given with the size of the area it was measured in.
      *
-     * Passed straight through: `InputManager::UpdatePointerAbsolutePosition` wants window pixels,
-     * and our SurfaceView spans the window, so touch coordinates already are those.
+     * Sent as a fraction of that area, which native scales to the game surface. The overlay and the
+     * surface cover the same area, but the surface can have fewer pixels than the screen (the
+     * performance downscale, a resolution override), and the core reads the pointer in surface
+     * pixels: raw screen pixels put every shot below and right of the finger whenever they differ.
      */
-    fun aim(x: Float, y: Float) {
-        if (!enabled.value) return
-        runCatching { NativeApp.usbLightgunAim(x, y) }
+    fun aim(x: Float, y: Float, widthPx: Float, heightPx: Float) {
+        if (!active || widthPx <= 0f || heightPx <= 0f) return
+        runCatching { NativeApp.usbLightgunAim(x / widthPx, y / heightPx) }
+    }
+
+    /**
+     * Fire a calibration shot where the finger landed, instead of pulling the trigger.
+     *
+     * Some games (Time Crisis) will not pass their setup screen on a plain shot: after the trigger
+     * they blank the screen and wait for the gun to report that it sees nothing, which a finger
+     * never does. The core's Recalibrate binding plays that whole exchange at the current aim, so
+     * aim first, then press it. Let go after [CALIBRATION_PRESS_MS] whatever the finger does: the
+     * exchange lasts 12 polls, and a press still held when it ends starts another one.
+     */
+    fun calibrationShot(x: Float, y: Float, widthPx: Float, heightPx: Float) {
+        calibrateNext.value = false
+        if (!active) return
+        aim(x, y, widthPx, heightPx)
+        mainHandler.removeCallbacks(releaseCalibration)
+        runCatching { NativeApp.usbLightgunButton(gunPort, NativeApp.GUNCON_RECALIBRATE, true) }
+        mainHandler.postDelayed(releaseCalibration, CALIBRATION_PRESS_MS)
     }
 
     /**
@@ -111,36 +155,26 @@ object Lightgun {
      * the games are unplayable past the first magazine.
      */
     fun trigger(down: Boolean, x: Float, y: Float, widthPx: Float, heightPx: Float) {
-        if (!enabled.value) return
+        if (!active) return
         if (down == triggerDown) return
         triggerDown = down
         val margin = minOf(widthPx, heightPx) * EDGE_RELOAD_FRAC
         val offscreen = x <= margin || y <= margin || x >= widthPx - margin || y >= heightPx - margin
         val bind = if (offscreen) NativeApp.GUNCON_SHOOT_OFFSCREEN else NativeApp.GUNCON_TRIGGER
-        runCatching { NativeApp.usbLightgunButton(port.value, bind, down) }
+        runCatching { NativeApp.usbLightgunButton(gunPort, bind, down) }
         // Release BOTH on lift: a drag that starts on-screen and ends in the reload margin would
         // otherwise leave the on-screen trigger stuck down.
         if (!down) {
             runCatching {
-                NativeApp.usbLightgunButton(port.value, NativeApp.GUNCON_TRIGGER, false)
-                NativeApp.usbLightgunButton(port.value, NativeApp.GUNCON_SHOOT_OFFSCREEN, false)
+                NativeApp.usbLightgunButton(gunPort, NativeApp.GUNCON_TRIGGER, false)
+                NativeApp.usbLightgunButton(gunPort, NativeApp.GUNCON_SHOOT_OFFSCREEN, false)
             }
         }
     }
 
     /** Press/release one of the gun's own buttons (A / B / C / Start / Select / Recalibrate). */
     fun button(bind: Int, down: Boolean) {
-        if (!enabled.value) return
-        runCatching { NativeApp.usbLightgunButton(port.value, bind, down) }
+        if (!active) return
+        runCatching { NativeApp.usbLightgunButton(gunPort, bind, down) }
     }
-
-    /** Buttons offered on screen, as (binding, label). Mirrors NetherSX2's gun overlay. */
-    fun overlayButtons(): List<Pair<Int, String>> = listOf(
-        NativeApp.GUNCON_A to "A",
-        NativeApp.GUNCON_B to "B",
-        NativeApp.GUNCON_C to "C",
-        NativeApp.GUNCON_START to "Start",
-        NativeApp.GUNCON_SELECT to "Sel",
-        NativeApp.GUNCON_RECALIBRATE to "Cal",
-    )
 }

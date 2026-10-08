@@ -152,6 +152,29 @@ bool GSDevice12::SupportsProgrammableSamplePositions()
 	return false;
 }
 
+D3D_SHADER_MODEL GSDevice12::DetectShaderModelSupport() {
+	// CheckFeatureSupport will fail if the runtime dosen't support a requested shader model.
+	// Loop though ranges of valid shader models until the check succeeds.
+	constexpr std::array<std::array<D3D_SHADER_MODEL, 2>, 2> shader_model_ranges{{
+		{D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_0},
+		{D3D_SHADER_MODEL_5_1, D3D_SHADER_MODEL_5_1},
+	}};
+	
+	for (const std::array<D3D_SHADER_MODEL, 2>& range : shader_model_ranges)
+	{
+		for (int i = range[0]; i >= range[1]; i--)
+		{
+			D3D12_FEATURE_DATA_SHADER_MODEL shader_model_device = {static_cast<D3D_SHADER_MODEL>(i)};
+			const HRESULT hr = m_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model_device, sizeof(shader_model_device));
+			if (SUCCEEDED(hr))
+				return shader_model_device.HighestShaderModel;
+		}
+	}
+
+	// If the above somehow fails.
+	return D3D_SHADER_MODEL_5_1;
+}
+
 u32 GSDevice12::GetAdapterVendorID() const
 {
 	if (!m_adapter)
@@ -289,16 +312,12 @@ bool GSDevice12::CreateDevice(u32& vendor_id)
 
 	// Create the actual device.
 	// Intel Haswell DX12 support is specific:
-	// Newerest drivers have dx12 support disabled so the last driver to support dx12 is 15.40.42.5063.
+	// Newer drivers have dx12 support disabled so the last driver to support dx12 is 15.40.42.5063.
 	// Shader cache must be also disabled, and make sure Debug Device option is disabled as well.
-	// Let's enable it on dev/debug for testing purposes so we don't have to change this all the time.
+	// Let's enable it for testing purposes so we don't have to change this all the time, and
+	// might be handy for the tweakers that want to run dx12.
 	// TODO: Find out the status of Broadwell.
-#ifdef PCSX2_DEVBUILD
 	hr = D3D12CreateDevice(m_adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device));
-#else
-	const bool isIntel = (vendor_id == 0x163C || vendor_id == 0x8086 || vendor_id == 0x8087);
-	hr = D3D12CreateDevice(m_adapter.get(), isIntel ? D3D_FEATURE_LEVEL_12_0 : D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device));
-#endif
 
 	if (FAILED(hr))
 	{
@@ -488,36 +507,8 @@ void GSDevice12::MoveToNextCommandList()
 	if (res.sampler_allocator.ShouldReset())
 		res.sampler_allocator.Reset();
 
-	if (res.has_timestamp_query)
-	{
-		// readback timestamp from the last time this cmdlist was used.
-		// we don't need to worry about disjoint in dx12, the frequency is reliable within a single cmdlist.
-		const u32 offset = (m_current_command_list * (sizeof(u64) * NUM_TIMESTAMP_QUERIES_PER_CMDLIST));
-		const D3D12_RANGE read_range = {offset, offset + (sizeof(u64) * NUM_TIMESTAMP_QUERIES_PER_CMDLIST)};
-		void* map;
-		HRESULT hr = m_timestamp_query_buffer->Map(0, &read_range, &map);
-		if (SUCCEEDED(hr))
-		{
-			u64 timestamps[2];
-			std::memcpy(timestamps, static_cast<const u8*>(map) + offset, sizeof(timestamps));
-			m_accumulated_gpu_time +=
-				static_cast<float>(static_cast<double>(timestamps[1] - timestamps[0]) / m_timestamp_frequency);
-
-			const D3D12_RANGE write_range = {};
-			m_timestamp_query_buffer->Unmap(0, &write_range);
-		}
-		else
-		{
-			Console.Warning("D3D12: Map() for timestamp query failed: %08X", hr);
-		}
-	}
-
-	res.has_timestamp_query = m_gpu_timing_enabled;
-	if (m_gpu_timing_enabled)
-	{
-		res.command_lists[1].list4->EndQuery(m_timestamp_query_heap.get(), D3D12_QUERY_TYPE_TIMESTAMP,
-			m_current_command_list * NUM_TIMESTAMP_QUERIES_PER_CMDLIST);
-	}
+	ReadGPUTiming();
+	StartGPUTiming();
 
 	if (res.pipeline_statistics_query == QueryState::Ready)
 	{
@@ -587,15 +578,7 @@ bool GSDevice12::ExecuteCommandList(WaitType wait_for_completion)
 	m_vertex_constant_buffer.FlushMemory();
 	m_pixel_constant_buffer.FlushMemory();
 
-	if (res.has_timestamp_query)
-	{
-		// write the timestamp back at the end of the cmdlist
-		res.command_lists[1].list4->EndQuery(m_timestamp_query_heap.get(), D3D12_QUERY_TYPE_TIMESTAMP,
-			(m_current_command_list * NUM_TIMESTAMP_QUERIES_PER_CMDLIST) + 1);
-		res.command_lists[1].list4->ResolveQueryData(m_timestamp_query_heap.get(), D3D12_QUERY_TYPE_TIMESTAMP,
-			m_current_command_list * NUM_TIMESTAMP_QUERIES_PER_CMDLIST, NUM_TIMESTAMP_QUERIES_PER_CMDLIST,
-			m_timestamp_query_buffer.get(), m_current_command_list * (sizeof(u64) * NUM_TIMESTAMP_QUERIES_PER_CMDLIST));
-	}
+	EndGPUTiming();
 
 	if ((res.pipeline_statistics_query == QueryState::Querying) || (res.pipeline_statistics_query == QueryState::Ready))
 	{
@@ -857,6 +840,64 @@ bool GSDevice12::SetGPUPipelineStatisticsEnabled(bool enabled)
 	return true;
 }
 
+void GSDevice12::StartGPUTiming()
+{
+	if (m_gpu_timing_enabled)
+	{
+		CommandListResources& res = m_command_lists[m_current_command_list];
+		res.command_lists[1].list4->EndQuery(m_timestamp_query_heap.get(), D3D12_QUERY_TYPE_TIMESTAMP,
+			m_current_command_list * NUM_TIMESTAMP_QUERIES_PER_CMDLIST);
+		res.timestamp_query_state = QueryState::Querying;
+	}
+}
+
+void GSDevice12::EndGPUTiming()
+{
+	CommandListResources& res = m_command_lists[m_current_command_list];
+	if (res.timestamp_query_state == QueryState::Querying)
+	{
+		// write the timestamp back at the end of the cmdlist
+		if (InRenderPass())
+			EndRenderPass(); // Can't end query in a render pass
+		res.command_lists[1].list4->EndQuery(m_timestamp_query_heap.get(), D3D12_QUERY_TYPE_TIMESTAMP,
+			(m_current_command_list * NUM_TIMESTAMP_QUERIES_PER_CMDLIST) + 1);
+		res.command_lists[1].list4->ResolveQueryData(m_timestamp_query_heap.get(), D3D12_QUERY_TYPE_TIMESTAMP,
+			m_current_command_list * NUM_TIMESTAMP_QUERIES_PER_CMDLIST, NUM_TIMESTAMP_QUERIES_PER_CMDLIST,
+			m_timestamp_query_buffer.get(), m_current_command_list * (sizeof(u64) * NUM_TIMESTAMP_QUERIES_PER_CMDLIST));
+		res.timestamp_query_state = QueryState::Ready;
+	}
+}
+
+void GSDevice12::ReadGPUTiming()
+{
+	CommandListResources& res = m_command_lists[m_current_command_list];
+	if (res.timestamp_query_state == QueryState::Ready)
+	{
+		// readback timestamp from the last time this cmdlist was used.
+		// we don't need to worry about disjoint in dx12, the frequency is reliable within a single cmdlist.
+		const u32 offset = (m_current_command_list * (sizeof(u64) * NUM_TIMESTAMP_QUERIES_PER_CMDLIST));
+		const D3D12_RANGE read_range = { offset, offset + (sizeof(u64) * NUM_TIMESTAMP_QUERIES_PER_CMDLIST) };
+		void* map;
+		HRESULT hr = m_timestamp_query_buffer->Map(0, &read_range, &map);
+		if (SUCCEEDED(hr))
+		{
+			u64 timestamps[2];
+			std::memcpy(timestamps, static_cast<const u8*>(map) + offset, sizeof(timestamps));
+			m_accumulated_gpu_time +=
+				static_cast<float>(static_cast<double>(timestamps[1] - timestamps[0]) / m_timestamp_frequency);
+
+			const D3D12_RANGE write_range = {};
+			m_timestamp_query_buffer->Unmap(0, &write_range);
+		}
+		else
+		{
+			Console.Warning("D3D12: Map() for timestamp query failed: %08X", hr);
+		}
+
+		res.timestamp_query_state = QueryState::None;
+	}
+}
+
 bool GSDevice12::AllocatePreinitializedGPUBuffer(u32 size, ID3D12Resource** gpu_buffer,
 	D3D12MA::Allocation** gpu_allocation, const std::function<void(void*)>& fill_callback)
 {
@@ -974,7 +1015,7 @@ bool GSDevice12::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		m_tfx_source = std::move(*shader);
 	}
 
-	if (!m_shader_cache.Open(D3D::ShaderModel::SM51, GSConfig.UseDebugDevice))
+	if (!m_shader_cache.Open(static_cast<D3D::ShaderModel>(m_shader_model), GSConfig.UseDebugDevice))
 		Console.Warning("D3D12: Shader cache failed to open.");
 
 	if (!CreateRootSignatures())
@@ -1488,6 +1529,7 @@ void GSDevice12::InsertDebugMessage(DebugMessageCategory category, const char* f
 bool GSDevice12::CheckFeatures(const u32& vendor_id)
 {
 	//const bool isAMD = (vendor_id == 0x1002 || vendor_id == 0x1022);
+	const bool isAdreno = (vendor_id == 0x4D4F4351);
 
 	m_features.texture_barrier = GSConfig.OverrideTextureBarriers != 0;
 	m_features.multidraw_fb_copy = false;
@@ -1520,6 +1562,9 @@ bool GSDevice12::CheckFeatures(const u32& vendor_id)
 		DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow_tearing_supported, sizeof(allow_tearing_supported));
 	m_allow_tearing_supported = (SUCCEEDED(hr) && allow_tearing_supported == TRUE);
 
+	m_shader_model = DetectShaderModelSupport();
+	Console.WriteLnFmt("D3D12: Shader Model: {}.{}", (m_shader_model & 0xF0) >> 4, (m_shader_model & 0xF));
+
 	D3D12_FEATURE_DATA_ARCHITECTURE1 device_architecture1 = {};
 	hr = m_device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &device_architecture1, sizeof(device_architecture1));
 	m_uma = SUCCEEDED(hr) && device_architecture1.UMA;
@@ -1536,6 +1581,7 @@ bool GSDevice12::CheckFeatures(const u32& vendor_id)
 	{
 		Console.WriteLnFmt("D3D12: Enhanced Barriers: {}", device_options12.EnhancedBarriersSupported ? "Supported" : "Not Supported");
 		m_enhanced_barriers = device_options12.EnhancedBarriersSupported;
+		m_rp_reorders_barriers = isAdreno;
 	}
 	else
 	{
@@ -1545,7 +1591,7 @@ bool GSDevice12::CheckFeatures(const u32& vendor_id)
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
 	m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS));
-	m_features.rov = options.ROVsSupported;
+	m_features.rov = options.TypedUAVLoadAdditionalFormats && options.ROVsSupported;
 	for (u32 fmt = static_cast<u32>(GSTexture::Format::Color); fmt <= static_cast<u32>(GSTexture::Format::PrimID); fmt++)
 	{
 		if (GSTexture::IsShaderWriteFormat(static_cast<GSTexture::Format>(fmt)))
@@ -1638,6 +1684,22 @@ void GSDevice12::LookupNativeFormat(GSTexture::Format format, DXGI_FORMAT* d3d_f
 			{DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // BC2
 			{DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_BC3_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // BC3
 			{DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // BC7
+			// ASTC does not exist on Direct3D: the replacement loader rejects it on this backend.
+			// Rows are present to keep the fixed-size format-indexed array exhaustive.
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC4x4
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC5x4
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC5x5
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC6x5
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC6x6
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC8x5
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC8x6
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC8x8
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC10x5
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC10x6
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC10x8
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC10x10
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC12x10
+			{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN}, // ASTC12x12
 		}};
 
 	const auto& mapping = s_format_mapping[static_cast<int>(format)];
@@ -2093,7 +2155,7 @@ void GSDevice12::DrawStretchRect(const GSVector4& sRect, const GSVector4& dRect,
 }
 
 void GSDevice12::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
-	const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
+	const MergeTopBand* top_band, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter)
 {
 	GL_PUSH("DoMerge");
 
@@ -2150,6 +2212,8 @@ void GSDevice12::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		SetUtilityRootSignature();
 		SetPipeline(GetConvertPipeline(ShaderConvert::COPY));
 		DrawStretchRect(sRect[1], PMODE.SLBG ? dRect[2] : dRect[1], dsize);
+		if (top_band[1].enabled)
+			DrawStretchRect(top_band[1].src, top_band[1].dst, dsize);
 		dTex->SetState(GSTexture::State::Dirty);
 		dcleared = true;
 	}
@@ -2206,6 +2270,8 @@ void GSDevice12::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		SetUtilityTexture(sTex[0], sampler);
 		SetPipeline(m_merge[PMODE.MMOD].get());
 		DrawStretchRect(sRect[0], dRect[0], dTex->GetSize());
+		if (top_band[0].enabled)
+			DrawStretchRect(top_band[0].src, top_band[0].dst, dTex->GetSize());
 	}
 
 	if (feedback_write_1) // FIXME I'm not sure dRect[0] is always correct
@@ -2368,7 +2434,7 @@ void GSDevice12::RenderImGui()
 {
 	ImGui::Render();
 	const ImDrawData* draw_data = ImGui::GetDrawData();
-	if (draw_data->CmdListsCount == 0)
+	if (draw_data->CmdLists.Size == 0)
 		return;
 
 	UpdateImGuiTextures();
@@ -2409,7 +2475,7 @@ void GSDevice12::RenderImGui()
 	// this is for presenting, we don't want to screw with the viewport/scissor set by display
 	m_dirty_flags &= ~(DIRTY_FLAG_RENDER_TARGET | DIRTY_FLAG_VIEWPORT | DIRTY_FLAG_SCISSOR);
 
-	for (int n = 0; n < draw_data->CmdListsCount; n++)
+	for (int n = 0; n < draw_data->CmdLists.Size; n++)
 	{
 		const ImDrawList* cmd_list = draw_data->CmdLists[n];
 
@@ -2884,6 +2950,8 @@ bool GSDevice12::CompileConvertPipelines()
 
 		ShaderMacro sm;
 		sm.AddMacro("PIXEL_SHADER", 1);
+		sm.AddMacro("PRIMID_MAX", GSShader::PRIMID_MAX);
+		sm.AddMacro("PRIMID_MIN", GSShader::PRIMID_MIN);
 		sm.AddMacro("HAS_BILN", static_cast<int>(shader.Biln()));
 		sm.AddMacro("HAS_STENCIL_OUTPUT", static_cast<int>(shader.StencilOutput()));
 		sm.AddMacro("HAS_INTEGER_OUTPUT", static_cast<int>(shader.IntegerOutputBpp() != 0));
@@ -2937,6 +3005,8 @@ bool GSDevice12::CompileConvertPipelines()
 
 		ShaderMacro sm;
 		sm.AddMacro("PIXEL_SHADER", "1");
+		sm.AddMacro("PRIMID_MAX", GSShader::PRIMID_MAX);
+		sm.AddMacro("PRIMID_MIN", GSShader::PRIMID_MIN);
 		sm.AddMacro(entry_point_macro.c_str(), "1");
 
 		ComPtr<ID3DBlob> ps(m_shader_cache.GetPixelShader(*source, sm.GetPtr(), entry_point.c_str()));
@@ -3238,6 +3308,15 @@ const ID3DBlob* GSDevice12::GetTFXPixelShader(const GSHWDrawConfig::PSSelector& 
 	if (it != m_tfx_pixel_shaders.end())
 		return it->second.get();
 
+	// af_in_src1 reroutes a fixed (AFIX) blend factor through the second fragment output, for a
+	// driver whose blend constant is broken. Only the Vulkan shader implements it, and only
+	// GSDeviceVK raises features.broken_blend_constant, so nothing reaches this today. If a
+	// driver-database entry ever does, the blend state moves to SRC1 factors while this shader
+	// keeps writing As, which is wrong colour and nothing else would say so.
+	if (sel.af_in_src1)
+		Console.Error("PS_AF_IN_SRC1 is not implemented in this backend's shader.");
+	pxAssert(!sel.af_in_src1);
+
 	ShaderMacro sm;
 	sm.AddMacro("PIXEL_SHADER", 1);
 	sm.AddMacro("PS_HAS_CONSERVATIVE_DEPTH", 1);
@@ -3260,10 +3339,13 @@ const ID3DBlob* GSDevice12::GetTFXPixelShader(const GSHWDrawConfig::PSSelector& 
 	sm.AddMacro("PS_A_MASKED", sel.a_masked);
 	sm.AddMacro("PS_FBA", sel.fba);
 	sm.AddMacro("PS_FBMASK", sel.fbmask);
+	sm.AddMacro("PS_QUANTIZE_COLOR", sel.quantize_color);
+	sm.AddMacro("PS_SUBSTITUTE_ALPHA", sel.substitute_alpha);
 	sm.AddMacro("PS_LTF", sel.ltf);
 	sm.AddMacro("PS_TCOFFSETHACK", sel.tcoffsethack);
 	sm.AddMacro("PS_POINT_SAMPLER", sel.point_sampler);
 	sm.AddMacro("PS_REGION_RECT", sel.region_rect);
+	sm.AddMacro("PS_NATIVE_TEXEL_GRID", sel.native_texel_grid);
 	sm.AddMacro("PS_SHUFFLE", sel.shuffle);
 	sm.AddMacro("PS_SHUFFLE_SAME", sel.shuffle_same);
 	sm.AddMacro("PS_PROCESS_BA", sel.process_ba);
@@ -3280,6 +3362,7 @@ const ID3DBlob* GSDevice12::GetTFXPixelShader(const GSHWDrawConfig::PSSelector& 
 	sm.AddMacro("PS_COLCLIP_HW", sel.colclip_hw);
 	sm.AddMacro("PS_RTA_CORRECTION", sel.rta_correction);
 	sm.AddMacro("PS_RTA_SRC_CORRECTION", sel.rta_source_correction);
+	sm.AddMacro("PS_REPLACEMENT_ALPHA_SNAP", sel.replacement_alpha_snap);
 	sm.AddMacro("PS_COLCLIP", sel.colclip);
 	sm.AddMacro("PS_BLEND_A", sel.blend_a);
 	sm.AddMacro("PS_BLEND_B", sel.blend_b);
@@ -4355,6 +4438,9 @@ void GSDevice12::FeedbackBarrier(const GSTexture12* texture)
 {
 	if (m_enhanced_barriers)
 	{
+		if (m_rp_reorders_barriers)
+			EndRenderPass();
+
 		// Enhanced barriers allows for single resource feedback.
 		const D3D12_BARRIER_SYNC sync = D3D12_BARRIER_SYNC_RENDER_TARGET | D3D12_BARRIER_SYNC_PIXEL_SHADING;
 		const D3D12_BARRIER_ACCESS access = D3D12_BARRIER_ACCESS_RENDER_TARGET | D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
@@ -4678,9 +4764,7 @@ void GSDevice12::DoRenderHW(GSHWDrawConfig& config)
 			SetBlendConstants(config.blend_multi_pass.blend.constant);
 
 		pipe.bs = config.blend_multi_pass.blend;
-		pipe.ps.no_color1 = config.blend_multi_pass.no_color1;
-		pipe.ps.blend_hw = config.blend_multi_pass.blend_hw;
-		pipe.ps.dither = config.blend_multi_pass.dither;
+		config.blend_multi_pass.ApplyTo(pipe.ps);
 		if (BindDrawPipeline(pipe))
 			Draw(config);
 	}

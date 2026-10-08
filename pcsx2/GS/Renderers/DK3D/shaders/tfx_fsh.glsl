@@ -27,12 +27,13 @@ layout(std140, binding = 1) uniform cb1
 	mat4 DitherMatrix;
 	float ScaledScaleFactor;
 	float RcpScaleFactor;
-	float _pad0_cb1;
+	float RtScaleFactor; // the render target's scale; ScaledScaleFactor is the texture's
 	float _pad1_cb1;
 	float LineCovScale;
-	float _pad2_cb1;
-	float _pad3_cb1;
-	float _pad4_cb1;
+	uint SubstituteAlphaKeep;
+	uint SubstituteAlphaValue;
+	uint DitherPhase;
+	vec4 NativeTexelGrid;
 };
 
 layout(std140, binding = 0) uniform cbSel
@@ -89,6 +90,10 @@ layout(std140, binding = 0) uniform cbSel
 	uint ub_sel_tales;
 	uint ub_sel_automatic_lod;
 	uint ub_sel_manual_lod;
+	uint ub_sel_quantize_color;
+	uint ub_sel_substitute_alpha;
+	uint ub_sel_replacement_alpha_snap;
+	uint ub_sel_native_texel_grid;
 };
 
 // Variants are generated from this source by prepending one TFX_VARIANT_* define (see switch/app/CMakeLists.txt)
@@ -146,6 +151,8 @@ layout(std140, binding = 0) uniform cbSel
 	const uint sel_tales = 0u;
 	const uint sel_shuffle = 0u;
 	const uint sel_dither = 0u;
+	const uint sel_quantize_color = 0u;
+	const uint sel_substitute_alpha = 0u;
 #else
 	#define sel_channel ub_sel_channel
 	#define sel_depth_fmt ub_sel_depth_fmt
@@ -153,6 +160,8 @@ layout(std140, binding = 0) uniform cbSel
 	#define sel_tales ub_sel_tales
 	#define sel_shuffle ub_sel_shuffle
 	#define sel_dither ub_sel_dither
+	#define sel_quantize_color ub_sel_quantize_color
+	#define sel_substitute_alpha ub_sel_substitute_alpha
 #endif
 
 // Sampling complexity (palette, bilinear 4-tap, AEM, region/adjust, LOD, fancy wrap)
@@ -169,6 +178,8 @@ layout(std140, binding = 0) uniform cbSel
 	const uint sel_adjt = 0u;
 	const uint sel_automatic_lod = 0u;
 	const uint sel_manual_lod = 0u;
+	const uint sel_replacement_alpha_snap = 0u;
+	const uint sel_native_texel_grid = 0u;
 	#define WRAP_IS_SIMPLE true
 #else
 	#define sel_pal_fmt ub_sel_pal_fmt
@@ -179,6 +190,8 @@ layout(std140, binding = 0) uniform cbSel
 	#define sel_adjt ub_sel_adjt
 	#define sel_automatic_lod ub_sel_automatic_lod
 	#define sel_manual_lod ub_sel_manual_lod
+	#define sel_replacement_alpha_snap ub_sel_replacement_alpha_snap
+	#define sel_native_texel_grid ub_sel_native_texel_grid
 	#define WRAP_IS_SIMPLE (sel_wms < 2u && sel_wmt < 2u)
 #endif
 
@@ -560,7 +573,11 @@ vec4 sample_color(vec2 st)
 
 	vec4 t = (sel_ltf != 0u) ? mix(mix(c[0], c[1], dd.x), mix(c[2], c[3], dd.x), dd.y) : c[0];
 
-	return trunc(t * 255.0f + 0.05f);
+	t = trunc(t * 255.0f + 0.05f);
+	// A pack texture's opaque alpha, which ASTC moves off 0x80 (GSReplacementAlphaSnap.h).
+	if (sel_replacement_alpha_snap != 0u && abs(t.a - 128.0f) <= 8.0f)
+		t.a = 128.0f;
+	return t;
 }
 
 vec4 tfx(vec4 T, vec4 C)
@@ -620,6 +637,14 @@ vec4 ps_color()
 	vec2 st = (sel_fst != 0u) ? v_ti.xy : (v_t.xy / v_t.w);
 	vec2 st_int = (sel_fst != 0u) ? v_ti.zw : (v_ti.zw / v_t.w);
 	ivec2 fc = ivec2(gl_FragCoord.xy + ChannelShuffleOffset);
+
+	// A minifying nearest-sampled sprite reads the texel its native pixel read (GSNativeTexelGridPolicy.h).
+	// Floor first and divide rather than multiply by a reciprocal, which can land just under an integer.
+	if (sel_native_texel_grid != 0u)
+	{
+		vec2 native_here = floor(gl_FragCoord.xy) / NativeTexelGrid.z;
+		st += NativeTexelGrid.xy * (floor(native_here) - native_here);
+	}
 
 	vec4 T;
 	if (sel_channel == 1u)
@@ -688,7 +713,7 @@ void ps_blend(inout vec4 Color, inout vec4 As_rgba)
 		vec4 RT = sample_from_rt();
 		float Ad = (sel_rta_correction != 0u) ? trunc(RT.a * 128.0f + 0.1f) / 128.0f
 											   : trunc(RT.a * 255.0f + 0.1f) / 128.0f;
-		vec3 Cd = (sel_colclip_hw != 0u) ? trunc(RT.rgb * 65535.0f) : trunc(RT.rgb * 255.0f + 0.1f);
+		vec3 Cd = trunc(RT.rgb * ((sel_colclip_hw != 0u) ? 65535.0f : 255.0f) + 0.1f);
 		vec3 Cs = Color.rgb;
 
 		vec3 A = (sel_blend_a == 0u) ? Cs : (sel_blend_a == 1u) ? Cd : vec3(0.0f);
@@ -761,15 +786,26 @@ void ps_blend(inout vec4 Color, inout vec4 As_rgba)
 	}
 }
 
-// Partial-channel framebuffer mask
+// Partial-channel framebuffer mask. The masked road truncates all four channels to integers, so a
+// draw whose mask was dropped as a no-op quantizes the same way (quantize_color) and may write the
+// known held-back alpha bits directly (substitute_alpha) instead of reading the destination.
 void ps_fbmask(inout vec4 C)
 {
 	if (sel_fbmask != 0u)
 	{
-		float multi = (sel_colclip_hw != 0u) ? 65535.0f : 255.5f;
+		float multi_rgb = (sel_colclip_hw != 0u) ? 65535.0f : 255.0f;
+		float multi_a = (sel_rta_correction != 0u) ? 128.0f : 255.0f;
 		vec4 RT = sample_from_rt();
-		C = vec4((uvec4(ivec4(C)) & (FbMask ^ uvec4(0xFFu))) |
-			(uvec4(RT * vec4(multi, multi, multi, 255.0f)) & FbMask));
+		RT.rgb = trunc(RT.rgb * multi_rgb + 0.1f);
+		RT.a = round(RT.a * multi_a);
+		C = vec4((uvec4(C) & ~FbMask) | (uvec4(RT) & FbMask));
+	}
+	else if (sel_quantize_color != 0u || sel_substitute_alpha != 0u)
+	{
+		uvec4 Cq = uvec4(C);
+		if (sel_substitute_alpha != 0u)
+			Cq.a = (Cq.a & SubstituteAlphaKeep) | SubstituteAlphaValue;
+		C = vec4(Cq);
 	}
 }
 
@@ -777,7 +813,10 @@ void ps_dither(inout vec3 C, float As)
 {
 	if (sel_dither > 0u && sel_dither < 3u)
 	{
-		ivec2 fpos = (sel_dither == 2u) ? ivec2(gl_FragCoord.xy) : ivec2(gl_FragCoord.xy * RcpScaleFactor);
+		// The matrix indexes by native pixel: floor before a true divide by the render target's scale,
+		// then rotate by DitherPhase, which evens out cell widths at fractional scales.
+		ivec2 fpos = (sel_dither == 2u) ? ivec2(gl_FragCoord.xy) :
+			(ivec2(floor(gl_FragCoord.xy) / RtScaleFactor) + ivec2(DitherPhase & 3u, (DitherPhase >> 2) & 3u));
 		float value = DitherMatrix[fpos.y & 3][fpos.x & 3];
 
 		if (sel_dither_adjust != 0u)
@@ -798,7 +837,7 @@ void ps_color_clamp_wrap(inout vec3 C)
 	bool sw_blend = (sel_blend_a != 0u || sel_blend_b != 0u || sel_blend_d != 0u);
 	bool dithering = (sel_dither > 0u && sel_dither < 3u);
 
-	if (sw_blend || dithering || sel_fbmask != 0u)
+	if (sw_blend || dithering || sel_fbmask != 0u || sel_quantize_color != 0u || sel_substitute_alpha != 0u)
 	{
 		if (sel_dst_fmt == FMT_16 && sel_blend_mix == 0u && sel_round_inv != 0u)
 			C += 7.0f;
@@ -821,7 +860,8 @@ void main()
 {
 	if ((sel_scanmsk & 2u) != 0u)
 	{
-		if ((uint(gl_FragCoord.y) & 1u) == (sel_scanmsk & 1u))
+		// SCANMSK masks native scanlines; reduce the device row to its owning line first.
+		if ((uint(floor(gl_FragCoord.y) / RtScaleFactor) & 1u) == (sel_scanmsk & 1u))
 			discard;
 	}
 

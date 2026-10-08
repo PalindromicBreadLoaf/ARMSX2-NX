@@ -114,6 +114,7 @@ constexpr u32 VMUL_U (u32 mask_xyzw, u32 fd, u32 fs, u32 ft) { return Upper(mask
 constexpr u32 VMAX_U (u32 mask_xyzw, u32 fd, u32 fs, u32 ft) { return Upper(mask_xyzw, ft, fs, fd, 0x2B); }
 constexpr u32 VSUB_U (u32 mask_xyzw, u32 fd, u32 fs, u32 ft) { return Upper(mask_xyzw, ft, fs, fd, 0x2C); }
 constexpr u32 VMSUB_U(u32 mask_xyzw, u32 fd, u32 fs, u32 ft) { return Upper(mask_xyzw, ft, fs, fd, 0x2D); }
+constexpr u32 VOPMSUB_U(u32 mask_xyzw, u32 fd, u32 fs, u32 ft) { return Upper(mask_xyzw, ft, fs, fd, 0x2E); }
 constexpr u32 VMINI_U(u32 mask_xyzw, u32 fd, u32 fs, u32 ft) { return Upper(mask_xyzw, ft, fs, fd, 0x2F); }
 
 // "i" broadcasts: read VI[REG_I] (the I-bit immediate) as a scalar and
@@ -296,6 +297,11 @@ constexpr u32 VSQI_L(u32 mask_xyzw, u32 fs, u32 it) { return BuildLowerT3(0x3D, 
 constexpr u32 VLQD_L(u32 mask_xyzw, u32 ft, u32 is) { return BuildLowerT3(0x3E, 0x0D, ft, is, mask_xyzw); }
 constexpr u32 VSQD_L(u32 mask_xyzw, u32 fs, u32 it) { return BuildLowerT3(0x3F, 0x0D, it, fs, mask_xyzw); }
 
+// ILWR / ISWR — the register-indirect forms of ILW / ISW, with no immediate.
+// T3_10 / T3_11 sub 0x0F; `is` addresses, `it` is loaded or stored.
+constexpr u32 VILWR_L(u32 mask_xyzw, u32 it, u32 is) { return BuildLowerT3(0x3E, 0x0F, it, is, mask_xyzw); }
+constexpr u32 VISWR_L(u32 mask_xyzw, u32 it, u32 is) { return BuildLowerT3(0x3F, 0x0F, it, is, mask_xyzw); }
+
 // EFU P-pipeline ops — VU1-only (EFU not present on VU0). All write to the
 // architectural P scalar, which `mVUendProgram` commits to VI[REG_P] at
 // E-bit. VWAITP stalls until the P-pipeline drains. Per VUops.cpp:1652-1805,
@@ -447,7 +453,11 @@ constexpr u32 VSUBA_U  (u32 mask_xyzw, u32 fs, u32 ft) { return UpperFD(mask_xyz
 constexpr u32 VMADDA_U (u32 mask_xyzw, u32 fs, u32 ft) { return UpperFD(mask_xyzw, ft, fs, 0x0A, 1); }
 constexpr u32 VMSUBA_U (u32 mask_xyzw, u32 fs, u32 ft) { return UpperFD(mask_xyzw, ft, fs, 0x0B, 1); }
 constexpr u32 VMULA_U  (u32 mask_xyzw, u32 fs, u32 ft) { return UpperFD(mask_xyzw, ft, fs, 0x0A, 2); }
-constexpr u32 VOPMULA_U(u32 fs, u32 ft)                { return UpperFD(mask::xyz, ft, fs, 0x0B, 2); }
+constexpr u32 VOPMULA_U(u32 mask_xyzw, u32 fs, u32 ft) { return UpperFD(mask_xyzw, ft, fs, 0x0B, 2); }
+
+// The Q/I multiplies into ACC: sub-op 0x07, table 0 for Q and 2 for I.
+constexpr u32 VMULAq_U (u32 mask_xyzw, u32 fs) { return UpperFD(mask_xyzw, 0, fs, 0x07, 0); }
+constexpr u32 VMULAi_U (u32 mask_xyzw, u32 fs) { return UpperFD(mask_xyzw, 0, fs, 0x07, 2); }
 
 // Broadcast ACC-target FMACs (ACC ← op(FS, FT.bc)). bc selects the FD table
 // (fd_table_sel: 0=x 1=y 2=z 3=w); sub-op index within every table per

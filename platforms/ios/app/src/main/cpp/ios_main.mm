@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_metal.h>
+#import <GameController/GameController.h>
 
 // SwiftUI integration — Xcode names the generated header after the Swift module.
 #if __has_include("ARMSX2iOS-Swift.h")
@@ -539,22 +540,14 @@ void ARMSX2IOSApplyRetroAchievementsOverlayDefaults(SettingsInterface* si, const
         reason ? reason : "unknown");
 }
 
-bool ARMSX2IOSPathStartsWith(const std::string& value, const std::string& prefix)
-{
-    return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
-}
-
 bool ARMSX2IOSPathIsInsideRoot(const std::string& path, const std::string& root)
 {
-    return path == root || ARMSX2IOSPathStartsWith(path, root + "/");
+    return path == root || path.starts_with(root + "/");
 }
 
 bool ARMSX2IOSPathContainsContainerFragment(const std::string& path)
 {
-    return path.find("Data/Application/") != std::string::npos ||
-           path.find("/Containers/Data/Application/") != std::string::npos ||
-           path.find("/var/mobile/Containers/Data/Application/") != std::string::npos ||
-           path.find("/private/var/mobile/Containers/Data/Application/") != std::string::npos;
+    return path.find("Data/Application/") != std::string::npos;
 }
 
 std::string ARMSX2IOSResolveFolderPath(const std::string& root, const std::string& value)
@@ -646,7 +639,6 @@ void ARMSX2IOSSanitizeFolderSettings(SettingsInterface* si, const std::string& d
         {"Cache", "cache", false},
         {"Textures", "textures", false},
         {"InputProfiles", "inputprofiles", false},
-        {"Videos", "videos", false},
         {"DebuggerLayouts", "debuggerlayouts", true},
         {"DebuggerSettings", "debuggersettings", true},
     };
@@ -869,7 +861,6 @@ void ARMSX2SetIOSOsdFlags(bool show_fps, bool show_vps, bool show_speed, bool sh
     EmuConfig.GS.OsdShowFrameTimes = show_frame_times;
     EmuConfig.GS.OsdShowVersion = show_version;
     EmuConfig.GS.OsdShowHardwareInfo = show_hardware_info;
-    EmuConfig.GS.OsdShowVideoCapture = false;
     EmuConfig.GS.OsdShowInputRec = false;
 }
 
@@ -891,7 +882,6 @@ void ARMSX2WriteIOSOsdFlagsToSettings()
     s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowFrameTimes", EmuConfig.GS.OsdShowFrameTimes);
     s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowVersion", EmuConfig.GS.OsdShowVersion);
     s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowHardwareInfo", EmuConfig.GS.OsdShowHardwareInfo);
-    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowVideoCapture", false);
     s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowInputRec", false);
 }
 
@@ -968,7 +958,13 @@ void ARMSX2DrainCPUThreadTasks()
             s_cpuTasks.pop_front();
         }
 
-        if (task && task->function) {
+        bool runs = false;
+        {
+            std::lock_guard<std::mutex> lock(task->mutex);
+            runs = task->function && !task->cancelled;
+            task->started = runs;
+        }
+        if (runs) {
             std::fprintf(stderr, "@@CPU_TASK_RUN@@ id=%llu\n", task->id);
             std::fflush(stderr);
             task->function();
@@ -976,6 +972,24 @@ void ARMSX2DrainCPUThreadTasks()
 
         {
             std::lock_guard<std::mutex> lock(task->mutex);
+            task->complete = true;
+        }
+        task->cv.notify_all();
+    }
+}
+
+// A task left over from a VM that ended must not run in the next one.
+void ARMSX2DiscardCPUThreadTasks()
+{
+    std::deque<std::shared_ptr<CPUThreadTask>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+        tasks.swap(s_cpuTasks);
+    }
+    for (const auto& task : tasks) {
+        {
+            std::lock_guard<std::mutex> lock(task->mutex);
+            task->cancelled = true;
             task->complete = true;
         }
         task->cv.notify_all();
@@ -1042,6 +1056,7 @@ const int s_defaultMap[16] = {
 // owned by UIKit/SwiftUI and outlive these unretained references.
 UIViewController* __unsafe_unretained s_menuVC = nil;
 UIViewController* __unsafe_unretained s_rootVC = nil;
+UIViewController* __unsafe_unretained s_sdlRootVC = nil;
 
 static void ARMSX2EnsureGameRenderViewOnMain(const char* reason) {
     if (g_gameRenderView)

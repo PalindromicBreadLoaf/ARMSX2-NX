@@ -27,10 +27,11 @@ using GSMTLView = UIView;
 #include <AppKit/AppKit.h>
 using GSMTLView = NSView;
 #endif
-// MetalFX upscaler: macOS 13+ / iOS 16+, weak-linked on device. The simulator
-// SDK has no MetalFX headers, so PCSX2_HAS_METALFX is 0 there and every
-// MetalFX reference is compiled out; m_features.metalfx_spatial stays false.
-#if TARGET_OS_SIMULATOR
+// MetalFX upscaler: macOS 13+ / iOS 16+, weak-linked on device. Neither the
+// simulator nor the tvOS SDK ships MetalFX headers, so PCSX2_HAS_METALFX is 0
+// there and every MetalFX reference is compiled out; m_features.metalfx_spatial
+// stays false.
+#if TARGET_OS_SIMULATOR || TARGET_OS_TV
 	#define PCSX2_HAS_METALFX 0
 #else
 	#define PCSX2_HAS_METALFX 1
@@ -417,21 +418,19 @@ public:
 
 	GSTexture* CreateSurface(GSTexture::Usage usage, int width, int height, int levels, GSTexture::Format format) override;
 
-	void DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter) override;
+	void DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const MergeTopBand* top_band, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter) override;
 	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) override;
 	void DoFXAA(GSTexture* sTex, GSTexture* dTex) override;
 	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) override;
 	bool DoApplyShaderChain(GSTexture* sTex, GSTexture* dTex) override;
 
-	/// librashader filter chain state. The handle is void* rather than
-	/// libra_mtl_filter_chain_t so this header needs nothing librashader generates — that
-	/// only exists when the Rust toolchain built the lib, and its Metal declarations are
-	/// __OBJC__-guarded, so a plain C++ translation unit could not include them at all.
-	/// The chain is rebuilt only when the preset path changes: creating it compiles the
-	/// whole slang chain, while the per-frame call is just command recording.
+	/// librashader filter chain state. The handle is void* so plain C++ can include this header,
+	/// since librashader's Metal declarations only compile as Objective-C. Creating a chain
+	/// compiles every pass, so it is rebuilt only for a new preset path or after a retry.
 	void* m_shader_chain = nullptr;
 	std::string m_shader_chain_preset;
 	bool m_shader_chain_failed = false;
+	u64 m_shader_chain_retry = 0;
 	size_t m_shader_frame_count = 0;
 	u64 m_shader_param_generation = 0;
 	void DestroyShaderChain();

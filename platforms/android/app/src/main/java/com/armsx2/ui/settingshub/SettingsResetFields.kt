@@ -28,16 +28,16 @@ internal val SETTINGS_CATEGORY_FIELDS: Map<SettingsCategory, List<String>> = map
         "eeClampMode", "eeCycleRate", "eeCycleSkip", "eeFpuRoundMode",
         "fastCDVD", "fpsLimit", "frameSkip", "framerateNtsc", "frameratePal",
         "intcStat", "mtvu", "nominalSpeedPercent", "skipDuplicateFrames", "vu0RoundMode",
-        "vu1Instant", "vu1RoundMode", "vuClampMode", "vuDeferredWrites", "vuFlagHack",
-        "vuNeonFusions", "vuSkipStallSim", "waitLoop",
+        "vu1ClampMode", "vu1Instant", "vu1RoundMode", "vuClampMode", "vuDeferredWrites",
+        "vuFlagHack", "vuNeonFusions", "vuSkipStallSim", "waitLoop",
         // LsfgSection lives on this tab. lsfgDllPath is deliberately NOT here: Reset restores
         // settings, and forgetting which file the user imported is not a setting being restored,
         // it is making them go and find their Lossless.dll again.
-        "lsfgEnabled", "lsfgMultiplier", "lsfgPerformance", "lsfgFlowScale", "lsfgTargetRate",
+        "lsfgEnabled", "lsfgMultiplier", "lsfgPerformance", "lsfgFp16", "lsfgFlowScale", "lsfgTargetRate",
     ),
     // RendererTab.kt
     SettingsCategory.Graphics to listOf(
-        "accurateBlendingUnit", "adrenoFbFetch", "aspectRatio", "casMode", "casSharpness",
+        "accurateBlendingUnit", "aspectRatio", "casMode", "casSharpness",
         "customAspectRatio", "deinterlaceMode", "displayBilinear", "dumpReplaceableTextures", "fmvAspectRatio",
         "forceMaliFbFetch", "fsrSharpness", "fxaa", "gpuProfile", "gsBackThreadMode", "hardwareDownloadMode",
         "hwAa1", "hwAccurateAlphaTest", "hwMipmap", "hwRov", "loadTextureReplacements",
@@ -46,7 +46,7 @@ internal val SETTINGS_CATEGORY_FIELDS: Map<SettingsCategory, List<String>> = map
         "affinityMode", "precacheTextureReplacements",
         "shadeBoost", "shadeBoostBrightness", "shadeBoostContrast", "shadeBoostGamma",
         "shadeBoostSaturation", "shaderChainEnabled", "shaderChainParams", "shaderChainPreset",
-        "textureFiltering", "texturePreloading", "triFilter", "tvShader", "upscaleFloat",
+        "textureFiltering", "texturePreloading", "textureUpscale", "triFilter", "tvShader", "upscaleFloat",
         "upscaler", "vsyncEnable",
     ),
     // AudioTab.kt
@@ -92,6 +92,9 @@ internal val SETTINGS_CATEGORY_FIELDS: Map<SettingsCategory, List<String>> = map
         "spinCpuReadbacks", "spinGpuReadbacks", "swThreads", "swThreadsHeight",
         "syncToHostRefresh", "textureInsideRt", "textureOffsetX", "textureOffsetY",
         "unscaledPaletteDraw", "useBlitSwapChain", "vsyncQueueSize",
+        // Not a Settings field: the game database entries switched off for this game, which the
+        // Fixes tab lists. Resetting the tab turns them back on. Global scope never has it.
+        com.armsx2.config.GameDbOverrides.OFF_KEY,
     ),
     // Controls / Hotkeys / Skins / General / Info / Patches / About own no Settings fields —
     // Controls keeps its binds and tunables in ControllerMappings and has its own reset row.

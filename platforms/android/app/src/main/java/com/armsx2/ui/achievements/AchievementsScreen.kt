@@ -168,6 +168,38 @@ private fun AchievementAccount(
                 StatusChip("${state.items.count { it.unlocked }} / ${state.items.size}")
             }
             LibraryProgressSection()
+            // Everything below is a standard setting: in-game it is this game's own, which
+            // outranks the global value; from the library it is the global value every game
+            // without its own follows. Say which, since the screen looks the same either way.
+            Text(
+                if (state.perGame) str("ra.scope.game").format(state.scopeTitle.ifBlank { str("ra.scope.thisGame") })
+                else str("ra.scope.global"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // A quiet link under the scope line rather than a full-width button: in the in-game
+            // tab's narrow column the old outlined button wrapped its label into a two-line pill
+            // that dwarfed the setting rows around it. Only there when this game has its own.
+            if (state.perGame && state.hasGameOverrides) {
+                val useGlobal = { viewModel.useGlobalSettings() }
+                TextButton(
+                    onClick = useGlobal,
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    modifier = Modifier.controllerFocusable("ra.useGlobal", onConfirm = useGlobal),
+                ) {
+                    Text("\u21BA  " + str("ra.scope.useGlobal"), style = MaterialTheme.typography.labelLarge)
+                }
+            }
+            SettingSwitchRow(
+                title = str(if (state.perGame) "ra.enable.thisGame" else "ra.enable.label"),
+                description = str("ra.enable.description"),
+                checked = state.enabled,
+                onCheckedChange = { viewModel.setEnabled(it) },
+                modifier = Modifier.controllerFocusable(
+                    "ra.enabled",
+                    onConfirm = { viewModel.setEnabled(!state.enabled) },
+                ),
+            )
             SettingSwitchRow(
                 title = str("ra.mode.hardcore"),
                 description = str("patches.hardcoreNoticeCheatsDisabled"),
@@ -176,8 +208,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.hardcore",
                     onConfirm = { viewModel.requestToggleHardcore() },
-                    onLeft = { if (state.hardcore) viewModel.requestToggleHardcore() },
-                    onRight = { if (!state.hardcore) viewModel.requestToggleHardcore() },
                 ),
             )
             SettingSwitchRow(
@@ -188,8 +218,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.notifications",
                     onConfirm = { viewModel.setOption("notifications", !state.notifications) },
-                    onLeft = { if (state.notifications) viewModel.setOption("notifications", false) },
-                    onRight = { if (!state.notifications) viewModel.setOption("notifications", true) },
                 ),
             )
             // How long an unlock toast lingers (seconds). Only meaningful while unlock toasts are on,
@@ -213,8 +241,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.leaderboardNotifications",
                     onConfirm = { viewModel.setOption("leaderboardNotifications", !state.leaderboardNotifications) },
-                    onLeft = { if (state.leaderboardNotifications) viewModel.setOption("leaderboardNotifications", false) },
-                    onRight = { if (!state.leaderboardNotifications) viewModel.setOption("leaderboardNotifications", true) },
                 ),
             )
             if (state.leaderboardNotifications) {
@@ -239,6 +265,18 @@ private fun AchievementAccount(
                     onSelect = { viewModel.setOptionInt("notificationPosition", it) },
                 )
             }
+            // Size of the popups and of the in-game indicators, text and icons alike. Asked for
+            // because the stock size is hard to read on a handheld.
+            com.armsx2.ui.settings.IntSliderRow(
+                label = str("ra.options.notifSize"),
+                value = state.notificationScale,
+                min = 50,
+                max = 250,
+                description = str("ra.options.notifSize.desc"),
+                valueFormatter = { "$it%" },
+                onReset = { viewModel.setOptionInt("notificationScale", 100) },
+                onChange = { viewModel.setOptionInt("notificationScale", it) },
+            )
             SettingSwitchRow(
                 title = str("ra.options.inGameIndicators"),
                 description = str("ra.options.inGameIndicators.desc"),
@@ -247,8 +285,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.overlays",
                     onConfirm = { viewModel.setOption("overlays", !state.overlays) },
-                    onLeft = { if (state.overlays) viewModel.setOption("overlays", false) },
-                    onRight = { if (!state.overlays) viewModel.setOption("overlays", true) },
                 ),
             )
             SettingSwitchRow(
@@ -259,8 +295,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.lbOverlays",
                     onConfirm = { viewModel.setOption("lbOverlays", !state.lbOverlays) },
-                    onLeft = { if (state.lbOverlays) viewModel.setOption("lbOverlays", false) },
-                    onRight = { if (!state.lbOverlays) viewModel.setOption("lbOverlays", true) },
                 ),
             )
             // Where challenge indicators / leaderboard trackers sit (native AchievementOverlayPosition).
@@ -282,8 +316,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.soundEffects",
                     onConfirm = { viewModel.setOption("soundEffects", !state.soundEffects) },
-                    onLeft = { if (state.soundEffects) viewModel.setOption("soundEffects", false) },
-                    onRight = { if (!state.soundEffects) viewModel.setOption("soundEffects", true) },
                 ),
             )
             // Volume of that unlock sound — only meaningful while the effect is on, so it slides
@@ -309,8 +341,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.encoreMode",
                     onConfirm = { viewModel.setOption("encoreMode", !state.encoreMode) },
-                    onLeft = { if (state.encoreMode) viewModel.setOption("encoreMode", false) },
-                    onRight = { if (!state.encoreMode) viewModel.setOption("encoreMode", true) },
                 ),
             )
             SettingSwitchRow(
@@ -321,8 +351,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.spectatorMode",
                     onConfirm = { viewModel.setOption("spectatorMode", !state.spectatorMode) },
-                    onLeft = { if (state.spectatorMode) viewModel.setOption("spectatorMode", false) },
-                    onRight = { if (!state.spectatorMode) viewModel.setOption("spectatorMode", true) },
                 ),
             )
             SettingSwitchRow(
@@ -333,8 +361,6 @@ private fun AchievementAccount(
                 modifier = Modifier.controllerFocusable(
                     "ra.unofficialTestMode",
                     onConfirm = { viewModel.setOption("unofficialTestMode", !state.unofficialTestMode) },
-                    onLeft = { if (state.unofficialTestMode) viewModel.setOption("unofficialTestMode", false) },
-                    onRight = { if (!state.unofficialTestMode) viewModel.setOption("unofficialTestMode", true) },
                 ),
             )
             Surface(

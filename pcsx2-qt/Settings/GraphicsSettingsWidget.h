@@ -44,13 +44,7 @@ private Q_SLOTS:
 	void onTextureDumpChanged();
 	void onTextureReplacementChanged();
 	void onShadeBoostChanged();
-	void onCaptureContainerChanged();
-	void onCaptureCodecChanged();
-	void onEnableVideoCaptureChanged();
-	void onEnableVideoCaptureArgumentsChanged();
-	void onVideoCaptureAutoResolutionChanged();
-	void onEnableAudioCaptureChanged();
-	void onEnableAudioCaptureArgumentsChanged();
+	void onClearShaderCacheClicked();
 
 private:
 	GSRendererType getEffectiveRenderer() const;

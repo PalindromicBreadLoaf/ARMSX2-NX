@@ -317,6 +317,15 @@ enum class GSRendererType : s8
 	Metal = 17,
 	DX12 = 15,
 	DK3D = 18,
+
+	// GSRendererHW paired with the deviceless GSDeviceNone: the hardware renderer's CPU-side
+	// path (GIF decode, vertex kick, texture cache, everything Draw() does to build a
+	// submission) with no GPU behind it. Distinct from Null, which pairs GSDeviceNone with
+	// GSRendererNull and draws nothing at all -- reusing Null here would make GSIsHardwareRenderer(),
+	// UseHardwareRenderer() and every "renderer == Null" check in GS.cpp/GSState.cpp answer as if
+	// nothing were running, when GSRendererHW's real CPU logic is. pcsx2-gsrunner only
+	// (`-renderer nullhw`); deliberately not added to any Qt/ImGui renderer picker.
+	NullHW = 19,
 };
 
 enum class GSVSyncMode : u8
@@ -483,6 +492,19 @@ enum class GSUpscaler : u8
 	// Appended rather than inserted: this enum is persisted as an integer, so renumbering
 	// MetalFXSpatial would silently re-point every existing config at a different upscaler.
 	FSR1,          ///< AMD FidelityFX Super Resolution 1 (EASU + RCAS compute passes, Vulkan).
+	SGSR,          ///< Qualcomm Snapdragon Game Super Resolution 1 (single compute pass, Vulkan).
+	SGSREdge,      ///< SGSR's edge-direction variant: same pass, directional Lanczos, dearer.
+};
+
+/// Generates larger copies of game textures on the CPU, in the background, and feeds them to the
+/// renderer the way a texture pack would. Persisted as an integer under the INI key
+/// TextureUpscale (the first key was TextureUpscaleMode, whose values meant something else, so
+/// it is not read); append, never renumber.
+enum class GSTextureUpscaleMode : u8
+{
+	Off,
+	Raisr2x, ///< One RAISR pass with the PS2-trained filters.
+	Raisr4x, ///< The same filters twice on textures up to 512 pixels per side; larger ones get one pass (2x).
 };
 
 enum class GSHWAutoFlushLevel : u8
@@ -574,6 +596,7 @@ enum class GSUserHackOverride : u8
 	CPUSpriteRenderLevel,
 	CPUCLUTRender,
 	GPUTargetCLUT,
+	RewriteLargeST,
 	MaxCount
 };
 
@@ -585,17 +608,6 @@ enum class GSDepthFeedbackMode : u8
 	DepthAsRT = 3,
 };
 
-// GV-7 GS front/back split. Off = today's single-threaded path with no record
-// round-trip; InlineRecords = build + execute every record on the calling
-// thread (the GV7-0 shape — validation / bisect rung); Lockstep = back thread
-// runs but the front drains after every record; Pipelined = the real thing.
-enum class GSBackThreadMode : u8
-{
-	Off           = 0,
-	InlineRecords = 1,
-	Lockstep      = 2,
-	Pipelined     = 3,
-};
 
 enum class AchievementOverlayPosition : u8
 {
@@ -758,13 +770,13 @@ struct Pcsx2Config
 			vu0Overflow : 1,
 			vu0ExtraOverflow : 1,
 			vu0SignOverflow : 1,
-			vu0Underflow : 1;
+			vu0ExactMode : 1;
 
 		bool
 			vu1Overflow : 1,
 			vu1ExtraOverflow : 1,
 			vu1SignOverflow : 1,
-			vu1Underflow : 1;
+			vu1ExactMode : 1;
 
 		bool
 			fpuOverflow : 1,
@@ -833,7 +845,6 @@ struct Pcsx2Config
 		static const char* FMVAspectRatioSwitchNames[];
 		static const char* DisplayRotationNames[];
 		static const char* BlendingLevelNames[];
-		static const char* CaptureContainers[];
 
 		static const char* GetRendererName(GSRendererType type);
 
@@ -863,11 +874,6 @@ struct Pcsx2Config
 		static constexpr OsdOverlayPos DEFAULT_OSD_MESSAGE_POS = OsdOverlayPos::TopLeft;
 		static constexpr OsdOverlayPos DEFAULT_OSD_PERFORMANCE_POS = OsdOverlayPos::TopRight;
 
-		static constexpr int DEFAULT_VIDEO_CAPTURE_BITRATE = 6000;
-		static constexpr int DEFAULT_VIDEO_CAPTURE_WIDTH = 640;
-		static constexpr int DEFAULT_VIDEO_CAPTURE_HEIGHT = 480;
-		static constexpr int DEFAULT_AUDIO_CAPTURE_BITRATE = 192;
-		static const char* DEFAULT_CAPTURE_CONTAINER;
 
 		static constexpr int DEFAULT_SHADEBOOST_BRIGHTNESS = 50;
 		static constexpr int DEFAULT_SHADEBOOST_CONTRAST = 50;
@@ -901,12 +907,14 @@ struct Pcsx2Config
 					DumpDrawLog : 1,
 					UseBlitSwapChain : 1,
 					DisableShaderCache : 1,
+					// Record the TFX pipelines each game uses and build them on worker threads
+					// when the game starts, ahead of their first draw. Needs the shader cache.
+					PrecompilePipelines : 1,
 					DisableFramebufferFetch : 1,
-					EnableAdrenoFramebufferFetch : 1,
 					ForceMaliFramebufferFetch : 1,
-					DisablePS2DepthQuantization : 1,
 					DisableVertexShaderExpand : 1,
 					SkipDuplicateFrames : 1,
+					AdvancedFrameDisplay : 1,
 					OsdShowSpeed : 1,
 					OsdShowFPS : 1,
 					OsdShowVPS : 1,
@@ -923,7 +931,6 @@ struct Pcsx2Config
 					OsdShowSettings : 1,
 					OsdshowPatches : 1,
 					OsdShowInputs : 1,
-					OsdShowVideoCapture : 1,
 					OsdShowInputRec : 1,
 					OsdShowTextureReplacements : 1,
 					OsdBoldText : 1,
@@ -957,6 +964,7 @@ struct Pcsx2Config
 					UserHacks_NativePaletteDraw : 1,
 					UserHacks_EstimateTextureRegion : 1,
 					UserHacks_DrawBuffering : 1,
+					UserHacks_RewriteLargeSTCoords : 1,
 					FXAA : 1,
 					ShadeBoost : 1,
 					DumpGSData : 1,
@@ -978,13 +986,7 @@ struct Pcsx2Config
 					LoadTextureReplacements : 1,
 					LoadTextureReplacementsAsync : 1,
 					PrecacheTextureReplacements : 1,
-					EnableVideoCapture : 1,
-					EnableVideoCaptureParameters : 1,
-					VideoCaptureAutoResolution : 1,
-					EnableAudioCapture : 1,
-					EnableAudioCaptureParameters : 1,
-					OrganizeSnapshotsByGame : 1,
-					OrganizeVideoCaptureByGame : 1;
+					OrganizeSnapshotsByGame : 1;
 			};
 		};
 
@@ -1018,8 +1020,16 @@ struct Pcsx2Config
 		float UpscaleMultiplier = DEFAULT_UPSCALE_MULTIPLIER;
 
 		AccBlendLevel AccurateBlendingUnit = DEFAULT_BLENDING_ACCURACY;
+		/// The highest blending accuracy this title may run at while the device pays for its
+		/// destination read on every draw that takes one -- a copy of the render target, or a
+		/// barrier -- as AccBlendLevel's integer; -1 when the title asks for nothing, which is
+		/// every title but Splashdown. Written only by the game database
+		/// (copyRoadMaximumBlendingLevel) and read only by the GS, which is the side that knows
+		/// which road the device took. See GS/Renderers/Common/GSCopyRoadBlendingPolicy.h.
+		s8 CopyRoadMaximumBlendingLevel = -1;
 		BiFiltering TextureFiltering = DEFAULT_TEXTURE_FILTERING_MODE;
 		TexturePreloadingLevel TexturePreloading = TexturePreloadingLevel::Full;
+		GSTextureUpscaleMode TextureUpscale = GSTextureUpscaleMode::Off;
 		GSDumpCompressionMethod GSDumpCompression = GSDumpCompressionMethod::Zstandard;
 		GSHardwareDownloadMode HWDownloadMode = GSHardwareDownloadMode::Enabled;
 		GSCASMode CASMode = DEFAULT_CAS_MODE;
@@ -1049,7 +1059,14 @@ struct Pcsx2Config
 		TriFiltering TriFilter = DEFAULT_TRILINEAR_FILTERING_MODE;
 		s8 OverrideTextureBarriers = -1;
 		GSDepthFeedbackMode DepthFeedbackMode = GSDepthFeedbackMode::Auto;
-		GSBackThreadMode BackThreadMode = GSBackThreadMode::Off;
+		/// GS multi-threading: a front thread parses GIF data while a back thread draws. The setting,
+		/// as the user or the game database asked for it; stored as the integer "GSBackThreadMode",
+		/// where 0 is off and any other value on (older builds wrote 3).
+		bool BackThread = false;
+		/// What BackThread resolved to for the open renderer (GSBackThreadPolicy.h). Derived, not
+		/// loaded or saved, and not compared -- set by OpenGSRenderer on GSConfig only, and read by
+		/// the renderer's constructor.
+		bool BackThreadResolved = false;
 		bool BackThreadUseCore3 = false;
 
 		// RetroArch (.slangp) shader chain, applied at present after ShadeBoost/FXAA via
@@ -1070,6 +1087,10 @@ struct Pcsx2Config
 		// that is already presenting the game, and the cheaper pipeline is what makes the
 		// feature pay for itself there. Falls back to 3.1 when the user's DLL predates 3.1p.
 		bool LsfgPerformance = true;
+		// LSFG's half-precision shader family. Off by default: phone GPUs run fp16 about twice as
+		// fast, but it needs shaderFloat16 on the device, which is asked for only while this is on
+		// (so turning it on takes effect when the next game starts), and drivers vary with fp16.
+		bool LsfgFp16 = false;
 		// Optical-flow resolution, as a percentage of the presented image (25..100). Lower is
 		// cheaper and blurrier. Handed to the library as a DIVISOR — see GSLsfg.cpp.
 		u8 LsfgFlowScale = 100;
@@ -1086,9 +1107,20 @@ struct Pcsx2Config
 		u16 LsfgTargetRate = 0;
 
 		u8 CAS_Sharpness = 50;
-		// FSR1's RCAS pass, 0..100. Mapped to AMD's "stops" scale in GSDevice::FSR1Upscale,
+		// 0..100, shared by the upscalers. FSR1 maps it to AMD's "stops" scale and SGSR to its
+		// own 0..2 edge sharpness, two percent per percent, so both reach their full range off
+		// one control. FSR1's RCAS pass, 0..100. Mapped to AMD's "stops" scale in GSDevice::FSR1Upscale,
 		// where 0 stops is maximum sharpening - it is not the same curve as CAS_Sharpness.
 		u8 FSR_Sharpness = 50;
+
+		// SGSR's own, deliberately NOT shared with FSR_Sharpness above.
+		//
+		// Qualcomm's edge sharpness runs 0..2 and FSR1's slider is natively 0..100, so the two
+		// want different ranges. Reusing one field would mean an existing FSR configuration
+		// silently means something else the moment SGSR is picked, and widening that field to
+		// 200 would change what every FSR value already stored out there means. Neither is worth
+		// saving one setting. 100 here is Qualcomm's default of 1.0.
+		u8 SGSR_Sharpness = 100;
 		u8 ShadeBoost_Brightness = DEFAULT_SHADEBOOST_BRIGHTNESS;
 		u8 ShadeBoost_Contrast = DEFAULT_SHADEBOOST_CONTRAST;
 		u8 ShadeBoost_Saturation = DEFAULT_SHADEBOOST_SATURATION;
@@ -1110,16 +1142,6 @@ struct Pcsx2Config
 		GSScreenshotFormat ScreenshotFormat = GSScreenshotFormat::PNG;
 		int ScreenshotQuality = 90;
 
-		std::string CaptureContainer = DEFAULT_CAPTURE_CONTAINER;
-		std::string VideoCaptureCodec;
-		std::string VideoCaptureFormat;
-		std::string VideoCaptureParameters;
-		std::string AudioCaptureCodec;
-		std::string AudioCaptureParameters;
-		int VideoCaptureBitrate = DEFAULT_VIDEO_CAPTURE_BITRATE;
-		int VideoCaptureWidth = DEFAULT_VIDEO_CAPTURE_WIDTH;
-		int VideoCaptureHeight = DEFAULT_VIDEO_CAPTURE_HEIGHT;
-		int AudioCaptureBitrate = DEFAULT_AUDIO_CAPTURE_BITRATE;
 
 		std::string Adapter;
 		std::string AndroidGpuProfileOverride = "auto";
@@ -1186,7 +1208,7 @@ struct Pcsx2Config
 		};
 
 		static constexpr s32 MAX_VOLUME = 200;
-#ifdef __ANDROID__
+#ifdef ARMSX2_USE_OBOE
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Oboe;
 #elif defined(__SWITCH__)
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Audout;
@@ -1520,12 +1542,31 @@ struct Pcsx2Config
 
 	// ------------------------------------------------------------------------
 
+	// Namco System 246/256 arcade board logging (PCSX2x6). Off unless set by hand in the ini.
+	struct ArcadeOptions
+	{
+		bool SRAMVerboseReads = false;
+		bool RAMVerboseReads = false;
+		bool ATAVerboseReads = false;
+		bool UARTVerbose = false;
+
+		void LoadSave(SettingsWrapper& wrap);
+
+		bool operator==(const ArcadeOptions& right) const;
+		bool operator!=(const ArcadeOptions& right) const;
+	};
+
 	struct AchievementsOptions
 	{
 		static constexpr u32 MINIMUM_NOTIFICATION_DURATION = 3;
 		static constexpr u32 MAXIMUM_NOTIFICATION_DURATION = 30;
 		static constexpr u32 DEFAULT_NOTIFICATION_DURATION = 5;
 		static constexpr u32 DEFAULT_LEADERBOARD_DURATION = 10;
+		// Size of the achievement popups and in-game indicators, as a percentage of the normal
+		// layout. ARMSX2: on a handheld the stock size was hard to read.
+		static constexpr u32 MINIMUM_NOTIFICATION_SCALE = 50;
+		static constexpr u32 MAXIMUM_NOTIFICATION_SCALE = 250;
+		static constexpr u32 DEFAULT_NOTIFICATION_SCALE = 100;
 
 		static const char* OverlayPositionNames[(size_t)AchievementOverlayPosition::MaxCount + 1];
 
@@ -1548,6 +1589,7 @@ struct Pcsx2Config
 
 		u32 NotificationsDuration = DEFAULT_NOTIFICATION_DURATION;
 		u32 LeaderboardsDuration = DEFAULT_LEADERBOARD_DURATION;
+		u32 NotificationScale = DEFAULT_NOTIFICATION_SCALE;
 		AchievementOverlayPosition OverlayPosition = AchievementOverlayPosition::BottomRight;
 		OsdOverlayPos NotificationPosition = OsdOverlayPos::TopLeft;
 
@@ -1623,6 +1665,8 @@ struct Pcsx2Config
 	FilenameOptions BaseFilenames;
 
 	AchievementsOptions Achievements;
+
+	ArcadeOptions Arcade;
 
 	// Memorycard options - first 2 are default slots, last 6 are multitap 1 and 2
 	// slots (3 each)
@@ -1701,7 +1745,6 @@ namespace EmuFolders
 	extern std::string GameSettings;
 	extern std::string Textures;
 	extern std::string InputProfiles;
-	extern std::string Videos;
 	extern std::string DebuggerLayouts;
 	extern std::string DebuggerSettings;
 
@@ -1759,7 +1802,7 @@ namespace EmuFolders
 #define CHECK_VU_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Overflow : EmuConfig.Cpu.Recompiler.vu1Overflow)
 #define CHECK_VU_EXTRA_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0ExtraOverflow : EmuConfig.Cpu.Recompiler.vu1ExtraOverflow) // If enabled, Operands are clamped before being used in the VU recs
 #define CHECK_VU_SIGN_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SignOverflow : EmuConfig.Cpu.Recompiler.vu1SignOverflow)
-#define CHECK_VU_UNDERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Underflow : EmuConfig.Cpu.Recompiler.vu1Underflow)
+#define CHECK_VU_EXACT(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0ExactMode : EmuConfig.Cpu.Recompiler.vu1ExactMode) // GameDB vu0/vu1ClampMode 4: mode 3 plus the VU's own arithmetic and status flags -- the adder's guard mask, the divide unit's recurrence and the EFU's series, the multiplier's one-ULP deficit, and the FMAC's saturation ceiling with its MAC U and MAC O.
 
 #define CHECK_FPU_OVERFLOW (EmuConfig.Cpu.Recompiler.fpuOverflow)
 #define CHECK_FPU_EXTRA_OVERFLOW (EmuConfig.Cpu.Recompiler.fpuExtraOverflow) // If enabled, Operands are checked for infinities before being used in the FPU recs

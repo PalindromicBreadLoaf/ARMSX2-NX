@@ -119,6 +119,14 @@ EeRecTestHarness::~EeRecTestHarness()
 	if (fpu_overflow_changed_)
 		EmuConfig.Cpu.Recompiler.fpuOverflow = prev_fpu_overflow_;
 
+	if (vu0_clamp_changed_)
+	{
+		EmuConfig.Cpu.Recompiler.vu0Overflow = prev_vu0_overflow_;
+		EmuConfig.Cpu.Recompiler.vu0ExtraOverflow = prev_vu0_extra_overflow_;
+		EmuConfig.Cpu.Recompiler.vu0SignOverflow = prev_vu0_sign_overflow_;
+		EmuConfig.Cpu.Recompiler.vu0ExactMode = prev_vu0_exact_mode_;
+	}
+
 	// Hand the file back in the format the restored mode calls for, so the next
 	// harness -- and anything that reads fpuRegs between them -- starts square.
 	eeFprSyncSlotFormat();
@@ -189,6 +197,22 @@ void EeRecTestHarness::DisableFpuGuarded()
 		fpu_guarded_changed_ = true;
 	}
 	EmuConfig.Cpu.Recompiler.fpuGuardedAddSub = false;
+}
+
+void EeRecTestHarness::SetVu0ClampMode(int mode)
+{
+	if (!vu0_clamp_changed_)
+	{
+		prev_vu0_overflow_ = EmuConfig.Cpu.Recompiler.vu0Overflow;
+		prev_vu0_extra_overflow_ = EmuConfig.Cpu.Recompiler.vu0ExtraOverflow;
+		prev_vu0_sign_overflow_ = EmuConfig.Cpu.Recompiler.vu0SignOverflow;
+		prev_vu0_exact_mode_ = EmuConfig.Cpu.Recompiler.vu0ExactMode;
+		vu0_clamp_changed_ = true;
+	}
+	EmuConfig.Cpu.Recompiler.vu0Overflow = (mode >= 1);
+	EmuConfig.Cpu.Recompiler.vu0ExtraOverflow = (mode >= 2);
+	EmuConfig.Cpu.Recompiler.vu0SignOverflow = (mode >= 3);
+	EmuConfig.Cpu.Recompiler.vu0ExactMode = (mode >= 4);
 }
 
 void EeRecTestHarness::EnableFpuExtraOverflow()
@@ -453,7 +477,14 @@ void EeRecTestHarness::Run(RunMode mode)
 	has_run_ = true;
 
 	const auto diffs = DiffEe(jit_snapshot_, interp_snapshot_);
-	if (!diffs.empty())
+	if (ee_require_divergence_)
+	{
+		EXPECT_FALSE(diffs.empty())
+			<< "EE: " << ee_require_divergence_
+			<< "\nThe recorded divergence is gone. Drop RequireEeDivergence and "
+			   "let the plain diff stand.";
+	}
+	else if (!diffs.empty())
 	{
 		std::ostringstream ss;
 		ss << "EE JIT vs INTERP divergence (" << diffs.size() << "):\n";
@@ -472,7 +503,14 @@ void EeRecTestHarness::Run(RunMode mode)
 	{
 		const auto vudiffs = DiffVu(vu0_jit_snapshot_, vu0_interp_snapshot_,
 			VuDiffMode::PipelinePermissive, vu0_ignored_vi_);
-		if (!vudiffs.empty())
+		if (vu0_require_divergence_)
+		{
+			EXPECT_FALSE(vudiffs.empty())
+				<< "VU0: " << vu0_require_divergence_
+				<< "\nThe recorded divergence is gone. Drop RequireVu0Divergence "
+				   "and let the plain diff stand.";
+		}
+		else if (!vudiffs.empty())
 		{
 			std::ostringstream ss;
 			ss << "VU0 JIT vs INTERP divergence (" << vudiffs.size() << "):\n";
@@ -490,7 +528,14 @@ void EeRecTestHarness::Run(RunMode mode)
 	{
 		const auto vudiffs = DiffVu(vu1_jit_snapshot_, vu1_interp_snapshot_,
 			VuDiffMode::PipelinePermissive);
-		if (!vudiffs.empty())
+		if (vu1_require_divergence_)
+		{
+			EXPECT_FALSE(vudiffs.empty())
+				<< "VU1: " << vu1_require_divergence_
+				<< "\nThe recorded divergence is gone. Drop RequireVu1Divergence "
+				   "and let the plain diff stand.";
+		}
+		else if (!vudiffs.empty())
 		{
 			std::ostringstream ss;
 			ss << "VU1 JIT vs INTERP divergence (" << vudiffs.size() << "):\n";

@@ -16,6 +16,10 @@
          isn't gated for devices without a gyroscope. -->
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
 
+    <!-- Rumble for a PlayStation pad is written to it directly over USB, because a handheld
+         that bridges the controller through its own HID node reports motors it never drives.
+         required="false" so devices with no USB host support still install. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <!--
         The Discord Social SDK .aar is now a real dependency, so its manifest merges into ours and
         brings its <queries> for CustomTabsService with it — no need to restate that here.
@@ -43,7 +47,7 @@
         android:fullBackupContent="@xml/backup_rules"
         android:largeHeap="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
+        android:label="${appLabel}"
         android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
@@ -128,6 +132,24 @@
             android:name=".data.library.RecentGamesContentProvider"
             android:authorities="${applicationId}.romlibrary"
             android:exported="true" />
+
+        <!--
+            Consent prompt a companion app launches to ask for read access to the recently-played
+            list. Exported so a third-party app can start it; excludeFromRecents/noHistory because
+            it is a one-shot dialog and has no business sitting in the recents list afterwards.
+            The grant it records is per calling package — see RecentGamesAccessActivity.
+        -->
+        <activity
+            android:name=".data.library.RecentGamesAccessActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="${applicationId}.action.REQUEST_RECENT_GAMES_ACCESS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <!--
             Discord Social SDK's OAuth landing activity. Declared here rather than inherited from

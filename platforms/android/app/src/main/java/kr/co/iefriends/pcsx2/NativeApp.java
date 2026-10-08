@@ -68,15 +68,14 @@ public class NativeApp {
 			externalFilesDir = context.getDataDir();
 		}
 
-		// DataRoot: prefer the user-chosen system folder only when the SAF tree
-		// URI resolves to a POSIX path that native code can actually write.
-		// Falls back to externalFilesDir when unset, unresolvable, or blocked
-		// by scoped storage.
-		String chosen = MainActivityRuntime.Companion.systemDirPosix();
-		if (chosen != null && !MainActivityRuntime.Companion.validateSystemDirWritable(chosen)) {
-			chosen = null;
+		// DataRoot: the folder MainActivityRuntime.kickoffEmucoreInit pinned. It is
+		// decided there, once, so the core and every Kotlin screen use the same folder;
+		// deciding again here could come out differently and split the player's saves
+		// across two folders.
+		String dataPath = MainActivityRuntime.Companion.currentInitDataRoot();
+		if (dataPath == null || dataPath.isEmpty()) {
+			dataPath = externalFilesDir.getAbsolutePath();
 		}
-		String dataPath = (chosen != null) ? chosen : externalFilesDir.getAbsolutePath();
 
 		// BIOS folder: the directory that actually holds the configured BIOS file.
 		// The setup wizard (and the migration in MainActivityRuntime.kickoffEmucoreInit) keep the
@@ -167,6 +166,34 @@ public class NativeApp {
 	public static native int reloadPatches();
 	public static native boolean reloadTextureReplacements();
 
+	// ---- texture-pack tar+zstd streaming decoder ----------------------------------------------
+	// Strict single-frame zstd decoder used by the texture-pack installer (plan
+	// 2026-09-06-0905). Handles are opaque and thread-confined: create, drive, close on ONE
+	// thread, always through a try/finally. Any error poisons the handle; a poisoned handle
+	// rejects further decode calls and must still be closed exactly once.
+
+	/**
+	 * Creates a decoder whose cumulative decompressed output is capped at [maxOutputBytes]
+	 * (positive, at most 16 GiB). The zstd window is capped at 2^27 bytes before initialization.
+	 * Returns an opaque handle, or 0 on failure (never throws).
+	 */
+	public static native long zstdDecoderCreate(long maxOutputBytes);
+
+	/**
+	 * Streams one bounded step (at most 256 KiB of input consumed and output produced).
+	 *
+	 * [status] must be long[3]: 0 = input consumed, 1 = output produced, 2 = 1 once the frame
+	 * has completed (from then on the decoder rejects further calls). Input not consumed stays
+	 * buffered natively; feed more with subsequent calls. Returns the produced byte count, or -1
+	 * after poisoning (truncation, corruption, dictionary-required, oversized window, trailing
+	 * bytes, output-cap breach). Never throws.
+	 */
+	public static native int zstdDecoderDecode(long handle, byte[] in, int inOff, int inLen,
+		byte[] out, int outOff, int outLen, long[] status);
+
+	/** Frees the decoder. Safe to call with 0; must be called exactly once per created handle. */
+	public static native void zstdDecoderDestroy(long handle);
+
 	/**
 	 * Set which named patches/cheats are enabled (the [Patches]/[Cheats]
 	 * "Enable" list PCSX2 actually applies). Pass ALL of the game's entry names
@@ -201,8 +228,9 @@ public class NativeApp {
 
 	/**
 	 * Set the emulated device in a USB port. {@code type} is a core type name
-	 * ("guncon2", "None", ...); port is 0 or 1. Restart recommended — swapping a USB
-	 * device on a running VM is the emulated equivalent of unplugging it.
+	 * ("guncon2", "None", ...); port is 0 or 1. A running game gets the device plugged
+	 * in straight away, but a restart is still recommended: many games only look for USB
+	 * devices at boot.
 	 */
 	public static native void usbSetDeviceType(int port, String type);
 
@@ -216,17 +244,90 @@ public class NativeApp {
 	/** Pick a subtype for whatever device is in {@code port}; devices without subtypes ignore it. */
 	public static native void usbSetDeviceSubtype(int port, int subtype);
 
-	/** Aim, in WINDOW PIXELS (our SurfaceView is the whole window, so raw touch x/y). */
+	/** Aim, as a fraction (0..1) of the screen area the game surface covers. Native scales it
+	 *  to the surface buffer, which can have fewer pixels than the screen. */
 	public static native void usbLightgunAim(float x, float y);
 
 	/** Press/release one GUNCON_* binding on a port. */
 	public static native void usbLightgunButton(int port, int bind, boolean pressed);
+
+	// ---- Namco System 246/256 arcade games (.acgame) ----------------------------
+	/** Cabinet controls, from the core's JVS_MODE (pcsx2/DEV9/ACJV.h). */
+	public static final int ARCADE_MODE_GENERIC = 0;
+	public static final int ARCADE_MODE_LIGHTGUN = 1;
+	public static final int ARCADE_MODE_FIGHTING = 2;
+	public static final int ARCADE_MODE_RACING = 3;
+	public static final int ARCADE_MODE_DRUM = 4;
+	public static final int ARCADE_MODE_TOUCH = 5;
+	public static final int ARCADE_MODE_STANDARD = 6;
+	public static final int ARCADE_MODE_TWINSTICK = 7;
+
+	/**
+	 * Where the files an .acgame names were found (boot ELF, media image, SRAM file), as paths or
+	 * content:// URIs, for the next runVMThread only. A null or empty one is looked for next to the
+	 * .acgame, which only works for a plain path.
+	 */
+	public static native void setArcadeLaunchFiles(String elf, String media, String sram);
+
+	/** Why the last runVMThread could not boot, or "" when it did. */
+	public static native String getLastBootError();
+
+	/** The cabinet controls (ARCADE_MODE_*) the core gives a game ID such as NM00004. */
+	public static native int arcadeModeForGameId(String gameId);
+
+	/** Whether the running game is an arcade one. */
+	public static native boolean isArcadeSession();
+
+	/** A coin in player 1's (0) or player 2's (1) slot. */
+	public static native void arcadeInsertCoin(int player);
+
+	/** Holds or lets go of the cabinet's Service button. */
+	public static native void arcadeService(boolean pressed);
+
+	/** Flips the board's Test switch (the game's test menu). */
+	public static native void arcadeToggleTest();
+
+	/** Whether the Test switch is on. */
+	public static native boolean arcadeTestModeOn();
+
+	/** Whether a BIOS file is an arcade board's (COH-H). */
+	public static native boolean isArcadeBios(String path);
+
+	/** The board whose BIOS the arcade game needs when none of the arcade BIOS files there runs it
+	 *  ("System 246" for Battle Gear 3, which rejects the System 256 one), else "": the core's choice at boot. */
+	public static native String getArcadeBiosNeed(String gameId);
+
+	/** The jobs the pad's buttons do on an arcade game's cabinet, for the Arcade controls settings:
+	 *  "mode\tN" first, then a job a line (name, default pad keys, fixed), as native-lib.cpp says. */
+	public static native String getArcadeControls(String gameId);
+
+	/** The player's own layout for the arcade game being played: pairs of pad keys (a button, then the
+	 *  button whose job it does, -1 for none). Null or empty: the cabinet's own layout. */
+	public static native void setArcadeRemap(int[] pairs);
+
+	/** Every arcade game the database knows, one per line: game ID, name, board (System246,
+	 *  System256 or System SUPER256) and media (CD, DVD or HDD), tab separated. */
+	public static native String getArcadeGames();
+
 	public static native String getGameTitle(String path);
 	public static native String getGameSerial();
 	public static native String getGameCRC();
 	public static native float getFPS();
 	/** Current game's nominal emulated refresh (~59.94 NTSC / 50 PAL), or 0 without a VM. */
 	public static native float getNominalFrameRate();
+
+	/** The rest of the in-game OSD's figures, for the second-screen panel. All return 0 with
+	 *  no VM running rather than the last value, so an idle panel reads as idle. */
+	/** Push device temperatures to the performance overlay. ARMSX2_THERMAL_NONE means
+	 *  "no reading" — the overlay then omits that figure rather than drawing a zero. */
+	public static native void setThermals(float cpu, float gpu, float battery, boolean show);
+
+	public static native float getVPS();
+	public static native float getEmuSpeedPercent();
+	public static native float getCpuThreadUsage();
+	public static native float getGsThreadUsage();
+	public static native float getGpuUsage();
+	public static native float getAverageFrameTime();
 
 	/** Build version string from BuildVersion::GitRev — formatted as
 	 *  "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT". Used by the
@@ -351,8 +452,46 @@ public class NativeApp {
 	 *  library can still clear a stale, in-game-written override file. Returns false when no such
 	 *  file exists — there is then nothing to rewrite and the caller should skip the put/commit. */
 	public static native boolean gameIniBeginWriteForSerial(String serial);
+
+	/** Where host: reads from. The single source of truth -- do NOT rebuild this path in
+	 *  Kotlin: DataRoot and the user-facing system-directory preference differ whenever the
+	 *  data folder is on an SD card. */
+	public static native String getHostfsDir();
+
+	/** Copy an ISO's files into hostfs/&lt;subdir&gt;/ so a host:-loading ELF can read them.
+	 *  Android cannot mount an ISO, so the app has to do this itself. Returns the file
+	 *  count, or -1 on failure. Must not be called while a game is running. */
+	public static native int extractIsoToHostfs(String isoPath, String subdir);
+
+	/** Pair a boot ELF with the disc it needs -- desktop's "Properties -> Disc Path".
+	 *  Without it VMManager boots the ELF with NoDisc and a game that reads from the disc
+	 *  hangs on its loading screen. Pass an empty discPath to clear the pairing.
+	 *  Returns false when the file is not a readable ELF or yields no CRC. */
+	public static native boolean setElfDiscOverride(String elfPath, String discPath);
+
+	/** The disc currently paired with elfPath, or "" when there is none. */
+	public static native String getElfDiscOverride(String elfPath);
 	public static native void gameIniPut(String section, String key, String value);
 	public static native boolean gameIniCommitWrite();
+	/** Keep section/key in the INI being written even if nothing was put for it: the key's
+	 *  presence is what tells the core the player decided that setting for this game, so the
+	 *  game database leaves it alone. The value is filled in natively at commit. */
+	public static native void gameIniClaim(String section, String key);
+	/** Same stream as {@link #gameIniBeginWrite()}, but held until the core loads this game's
+	 *  settings at boot: at launch the file cannot be named yet (its name carries the disc CRC).
+	 *  Written once, just before the core reads it. */
+	public static native boolean gameIniBeginStage(String serial);
+	/** Drop anything staged by {@link #gameIniBeginStage(String)}. */
+	public static native void gameIniClearStage();
+	/** Re-read the running game's INI into the core's game layer after rewriting it, so the
+	 *  commit that follows applies what the file says now. Applies nothing itself. */
+	public static native void reloadGameSettingsLayer();
+	/** What the game database sets for a serial: one line per setting a per-game key can claim,
+	 *  "name TAB value TAB flags TAB section/key|section/key". See GameDbOverrides. */
+	public static native String getGameDbEntries(String serial);
+	/** Every "section/key" whose presence in a per-game INI claims a game database setting,
+	 *  one per line. */
+	public static native String gameDbClaimingKeys();
 
 	/** Pin a custom Vulkan driver (e.g. Mesa Turnip) for the next VM
 	 *  start. Must be called BEFORE MainActivityRuntime.start() — the first MTGS::Open
@@ -384,12 +523,13 @@ public class NativeApp {
 	public static native void resetKeyStatus();
 
 	// ---- USB keyboard (#254: EQOA / Konami-keyboard games) ----
-	/** Attach ({@code true}) or detach ({@code false}) an emulated USB HID
-	 *  keyboard on USB port {@code port} (0 = USB1, 1 = USB2). Persists
-	 *  [USB{port+1}] Type = hidkbd/None and, when a VM is running, recreates the
-	 *  device live so the game sees the (dis)connect. Call off the UI thread — a
-	 *  live change briefly parks the emulation pipeline. */
-	public static native void usbSetKeyboardEnabled(int port, boolean enabled);
+	/** Plug the devices the settings name for both USB ports into a running game, and
+	 *  unplug what they no longer name. Called after Settings.applyTo writes [USB1] Type
+	 *  for the keyboard switch; a no-op with no VM running. */
+	public static native void usbApplyPorts();
+
+	/** Show the free-software notice when a game boots (#453). On by default. */
+	public static native void setFreeSoftwareNotice(boolean show);
 	/** Feed one Android hardware {@link android.view.KeyEvent} to the emulated USB
 	 *  keyboard on {@code port}. {@code androidKeyCode} is {@code KeyEvent.keyCode};
 	 *  {@code pressed} is the down/up state. Returns {@code true} iff a USB keyboard
@@ -415,13 +555,22 @@ public class NativeApp {
 	public static void onPadRumble(int pad, int largeMotor, int smallMotor) {
 		if (!sRumbleEnabled) return;
 		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(pad);
-		if (devId < 0) devId = sRumbleDeviceId;
-		// devId may stay -1 for touch-only Player 1 (no gamepad); vibrateDevice still
-		// drives the device's own haptic for P1 (issue #241). P2 with no pad has no target.
-		if (devId < 0 && pad != 0) return;
+		// Nothing has claimed this slot yet: deal out the pads nobody has spoken for, rather
+		// than guessing. "The pad you last touched" names the SAME controller for every port,
+		// so one DualSense answered for BOTH players and the second pad stayed silent whatever
+		// slot it was in.
+		if (devId < 0) devId = com.armsx2.input.PadRouter.INSTANCE.fallbackDeviceIdForPort(pad);
+		// Player 1 alone may fall back to whatever last sent input -- Player 2 stays silent,
+		// because buzzing Player 1's controller for Player 2 is worse than not buzzing.
+		if (devId < 0 && pad == 0) devId = sRumbleDeviceId;
+		// The phone's own haptic belongs to whoever plays on the touch screen: Player 1
+		// normally (issue #241), Player 2 when the touch controls are set to play as Player 2.
+		// A player with no controller and no touch controls has nothing to buzz.
+		final int touchPad = com.armsx2.ui.touch.TouchControls.playerPort;
+		if (devId < 0 && pad != touchPad) return;
 		float low = Math.max(0f, Math.min(1f, largeMotor / 255f));   // low-frequency / large
 		float high = Math.max(0f, Math.min(1f, smallMotor / 255f));  // high-frequency / small
-		vibrateDevice(devId, low, high, RUMBLE_MS, pad == 0);
+		vibrateDevice(devId, low, high, RUMBLE_MS, pad == touchPad);
 	}
 
 	// ---- Achievement / notification sound playback ----
@@ -484,6 +633,18 @@ public class NativeApp {
 	 *  Odin 3 whose built-in gamepad has no rumble actuator, only system haptics). */
 	private static void vibrateDevice(int devId, float low, float high, int ms, boolean allowSystemFallback) {
 		try {
+			InputDevice dev = (devId >= 0) ? InputDevice.getDevice(devId) : null;
+
+			// Per-controller override. A pad can ADVERTISE motors it cannot drive -- a handheld
+			// that bridges an external controller through its own HID node presents that node with
+			// a full vibrator inventory, accepts every vibrate() call without error, and moves
+			// nothing. Nothing in the API distinguishes that from a working motor, so "send this
+			// player's rumble somewhere else" has to be sayable by hand.
+			com.armsx2.input.PadRouter.RumbleMode mode =
+				com.armsx2.input.PadRouter.INSTANCE.rumbleModeForDevice(devId);
+			if (mode == com.armsx2.input.PadRouter.RumbleMode.OFF) return;
+			boolean forceDevice = mode == com.armsx2.input.PadRouter.RumbleMode.DEVICE;
+
 			// Single combined motor can't reproduce both PS2 actuators, so blend
 			// them the way AetherSX2/NetherSX2 do (org.libsdl.app
 			// SDLControllerManager): 0.6*large + 0.4*small. The PS2 small motor is
@@ -493,33 +654,85 @@ public class NativeApp {
 			// mix keeps a small-only pulse light and distinct from a large pulse.
 			float combined = Math.min(1f, low * 0.6f + high * 0.4f);
 			boolean drove = false;
-			InputDevice dev = (devId >= 0) ? InputDevice.getDevice(devId) : null;
-			if (dev != null) {
-				if (Build.VERSION.SDK_INT >= 31) {
-					VibratorManager vm = dev.getVibratorManager();
-					int[] ids = vm.getVibratorIds();
-					if (ids.length >= 2) {
-						drove = rumbleOne(vm.getVibrator(ids[0]), low, ms);
-						drove |= rumbleOne(vm.getVibrator(ids[1]), high, ms);
-					} else if (ids.length == 1) {
-						drove = rumbleOne(vm.getVibrator(ids[0]), combined, ms);
-					} else {
-						// Some pads (e.g. certain DualShock/DualSense BT modes) expose 0
-						// vibrators to VibratorManager but still drive via the legacy API.
-						drove = rumbleOne(dev.getVibrator(), combined, ms);
-					}
-				} else {
-					drove = rumbleOne(dev.getVibrator(), combined, ms);
+
+			if (!forceDevice) {
+				// The pad addressed directly over USB wins. On a handheld that bridges the
+				// controller, the motors the input API offers for it are fiction; this is the
+				// hardware itself, and it carries BOTH motors independently.
+				com.armsx2.input.UsbRumble.Pad usb = com.armsx2.input.UsbRumble.INSTANCE.padFor(dev);
+				if (usb != null) {
+					float scale = (Float.isFinite(sHapticScale) && sHapticScale >= 0f) ? sHapticScale : 1f;
+					int l = Math.round(Math.min(1f, low * scale) * 255f);
+					int h = Math.round(Math.min(1f, high * scale) * 255f);
+					if (usb.rumble(Math.max(0, l), Math.max(0, h))) return;
 				}
+				drove = driveMotors(motorsOf(dev), low, high, combined, ms);
 			}
+
 			// No controller actuator handled it → fall back to the device's built-in
 			// haptic (issue #241), when permitted (Player 1 / explicit test) so a
 			// vibrator-less P2 pad never buzzes the handheld that P1 is holding.
-			if (!drove && allowSystemFallback) {
+			//
+			// ...but NOT when the pad is an EXTERNAL controller. Xbox pads over Bluetooth
+			// report hasVibrator() == false through InputDevice even though they rumble
+			// perfectly well by other means, so this fallback fired for them and buzzed the
+			// PHONE — sitting in a pocket or a stand — while the user held the controller
+			// (#433). The #241 case is the opposite shape: a handheld whose own built-in pad
+			// has no actuator, where the "device" and the thing in your hands are the same
+			// object and buzzing it is exactly right.
+			if (!drove && allowSystemFallback
+				&& (forceDevice || sRumbleFallbackExternal || !isExternalPad(dev))) {
 				rumbleOne(systemVibrator(), combined, ms);
 			}
 		} catch (Throwable ignored) {
 		}
+	}
+
+	/**
+	 * Every motor on [dev], or an empty list when Android exposes none.
+	 *
+	 * defaultVibrator FIRST: it is the addressing mode that actually drives hardware on the
+	 * handhelds that bridge a controller. Per-id vibrators are a fallback for pads whose default
+	 * reports nothing, NOT a replacement -- putting them first silenced pads that worked. The
+	 * legacy per-device API is last: some pads (certain DualShock/DualSense Bluetooth modes)
+	 * expose nothing at all to VibratorManager while still driving fine through it.
+	 */
+	private static java.util.List<Vibrator> motorsOf(InputDevice dev) {
+		java.util.ArrayList<Vibrator> motors = new java.util.ArrayList<>(2);
+		if (dev == null) return motors;
+		try {
+			if (Build.VERSION.SDK_INT >= 31) {
+				VibratorManager vm = dev.getVibratorManager();
+				if (vm != null) {
+					Vibrator def = vm.getDefaultVibrator();
+					if (def != null && def.hasVibrator()) motors.add(def);
+					if (motors.isEmpty()) {
+						for (int id : vm.getVibratorIds()) {
+							Vibrator v = vm.getVibrator(id);
+							if (v != null && v.hasVibrator()) motors.add(v);
+						}
+					}
+				}
+			}
+			if (motors.isEmpty()) {
+				Vibrator legacy = dev.getVibrator();
+				if (legacy != null && legacy.hasVibrator()) motors.add(legacy);
+			}
+		} catch (Throwable ignored) {
+		}
+		return motors;
+	}
+
+	/** Drive [motors]: two get a motor each, one gets the blend. */
+	private static boolean driveMotors(java.util.List<Vibrator> motors, float low, float high,
+	                                   float combined, int ms) {
+		if (motors.isEmpty()) return false;
+		if (motors.size() >= 2) {
+			boolean drove = rumbleOne(motors.get(0), low, ms);
+			drove |= rumbleOne(motors.get(1), high, ms);
+			return drove;
+		}
+		return rumbleOne(motors.get(0), combined, ms);
 	}
 
 	/** User-set haptic strength multiplier (0..2, default 1.0 = as authored). Scales EVERY
@@ -527,6 +740,35 @@ public class NativeApp {
 	 *  "Vibration Strength" slider tames or boosts all of it. Set from Kotlin
 	 *  (ControllerMappings.setHapticIntensity) live and at app start. */
 	public static volatile float sHapticScale = 1.0f;
+
+	/** Opt back in to buzzing THIS device when an external controller exposes no motor.
+	 *  Default false, which is the #433 behaviour: a phone in a pocket must not buzz for a
+	 *  pad in your hands. But some pads (Xbox Series X/S over Bluetooth, some DualSense BT
+	 *  modes) cannot be driven through InputDevice at all, so suppressing the fallback leaves
+	 *  the user with no feedback whatsoever (#646 — filed by the same reporter as #433).
+	 *  Neither default is right for everyone, so the choice is the user's.
+	 *  Mirrored from ControllerMappings.setRumbleFallbackExternal. */
+	public static volatile boolean sRumbleFallbackExternal = false;
+
+	/**
+	 * True when [dev] is a controller the user is holding SEPARATELY from this device.
+	 *
+	 * InputDevice.isExternal() answers this exactly but is @hide, so it is reached by
+	 * reflection and may be refused on newer platforms. When it cannot be read this returns
+	 * false — meaning "assume built-in", which keeps the #241 handheld fallback working. The
+	 * cost of guessing wrong in that direction is a phone buzzing when it should not; the cost
+	 * of guessing wrong the other way is a handheld that stops rumbling at all. The first is
+	 * the better failure, and it is also the one the user can see and report.
+	 */
+	private static boolean isExternalPad(InputDevice dev) {
+		if (dev == null) return false;
+		try {
+			Object r = InputDevice.class.getMethod("isExternal").invoke(dev);
+			if (r instanceof Boolean) return (Boolean) r;
+		} catch (Throwable ignored) {
+		}
+		return false;
+	}
 
 	/** @return true if [v] is a real, usable vibrator that was driven (or cancelled). */
 	private static boolean rumbleOne(Vibrator v, float intensity, int ms) {
@@ -605,6 +847,9 @@ public class NativeApp {
 	 *  Falls back to the Nth gamepad when no port is claimed yet (tested outside a game). */
 	public static void testRumble(int port) {
 		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(port);
+		// Resolved exactly as in-game rumble resolves it, so the test cannot pass while the
+		// real thing buzzes a different pad.
+		if (devId < 0) devId = com.armsx2.input.PadRouter.INSTANCE.fallbackDeviceIdForPort(port);
 		if (devId < 0) devId = nthGamepadDeviceId(port);
 		// devId may stay -1 (touch-only / Odin built-in with no rumble); vibrateDevice
 		// then falls back to the device's own haptic so the test still buzzes (issue #241).
@@ -617,25 +862,30 @@ public class NativeApp {
 	public static String rumbleStatusForPort(int port) {
 		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(port);
 		boolean mapped = devId >= 0;
+		if (devId < 0) devId = com.armsx2.input.PadRouter.INSTANCE.fallbackDeviceIdForPort(port);
 		if (devId < 0) devId = nthGamepadDeviceId(port);
 		if (devId < 0) return "Player " + (port + 1) + ": no controller found";
 		InputDevice d = InputDevice.getDevice(devId);
 		String name = (d != null && d.getName() != null) ? d.getName() : ("device " + devId);
-		int vmCount = 0;
-		boolean legacy = false;
-		try {
-			Vibrator lv = (d != null) ? d.getVibrator() : null;
-			legacy = lv != null && lv.hasVibrator();
-		} catch (Throwable ignored) {}
-		if (Build.VERSION.SDK_INT >= 31 && d != null) {
-			try { vmCount = d.getVibratorManager().getVibratorIds().length; } catch (Throwable ignored) {}
+		String head = "Player " + (port + 1) + ": " + name + (mapped ? "" : " (not active in-game yet)");
+
+		com.armsx2.input.PadRouter.RumbleMode mode =
+			com.armsx2.input.PadRouter.INSTANCE.rumbleModeForDevice(devId);
+		if (mode == com.armsx2.input.PadRouter.RumbleMode.OFF) return head + ". Rumble turned off for this pad";
+		if (mode == com.armsx2.input.PadRouter.RumbleMode.DEVICE) return head + ". Set to vibrate this device";
+
+		// Reported through the SAME discovery the motors are actually driven from, so the
+		// diagnosis cannot disagree with the behaviour it is describing.
+		if (com.armsx2.input.UsbRumble.INSTANCE.padFor(d) != null) {
+			return head + ". Rumble OK (driven directly over USB, 2 motors)";
 		}
-		boolean hasRumble = vmCount > 0 || legacy;
-		int motors = Math.max(vmCount, legacy ? 1 : 0);
-		return "Player " + (port + 1) + ": " + name
-				+ (mapped ? "" : " (not active in-game yet)")
-				+ (hasRumble ? " — rumble OK (" + motors + " motor" + (motors == 1 ? "" : "s") + ")"
-						: " — NO rumble exposed by Android");
+		int motors = motorsOf(d).size();
+		if (motors > 0) {
+			return head + ". Rumble OK (" + motors + " motor" + (motors == 1 ? "" : "s") + ")";
+		}
+		return head + ". NO rumble exposed by Android"
+			+ (sRumbleFallbackExternal ? " (vibrating this device instead)"
+				: " (turn on \"Vibrate this device instead\" to feel it here)");
 	}
 
 	public static native void setAspectRatio(int type);
@@ -692,6 +942,10 @@ public class NativeApp {
 	 *  instead of OpenGL. The decision needs the driver-bug database (keyed on a parsed driver
 	 *  revision), which lives natively, so the app supplies the strings rather than the verdict. */
 	public static native void setAutoRendererGpuStrings(String vendor, String renderer, String version);
+	/** Whether the driver list offers malisx2 for this device's GPU (CustomDriver.offersMaliSX2).
+	 *  Pushed once at startup. The core pairs it with the driver the open Vulkan device is on and
+	 *  posts the "get malisx2" OSD notice at game start when that driver is not malisx2. */
+	public static native void setMaliSX2Offered(boolean offered);
 	/** Affinity Control Mode: 0 off (scheduler decides), 1-6 EE/VU/GS priority orders,
 	 *  7 Performance Cores. Read when the VM boots — set it before runVMThread. */
 	public static native void setAffinityMode(int mode);
@@ -735,6 +989,11 @@ public class NativeApp {
 	 *  Safe to call with no game running and on any build (the Play build always
 	 *  answers NOT_COMPILED_IN). */
 	public static native int lsfgAvailability(String dllPath);
+
+	/** Tell the native side the file behind the current path was replaced, so the next
+	 *  lsfgAvailability() re-reads it. The import always writes to the same path, so nothing
+	 *  else can notice. */
+	public static native void lsfgDllChanged();
 
 	public static native void flushShaderCache();
 
@@ -800,12 +1059,17 @@ public class NativeApp {
 	// in the savestate folder (see VMManager::SAVESTATE_SLOT_AUTOSAVE) so the
 	// numbered slots 0-9 stay user-controlled. saveAutosaveState is called
 	// from the in-game "Save State And Exit" menu; hasAutosaveState gates
-	// the load picker's autosave tile.
-	public static native boolean saveAutosaveState();
+	// the load picker's autosave tile. That file is the newest autosave: saving moves the ones
+	// before it a place older, keeping `keep` (1-5) in all; the *At(n) calls reach the n-th newest
+	// (1 = the newest, 2 the one before it...) for the picker's tiles, null / false when there is none.
+	public static native boolean saveAutosaveState(int keep);
 	public static native boolean loadAutosaveState();
 	public static native boolean hasAutosaveState();
 	public static native byte[] getAutosaveImage();
 	public static native String getAutosaveGamePath();
+	public static native String getAutosavePathAt(int n);
+	public static native byte[] getAutosaveImageAt(int n);
+	public static native boolean loadAutosaveStateAt(int n);
 	// Frames the GS has presented since it opened (host-side, not saved in the state). The
 	// auto-load-on-boot path waits until this is advancing before restoring, so the load happens
 	// once the renderer is actually presenting — otherwise the restored frame never reaches the
@@ -838,6 +1102,11 @@ public class NativeApp {
 	}
 
 	// Call jni
+	public static String[] findSiblingChds(String uriString) {
+		Context context = getContext();
+		return context != null ? ContentChdFiles.findSiblings(context.getContentResolver(), Uri.parse(uriString)) : new String[0];
+	}
+
 	public static int openContentUri(String uriString) {
 		Context _context = getContext();
 		if(_context != null) {

@@ -52,16 +52,27 @@ fun TextureManagerScreen(onBack: () -> Unit, viewModel: TextureManagerViewModel 
     val state = viewModel.state.value
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(viewModel::importFolder) }
     LaunchedEffect(Unit) { viewModel.refresh() }
+    // Options on the left, packs on the right: the controller keeps to a column and crosses with
+    // Left/Right.
+    com.armsx2.ui.settings.ColumnControllerNav()
+    // The texture screen has its own music while it is open, in the library music's place.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        com.armsx2.LibraryMusic.playTheme(context, com.armsx2.R.raw.texture_packs_music)
+        onDispose { com.armsx2.LibraryMusic.endTheme(context, com.armsx2.R.raw.texture_packs_music) }
+    }
 
     ArmsBackdrop {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             ArmsTopBar(
                 title = str("renderer.section.texturePacks"),
                 subtitle = state.activeSerial ?: str("games.info.perGameSettings.body"),
-                leading = { RoundAction("←", str("action.back"), onBack) },
+                // Reachable by the controller, so Up from the first control comes back to the top of
+                // the screen, which no control above it used to let it scroll to.
+                leading = { RoundAction("←", str("action.back"), onBack, controllerId = "textureMgr.top.back") },
                 actions = {
-                    RoundAction("＋", str("action.import"), { folderPicker.launch(null) })
-                    RoundAction("↻", str("games.card.refresh"), viewModel::refresh)
+                    RoundAction("＋", str("action.import"), { folderPicker.launch(null) }, controllerId = "textureMgr.top.import")
+                    RoundAction("↻", str("games.card.refresh"), viewModel::refresh, controllerId = "textureMgr.top.refresh")
                 },
             )
             BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -70,7 +81,7 @@ fun TextureManagerScreen(onBack: () -> Unit, viewModel: TextureManagerViewModel 
                     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
                         TextureOptions(state, viewModel, Modifier.fillMaxWidth())
                         Spacer(Modifier.padding(top = 10.dp))
-                        TextureOnlineSection(catalogSerial(state), librarySerials(state), Modifier.fillMaxWidth()) {
+                        TextureOnlineSection(catalogSerial(state), librarySerials(state), ownedSerials(state), Modifier.fillMaxWidth()) {
                             viewModel.onPackInstalled()
                         }
                         Spacer(Modifier.padding(top = 10.dp))
@@ -83,7 +94,7 @@ fun TextureManagerScreen(onBack: () -> Unit, viewModel: TextureManagerViewModel 
                     ) {
                         TextureOptions(state, viewModel, Modifier.width(310.dp))
                         Column(Modifier.weight(1f)) {
-                            TextureOnlineSection(catalogSerial(state), librarySerials(state), Modifier.fillMaxWidth()) {
+                            TextureOnlineSection(catalogSerial(state), librarySerials(state), ownedSerials(state), Modifier.fillMaxWidth()) {
                                 viewModel.onPackInstalled()
                             }
                             Spacer(Modifier.padding(top = 10.dp))
@@ -112,40 +123,34 @@ private fun TextureOptions(state: TextureManagerUiState, viewModel: TextureManag
             SettingSwitchRow(
                 str("renderer.loadTexturePacks.label"),
                 str("renderer.loadTexturePacks.description"),
-                state.settings.loadTextureReplacements,
-                onCheckedChange = { value -> viewModel.update { it.copy(loadTextureReplacements = value) } },
+                state.settings.graphics.loadTextureReplacements,
+                onCheckedChange = { value -> viewModel.update { it.copy(graphics = it.graphics.copy(loadTextureReplacements = value)) } },
                 modifier = Modifier.controllerFocusable(
                     "textureMgr.opt.loadReplacements",
                     RoundedCornerShape(22.dp),
-                    onConfirm = { viewModel.update { it.copy(loadTextureReplacements = !state.settings.loadTextureReplacements) } },
-                    onLeft = { viewModel.update { it.copy(loadTextureReplacements = false) } },
-                    onRight = { viewModel.update { it.copy(loadTextureReplacements = true) } },
+                    onConfirm = { viewModel.update { it.copy(graphics = it.graphics.copy(loadTextureReplacements = !state.settings.graphics.loadTextureReplacements)) } },
                 ),
             )
             SettingSwitchRow(
                 str("renderer.asyncTextureLoading.label"),
                 str("renderer.asyncTextureLoading.description"),
-                state.settings.loadTextureReplacementsAsync,
-                onCheckedChange = { value -> viewModel.update { it.copy(loadTextureReplacementsAsync = value) } },
+                state.settings.graphics.loadTextureReplacementsAsync,
+                onCheckedChange = { value -> viewModel.update { it.copy(graphics = it.graphics.copy(loadTextureReplacementsAsync = value)) } },
                 modifier = Modifier.controllerFocusable(
                     "textureMgr.opt.asyncLoading",
                     RoundedCornerShape(22.dp),
-                    onConfirm = { viewModel.update { it.copy(loadTextureReplacementsAsync = !state.settings.loadTextureReplacementsAsync) } },
-                    onLeft = { viewModel.update { it.copy(loadTextureReplacementsAsync = false) } },
-                    onRight = { viewModel.update { it.copy(loadTextureReplacementsAsync = true) } },
+                    onConfirm = { viewModel.update { it.copy(graphics = it.graphics.copy(loadTextureReplacementsAsync = !state.settings.graphics.loadTextureReplacementsAsync)) } },
                 ),
             )
             SettingSwitchRow(
                 str("renderer.precacheTexturePacks.label"),
                 str("renderer.precacheTexturePacks.description"),
-                state.settings.precacheTextureReplacements,
-                onCheckedChange = { value -> viewModel.update { it.copy(precacheTextureReplacements = value) } },
+                state.settings.graphics.precacheTextureReplacements,
+                onCheckedChange = { value -> viewModel.update { it.copy(graphics = it.graphics.copy(precacheTextureReplacements = value)) } },
                 modifier = Modifier.controllerFocusable(
                     "textureMgr.opt.precache",
                     RoundedCornerShape(22.dp),
-                    onConfirm = { viewModel.update { it.copy(precacheTextureReplacements = !state.settings.precacheTextureReplacements) } },
-                    onLeft = { viewModel.update { it.copy(precacheTextureReplacements = false) } },
-                    onRight = { viewModel.update { it.copy(precacheTextureReplacements = true) } },
+                    onConfirm = { viewModel.update { it.copy(graphics = it.graphics.copy(precacheTextureReplacements = !state.settings.graphics.precacheTextureReplacements)) } },
                 ),
             )
         }
@@ -284,4 +289,16 @@ private fun librarySerials(state: TextureManagerUiState): Set<String> =
         addAll(state.librarySerials)
         state.packs.forEach { add(it.serial.uppercase()) }
         state.activeSerial?.let { add(it.uppercase()) }
+    }
+
+/**
+ * Serials of games the player can actually boot: the library scan and the game in context. This is
+ * what picks a multi-region pack's install folder, so unlike [librarySerials] it leaves out the
+ * installed pack folders. With those in, a pack already installed under the wrong region's serial
+ * would count as owned and keep being installed there.
+ */
+private fun ownedSerials(state: TextureManagerUiState): Set<String> =
+    buildSet {
+        addAll(state.librarySerials)
+        catalogSerial(state)?.let { add(it) }
     }

@@ -3,6 +3,7 @@
 
 #define _PC_ // disables MIPS opcode macros.
 
+#include "common/ARCADE.h"
 #include "common/Assertions.h"
 #include "common/ByteSwap.h"
 #include "common/FileSystem.h"
@@ -17,6 +18,9 @@
 #include "IopMem.h"
 #include "Memory.h"
 #include "Patch.h"
+#ifdef ARMSX2_EMBEDDED_RESOURCES
+#include "EmbeddedResources.h"
+#endif
 #include "R5900.h"
 
 #include "IconsFontAwesome.h"
@@ -298,6 +302,31 @@ bool Patch::OpenPatchesZip()
 	zip_source_t* zs = zip_source_file_create(filename.c_str(), 0, 0, &ze);
 	if (zs && !(s_patches_zip = zip_open_from_source(zs, ZIP_RDONLY, &ze)))
 	{
+		// have to clean up source
+		Console.Error("Failed to open %s: %s", filename.c_str(), zip_error_strerror(&ze));
+		zip_source_free(zs);
+		zs = nullptr;
+
+#ifdef ARMSX2_EMBEDDED_RESOURCES
+		// Nothing on disk, so use the copy compiled in. The buffer has to
+		// outlive the archive, hence the static: libzip reads from it lazily.
+		static const std::optional<std::string> s_embedded =
+			EmbeddedResources::Read(std::string(PATCHES_ZIP_NAME).c_str());
+		if (s_embedded.has_value())
+		{
+			zip_source_t* es = zip_source_buffer_create(s_embedded->data(), s_embedded->size(), 0, &ze);
+			if (es && !(s_patches_zip = zip_open_from_source(es, ZIP_RDONLY, &ze)))
+			{
+				Console.Error("Failed to open the built-in %s: %s",
+					std::string(PATCHES_ZIP_NAME).c_str(), zip_error_strerror(&ze));
+				zip_source_free(es);
+			}
+		}
+#endif
+	}
+
+	if (!s_patches_zip)
+	{
 		static bool warning_shown = false;
 		if (!warning_shown)
 		{
@@ -308,9 +337,6 @@ bool Patch::OpenPatchesZip()
 			warning_shown = true;
 		}
 
-		// have to clean up source
-		Console.Error("Failed to open %s: %s", filename.c_str(), zip_error_strerror(&ze));
-		zip_source_free(zs);
 		return false;
 	}
 
@@ -325,6 +351,8 @@ std::string Patch::GetPnachTemplate(const std::string_view serial, u32 crc, bool
 	{
 		if (all_crcs)
 			return fmt::format("{}_*.pnach", serial);
+		else if (include_serial && crc == 0 && Arcade::IsGameId(serial))
+			return fmt::format("{}{}.pnach", serial, add_wildcard ? "*" : ""); // arcade: the gameid alone (PCSX2x6)
 		else if (include_serial)
 			return fmt::format("{}_{:08X}{}.pnach", serial, crc, add_wildcard ? "*" : "");
 	}
@@ -639,6 +667,22 @@ void Patch::ReloadEnabledLists()
 				[](const std::string& it) { return (it == NI_PATCH_NAME); }))
 		{
 			s_enabled_patches.emplace_back(NI_PATCH_NAME);
+		}
+	}
+
+	// An arcade game's labeled patches are on unless disabled: they are what makes a board's game run
+	// here, not optional tweaks (PCSX2x6).
+	if (Arcade::IsActive())
+	{
+		for (const PatchGroup& group : s_game_patches)
+		{
+			if (group.name.empty() || group.name == WS_PATCH_NAME || group.name == NI_PATCH_NAME)
+				continue;
+			if (std::none_of(s_enabled_patches.begin(), s_enabled_patches.end(),
+					[&group](const std::string& it) { return (it == group.name); }))
+			{
+				s_enabled_patches.emplace_back(group.name);
+			}
 		}
 	}
 

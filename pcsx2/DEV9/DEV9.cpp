@@ -28,6 +28,23 @@
 #include "DEV9.h"
 #include "Config.h"
 #include "smap.h"
+#include "IopHw.h"
+#include "IopMem.h"
+#include "ACATA.h"
+#include "ACATAPI.h"
+#include "ACCORE.h"
+#include "ACDEV.h"
+#include "ACJV.h"
+#include "ACRAM.h"
+#include "ACUART.h"
+#include "common/ARCADE.h"
+
+#if defined(__ANDROID__)
+#include "common/FileSystem.h"
+#include "fmt/format.h"
+#include "Host.h"
+#include "ATA/HddCreate.h"
+#endif
 
 #ifdef _WIN32
 #pragma warning(disable : 4244)
@@ -83,6 +100,22 @@ int mapping;
 
 bool isRunning = false;
 
+#if defined(__ANDROID__)
+// Android keeps HDD images where the app's help text (network.hddImage.help) says they are. A bare
+// HddFile name is app-managed: it lives in an "hdd" folder beside the BIOS folder, which is the
+// app's own files folder on the phone's storage and can hold a sparse file where most SD cards
+// cannot, and it is created as an empty 8 GiB image the first time a game boots with the HDD on.
+// A value with a folder in it is the player's own image: opened where it is, and never created.
+//
+// This is how the Refresh builds behaved (#255, #259). It did not come across when the Android app
+// moved onto this tree, so a bare name was looked for in the settings folder, nothing was created,
+// and the HDD switched itself off without a word while the help text still described this.
+static bool HddFileIsBareName(const std::string& file)
+{
+	return !file.empty() && file.find_first_of("/\\") == std::string::npos;
+}
+#endif
+
 std::string GetHDDPath()
 {
 	//GHC uses UTF8 on all platforms
@@ -91,10 +124,92 @@ std::string GetHDDPath()
 	if (hddPath.empty())
 		EmuConfig.DEV9.HddEnable = false;
 
+#if defined(__ANDROID__)
+	if (HddFileIsBareName(hddPath))
+	{
+		// An image already sitting where the core used to look for a bare name keeps working.
+		const std::string settings_path(Path::Combine(EmuFolders::Settings, hddPath));
+		if (FileSystem::FileExists(settings_path.c_str()))
+			return settings_path;
+
+		std::string root(Path::GetDirectory(EmuFolders::Bios));
+		if (root.empty())
+			root = EmuFolders::DataRoot;
+		return Path::Combine(Path::Combine(root, "hdd"), hddPath);
+	}
+
+	// A file manager's "copy path" often drops the leading slash: "storage/XXXX-XXXX/...".
+	if (hddPath.rfind("storage/", 0) == 0)
+		hddPath.insert(hddPath.begin(), '/');
+#endif
+
 	if (!Path::IsAbsolute(hddPath))
 		hddPath = Path::Combine(EmuFolders::Settings, hddPath);
 
 	return hddPath;
+}
+
+#if defined(__ANDROID__)
+// An HDD that fails to attach reaches the game as "no hard disk", with nothing on screen to say
+// why, so the reason goes to the OSD as well as the log.
+static void ReportHddOff(const std::string& reason)
+{
+	const std::string message(fmt::format("Virtual HDD is off: {}", reason));
+	Console.Error("DEV9: %s", message.c_str());
+	Host::AddKeyedOSDMessage("DEV9Hdd", message, Host::OSD_ERROR_DURATION);
+}
+
+static bool EnsureHDDImageExists(const std::string& hddPath)
+{
+	if (FileSystem::FileExists(hddPath.c_str()))
+		return true;
+
+	if (!HddFileIsBareName(EmuConfig.DEV9.HddFile))
+	{
+		ReportHddOff(fmt::format("no image at {}. A path with folders must point at an image that already exists.", hddPath));
+		return false;
+	}
+
+	const std::string directory(Path::GetDirectory(hddPath));
+	if (!directory.empty() && !FileSystem::CreateDirectoryPath(directory.c_str(), true))
+	{
+		ReportHddOff(fmt::format("could not create the folder {}.", directory));
+		return false;
+	}
+
+	static constexpr u64 NEW_IMAGE_BYTES = static_cast<u64>(8) * 1024 * 1024 * 1024;
+	Console.WriteLn("DEV9: Creating HDD image '%s' (8 GiB, sparse)", hddPath.c_str());
+	HddCreate creator;
+	creator.filePath = hddPath;
+	creator.neededSize = NEW_IMAGE_BYTES;
+	creator.Start();
+	if (creator.errored || !FileSystem::FileExists(hddPath.c_str()))
+	{
+		ReportHddOff(fmt::format("could not create {}.", hddPath));
+		return false;
+	}
+
+	return true;
+}
+#endif
+
+// Opens the configured image for the ATA device. False means the HDD stays off.
+static bool OpenHddImage(const std::string& hddPath)
+{
+#if defined(__ANDROID__)
+	if (!EnsureHDDImageExists(hddPath))
+		return false;
+
+	if (dev9.ata->Open(hddPath) != 0)
+	{
+		ReportHddOff(fmt::format("could not open {}. The app may not have access to that folder.", hddPath));
+		return false;
+	}
+
+	return true;
+#else
+	return dev9.ata->Open(hddPath) == 0;
+#endif
 }
 
 s32 DEV9init()
@@ -193,7 +308,7 @@ s32 DEV9open()
 
 	if (EmuConfig.DEV9.HddEnable)
 	{
-		if (dev9.ata->Open(hddPath) != 0)
+		if (!OpenHddImage(hddPath))
 			EmuConfig.DEV9.HddEnable = false;
 	}
 
@@ -223,6 +338,9 @@ int DEV9irqHandler(void)
 	//dev9Ru16(SPD_R_INTR_STAT)|= dev9.irqcause;
 	//DevCon.WriteLn("DEV9: DEV9irqHandler %x, %x", dev9.irqcause, dev9.irqmask);
 	if (dev9.irqcause & dev9.irqmask)
+		return 1;
+	// An arcade board's ATA/ATAPI interrupts go through ACCORE (PCSX2x6).
+	if (Arcade::IsActive() && ACCORE::hasPendingInterrupt())
 		return 1;
 	return 0;
 }
@@ -947,6 +1065,16 @@ u16 DEV9read16(u32 addr)
 
 u32 DEV9read32(u32 addr)
 {
+	if (Arcade::IsActive())
+	{
+		// rom0:ACDEV makes ROMDRV look for a romdir filesystem here; only the arcade TOOLs had one (PCSX2x6).
+		if (addr >= ACDEV_BASE && addr < ACDEV_ROMDIR_POKE_END)
+			return 0;
+		const u32 hard = dev9Ru32(addr);
+		Console.Error("DEV9: Unknown 32bit read at address %lx value %x", addr, hard);
+		return hard;
+	}
+
 	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
 		return 0;
 
@@ -1033,7 +1161,10 @@ void DEV9write16(u32 addr, u16 value)
 	}
 
 	dev9Ru16(addr) = value;
-	Console.Error("DEV9: *Unknown 16bit write at address %lx value %x", addr, value);
+	// An arcade board's ACFLASH module probes its flash chips here (Intel 28F640J5: 0x00ff, 0x0090, 0x0090,
+	// 0x00ff; Fujitsu 29F033C: 0xaaaa, 0x5555, 0x9090, 0xf0f0); that is expected (PCSX2x6).
+	if (!Arcade::IsActive() || addr != 0x10000000)
+		Console.Error("DEV9: *Unknown 16bit write at address %lx value %x", addr, value);
 	return;
 }
 
@@ -1073,12 +1204,53 @@ void DEV9write32(u32 addr, u32 value)
 	}
 }
 
+// An arcade board's DMA8 serves its ATA/ATAPI drive and ACRAM (PCSX2x6). size is in bytes here, as
+// psxDma8 passes it.
+static void ArcadeReadDMA8Mem(u32* pMem, int size)
+{
+	// Instant ATAPI DMA: the data was read into a buffer during the ATAPI command.
+	if (ACATAPI::dma_read(pMem, size))
+	{
+		psxDMA8Interrupt();
+	}
+	else if (ACCORE::DMA::PendTrasnfType == ACCORE::DMA::ATAPI || ACCORE::DMA::PendTrasnfType == ACCORE::DMA::ATA)
+	{
+		// ARMSX2: never past the end of IOP memory, whatever the DMA was set up with. And a read the
+		// image cannot supply ends as the drive's uncorrectable-data error, which the game handles as a
+		// drive error, instead of stopping the emulator.
+		const std::ptrdiff_t offset = reinterpret_cast<u8*>(pMem) - iopMem->Main;
+		if (offset >= 0 && offset < static_cast<std::ptrdiff_t>(Ps2MemSize::ExposedIopRam))
+			size = std::min<int>(size, static_cast<int>(Ps2MemSize::ExposedIopRam - offset));
+		const bool ok = ACATA::TH::IO_Read(pMem, static_cast<u32>(std::max(size, 0)));
+		ACCORE::DMA::PendTrasnfType = ACCORE::DMA::NONE;
+		ACATA::R_STATUS = ok ? ATA_STAT_READY : (ATA_STAT_READY | ATA_STAT_ERR);
+		if (!ok)
+			ACATA::R_ERROR = ATA_ERR_ECC;
+		ACATA::R_NSECTOR = 0x03;
+		psxDMA8Interrupt();
+		ACCORE::intr(ACCORE::INTRN_ATA);
+	}
+	else
+	{
+		const u32 dma_target = psxHu32(0x1410); // a DMA that targets ACRAM (0x14xxxxxx)
+		if ((dma_target & 0xFF000000) == 0x14000000)
+			ACRAM::DmaRead(pMem, size, ACRAM::BankFromDmaTarget(dma_target));
+		else
+			Console.Error("DEV9: arcade DMA read of 0x%-8X bytes with no transfer pending (%d)", size, ACCORE::DMA::PendTrasnfType);
+		psxDMA8Interrupt();
+	}
+}
+
 void DEV9readDMA8Mem(u32* pMem, int size)
 {
+	if (Arcade::IsActive())
+	{
+		ArcadeReadDMA8Mem(pMem, size);
+		return;
+	}
+
 	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
 		return;
-
-	size >>= 1;
 
 	DevCon.WriteLn("DEV9: *DEV9readDMA8Mem: size %x", size);
 
@@ -1105,10 +1277,30 @@ void DEV9readDMA8Mem(u32* pMem, int size)
 
 void DEV9writeDMA8Mem(u32* pMem, int size)
 {
+	if (Arcade::IsActive())
+	{
+		// An arcade board's ATA writes and ACRAM fills (PCSX2x6); anything else falls through to the
+		// console's DEV9 below, as PCSX2x6 does.
+		if (ACCORE::DMA::PendTrasnfType == ACCORE::DMA::ATA_WRITE)
+		{
+			ACATA::TH::IO_Write(pMem, size);
+			ACCORE::DMA::PendTrasnfType = ACCORE::DMA::NONE;
+			ACATA::R_STATUS = ATA_STAT_READY;
+			psxDMA8Interrupt();
+			ACCORE::intr(ACCORE::INTRN_ATA);
+			return;
+		}
+		const u32 dma_target = psxHu32(0x1410);
+		if ((dma_target & 0xFF000000) == 0x14000000)
+		{
+			ACRAM::DmaWrite(pMem, size, ACRAM::BankFromDmaTarget(dma_target));
+			psxDMA8Interrupt();
+			return;
+		}
+	}
+
 	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
 		return;
-
-	size >>= 1;
 
 	DevCon.WriteLn("DEV9: *DEV9writeDMA8Mem: size %x", size);
 
@@ -1133,6 +1325,15 @@ void DEV9writeDMA8Mem(u32* pMem, int size)
 
 void DEV9async(u32 cycles)
 {
+	if (Arcade::IsActive())
+	{
+		// An arcade board's drive-board UART and its JVS I/O frame tick here instead (PCSX2x6).
+		if (ACUART::s_device)
+			ACUART::s_device->Tick(cycles);
+		ACJV::UpdateFcaFrame();
+		return;
+	}
+
 	smap_async(cycles);
 	dev9.ata->Async(cycles);
 }
@@ -1159,11 +1360,11 @@ void DEV9CheckChanges(const Pcsx2Config& old_config)
 			if (EmuConfig.DEV9.HddFile != old_config.DEV9.HddFile)
 			{
 				dev9.ata->Close();
-				if (dev9.ata->Open(hddPath) != 0)
+				if (!OpenHddImage(hddPath))
 					EmuConfig.DEV9.HddEnable = false;
 			}
 		}
-		else if (dev9.ata->Open(hddPath) != 0)
+		else if (!OpenHddImage(hddPath))
 			EmuConfig.DEV9.HddEnable = false;
 	}
 	else if (old_config.DEV9.HddEnable)

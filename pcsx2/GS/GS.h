@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "common/WindowInfo.h"
 #include "SaveState.h"
 #include "pcsx2/Config.h"
@@ -57,6 +59,14 @@ s16 GSLookupGetSkipCountFunctionId(const std::string_view name);
 s16 GSLookupBeforeDrawFunctionId(const std::string_view name);
 s16 GSLookupMoveHandlerFunctionId(const std::string_view name);
 
+/// Deletes every GS shader and pipeline cache file. While the GS thread runs the work is posted
+/// there, where the open caches can be emptied and nothing is written back afterwards, so call it
+/// from the CPU thread. `done` receives the number of files removed or emptied, on the thread that
+/// did the work.
+void GSClearShaderCache(std::function<void(u32)> done = {});
+/// The same, for a caller already on the GS thread (the fullscreen UI), or when no GS thread runs.
+u32 GSClearShaderCacheOnGSThread();
+
 bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* basemem,
 	GSVSyncMode vsync_mode, bool allow_present_throttle);
 bool GSreopen(bool recreate_device, bool recreate_renderer, GSRendererType new_renderer,
@@ -94,7 +104,6 @@ void GSSetPresentCapSuspended(bool suspended);
 bool GSGetPresentCapSuspended();
 int GSfreeze(FreezeAction mode, freezeData* data);
 std::string GSGetBaseSnapshotFilename();
-std::string GSGetBaseVideoFilename();
 // False if there is no renderer, or a snapshot is already queued and this request was dropped.
 bool GSQueueSnapshot(const std::string& path, u32 gsdump_frames = 0);
 // True while a dump is open and taking frames. Queueing a snapshot over one of these does not
@@ -104,13 +113,13 @@ bool GSIsDumpRecording();
 // Not the same question as the BackThreadMode setting, which downgrades to lockstep when the
 // split is unsupported, so this is the only way to tell whether the mode really engaged.
 bool GSHasFrontParser();
+// Waits until the GS back thread has executed every queued record. MTGS thread only. No-op with
+// GS multi-threading off.
 void GSDrainBackQueue();
 void GSStopGSDump();
-bool GSBeginCapture(std::string filename);
-void GSEndCapture();
 void GSPresentCurrentFrame();
 void GSThrottlePresentation();
-void GSGameChanged();
+void GSGameChanged(const std::string& serial, u32 crc);
 void GSSetDisplayAlignment(GSDisplayAlignment alignment);
 void GSSetPortraitRenderTopAlign(bool enabled);
 /// Pixels kept clear at the top of a portrait window (display cutout / camera).
@@ -124,6 +133,14 @@ void GSSetVSyncMode(GSVSyncMode mode, bool allow_present_throttle);
 
 GSRendererType GSGetCurrentRenderer();
 bool GSIsHardwareRenderer();
+
+/// Whether this renderer's GetOutput() reads the framebuffer at the display's own offset,
+/// block-aligning as it goes, rather than reading the whole buffer and leaving the offset
+/// for the presenter. Today this is exactly "is the software renderer", but it is a property
+/// of the output path rather than of the renderer kind, and it is resolved per renderer
+/// instance so it stays that way. Ask this — never GSIsHardwareRenderer() — when the
+/// question is about presentation geometry.
+bool GSPresenterOffsetsFramebufferRead();
 std::string GetDefaultAdapter();
 bool GSWantsExclusiveFullscreen();
 std::optional<float> GSGetHostRefreshRate();
@@ -138,6 +155,8 @@ void GSgetTitleStats(std::string& info);
 /// Converts window position to normalized display coordinates (0..1). A value less than 0 or greater than 1 is
 /// returned if the position lies outside the display area.
 void GSTranslateWindowToDisplayCoordinates(float window_x, float window_y, float* display_x, float* display_y);
+void GSTranslateWindowToDisplayCoordinatesUnclamped(float window_x, float window_y, float* display_x, float* display_y);
+void GSTranslateDisplayToWindowCoordinates(float display_x, float display_y, float* window_x, float* window_y);
 
 void GSUpdateConfig(const Pcsx2Config::GSOptions& new_config);
 void GSSetSoftwareRendering(bool software_renderer, GSInterlaceMode new_interlace);
@@ -163,9 +182,6 @@ namespace Host
 	/// Alters fullscreen state of hosting application.
 	void SetFullscreen(bool enabled);
 
-	/// Called when video capture starts or stops. Called on the MTGS thread.
-	void OnCaptureStarted(const std::string& filename);
-	void OnCaptureStopped();
 }
 
 extern Pcsx2Config::GSOptions GSConfig;

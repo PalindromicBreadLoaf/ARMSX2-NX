@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#include "arm64/FPU-divunit-arm64.h"
+
 #include "Common.h"
 #include "Config.h"
+#include "EeFpuModel.h"
 
 #include "common/FPControl.h"
 
@@ -622,24 +625,19 @@ static __fi u32 eeDivideCap(u32 mb, u32 lt)
 	the carry word, which the selector then sees -- that is one of the places
 	the estimate and the state come apart. The value returned is 25 bits when
 	sma >= smb and 24 bits when it is not; the caller normalises, and the digit
-	that falls off the bottom there is simply dropped. */
-static u32 eeDivideSignificand(u32 sma, u32 smb)
-{
-	{
-		const u32 lt = (sma < smb) ? 1u : 0u;
-		const u64 num = (u64)sma << (23 + lt);
-		const u32 T = (u32)(num / smb);
-		const u32 rem = (u32)(num - (u64)T * smb);
-		if ((smb - rem) > eeDivideCap(smb, lt))
-		{
-			// Only the 24 bits the caller keeps are the answer. On A>=B the
-			// recurrence's own last digit is as often 1 as 0 and is dropped
-			// there, so this arm supplies a 0 for it rather than reproducing
-			// it -- do not compare the two below that bit.
-			return lt ? T : (T << 1);
-		}
-	}
+	that falls off the bottom there is simply dropped.
 
+	This is the portable form and the reference: eeDivideSignificandArm64()
+	in arm64/FPU-divunit-arm64.cpp is the same recurrence written for the
+	pipes it runs on, and EeFpuDivUnitArm64Form holds the two to each other.
+
+	eeDivideSignificandImpl(), which runs either, carries the model's calling
+	convention so that the frame saving the registers the loop uses is the
+	loop's own: eeDivide reaches it under that convention too, and a plain
+	call from there would make eeDivide save every register the convention
+	preserves, the vector file included, on the loop's behalf. */
+static u32 eeDivideSignificandPortable(u32 sma, u32 smb)
+{
 	const u32 divisor = smb << 2;
 	const u32 ndivisor = ~divisor;
 	EeSrtRemainder rem = {sma << 2, 0};
@@ -660,7 +658,36 @@ static u32 eeDivideSignificand(u32 sma, u32 smb)
 	return (quotient << 1) + eeSrtDigitValue(digit);
 }
 
-u32 eeDivide(u32 a, u32 b)
+template <bool kArm64>
+static EEFPU_MODEL_CALL u32 eeDivideSignificandImpl(u32 sma, u32 smb)
+{
+	const u32 lt = (sma < smb) ? 1u : 0u;
+	// floor(2^24 ma / mb): the truncated quotient on A<B, one bit more on
+	// A>=B, and its bits are the quotient bits the arm64 form walks.
+	const u64 T2 = ((u64)sma << 24) / smb;
+	const u32 T = lt ? (u32)T2 : (u32)(T2 >> 1);
+	const u32 rem = (u32)(((u64)sma << (23 + lt)) - (u64)T * smb);
+	if ((smb - rem) > eeDivideCap(smb, lt))
+	{
+		// Only the 24 bits the caller keeps are the answer. On A>=B the
+		// recurrence's own last digit is as often 1 as 0 and is dropped
+		// there, so this arm supplies a 0 for it rather than reproducing
+		// it -- do not compare the two below that bit.
+		return lt ? T : (T << 1);
+	}
+#if EE_DIVUNIT_ARM64
+	if constexpr (kArm64)
+		return eeDivideSignificandArm64(sma, smb, T2, T);
+#endif
+	return eeDivideSignificandPortable(sma, smb);
+}
+
+static __fi u32 eeDivideSignificand(u32 sma, u32 smb)
+{
+	return eeDivideSignificandImpl<EE_DIVUNIT_ARM64 != 0>(sma, smb);
+}
+
+EEFPU_MODEL_CALL u32 eeDivide(u32 a, u32 b)
 {
 	const s32 ea = (s32)((a >> 23) & 0xFF);
 	const s32 eb = (s32)((b >> 23) & 0xFF);
@@ -756,7 +783,7 @@ static u32 eeSqrtSignificand(u32 m)
 	return (root >> 2) & 0xFFFFFFu;
 }
 
-u32 eeSqrtBits(u32 t)
+EEFPU_MODEL_CALL u32 eeSqrtBits(u32 t)
 {
 	const u32 E = (t >> 23) & 0xFFu;
 	if (E == 0)
@@ -1013,7 +1040,7 @@ static u64 eeMulArray(u32 a, u32 b)
 	return full - (((lo + hi) ^ full) & 0x8000);
 }
 
-bool eeMulOneUlpLow(u32 fs, u32 ft)
+EEFPU_MODEL_CALL bool eeMulOneUlpLow(u32 fs, u32 ft)
 {
 	if ((fs & 0x7F800000) == 0 || (ft & 0x7F800000) == 0)
 		return false; // a zero operand (denormals are zero): the product is zero
@@ -1257,3 +1284,102 @@ void SWC1() {
 }
 
 } } }
+
+// The same unit, addressed by bits instead of by FCR31.
+namespace EeFpuModel
+{
+namespace COP1 = R5900::Interpreter::OpcodeImpl::COP1;
+
+// O and U as raiseOrClearOU() reads them for FCR31: O after the rounding, so a
+// value past 0x7FFFFFFF that chops back onto it does not raise it, and U off
+// the exact value, the only place a flushed result is still distinguishable
+// from a zero.
+static Result MakeResult(double exact, u32 bits)
+{
+	Result s;
+	s.bits = bits;
+	s.overflow = eeRoundsOutOfRange(exact);
+	s.underflow = !s.overflow && exact != 0.0 && std::fabs(exact) < kEeMinNormal;
+	return s;
+}
+
+EEFPU_MODEL_CALL Result AddSub(u32 a, u32 b, bool issub)
+{
+	const double sum = COP1::eeGuardedSum(a, b, issub);
+	return MakeResult(sum, COP1::eeRoundToSingle(sum, true));
+}
+
+EEFPU_MODEL_CALL Result Mul(u32 fs, u32 ft)
+{
+	const double product = eeToDouble(fs) * eeToDouble(ft);
+	return MakeResult(product, COP1::eeMulRound(fs, ft, product));
+}
+
+Accumulate MulAccumulate(u32 acc, u32 fs, u32 ft, bool issub)
+{
+	const Result product = Mul(fs, ft);
+	if (product.overflow)
+	{
+		Result result = product;
+		result.bits ^= issub ? 0x80000000u : 0u;
+		return {product, result};
+	}
+	return {product, AddSub(acc, product.bits, issub)};
+}
+
+EEFPU_MODEL_CALL u32 Divide(u32 a, u32 b)
+{
+	return COP1::eeDivide(a, b);
+}
+
+EEFPU_MODEL_CALL u32 SqrtBits(u32 t)
+{
+	return COP1::eeSqrtBits(t);
+}
+
+EEFPU_MODEL_CALL u32 RecipSqrt(u32 a, u32 t)
+{
+	return COP1::eeDivide(a, COP1::eeSqrtBits(t));
+}
+
+#ifdef PCSX2_RECOMPILER_TESTS
+namespace Internal
+{
+u32 DivideSignificand(u32 ma, u32 mb)
+{
+	return COP1::eeDivideSignificand(ma, mb);
+}
+
+u32 DivideSignificandPortable(u32 ma, u32 mb)
+{
+	return COP1::eeDivideSignificandImpl<false>(ma, mb);
+}
+} // namespace Internal
+#endif
+
+namespace Slot
+{
+EEFPU_MODEL_CALL u64 Divide(u64 fs, u64 ft)
+{
+	return eeFprWidenBits(COP1::eeDivide(eeFprNarrowBits(fs), eeFprNarrowBits(ft)));
+}
+
+EEFPU_MODEL_CALL u64 Sqrt(u64 ft)
+{
+	return eeFprWidenBits(COP1::eeSqrtBits(eeFprNarrowBits(ft)));
+}
+
+EEFPU_MODEL_CALL u64 RecipSqrt(u64 fs, u64 ft)
+{
+	return eeFprWidenBits(EeFpuModel::RecipSqrt(eeFprNarrowBits(fs), eeFprNarrowBits(ft)));
+}
+
+// 1 << 29 is one EE ULP in this form.
+EEFPU_MODEL_CALL u64 MulDeficit(u64 fs, u64 ft, u64 product)
+{
+	if (!COP1::eeMulOneUlpLow(eeFprNarrowBits(fs), eeFprNarrowBits(ft)))
+		return product;
+	return product - (UINT64_C(1) << 29);
+}
+} // namespace Slot
+} // namespace EeFpuModel

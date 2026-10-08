@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.h"
+#include "GS/Renderers/SW/GSBlockWalk.h"
+#include "GS/Renderers/SW/GSCoordinateWalk.h"
 #include "GS/Renderers/SW/GSDrawScanline.h"
 #include "GS/Renderers/SW/GSVertexSW.h"
 #include "GS/GSState.h"
@@ -11,8 +13,13 @@
 
 #include <cstdint>
 
-// On iOS dual-map JIT, write through the RW alias (rx + g_code_rw_offset).
-// Identity no-op elsewhere. Mirrors armGetWritableCodePtr in pcsx2/arm64/AsmHelpers.cpp.
+// On iOS dual-map JIT, write through the RW alias (rx + g_code_rw_offset);
+// identity elsewhere. Mirrors armGetWritableCodePtr in pcsx2/arm64/AsmHelpers.cpp.
+// TargetConditionals.h defines TARGET_OS_IPHONE; without it the gate below is
+// false on iOS and the RW alias is never used.
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #include "common/Darwin/DarwinMisc.h"
 static void* gsGetWritableCodePtr(void* rx_ptr)
@@ -58,9 +65,18 @@ static const auto& _global_dimx = x19;
 static const auto& _local_aref = w20;
 static const auto& _global_frb = w21;
 static const auto& _global_fga = w22;
-static const auto& _global_l = w23;
-static const auto& _global_k = w24;
+// The level-of-detail table's per-draw scalars and base (GSLevelOfDetail.h):
+// 4 + TEX1.L, TEX1.K in sixteenths, and the integer ceiling. x28 is saved by
+// the prologue and otherwise unused.
+static const auto& _global_lodshift = w23;
+static const auto& _global_lodk = w24;
 static const auto& _global_mxl = w25;
+static const auto& _global_lodtab = x28;
+
+// The alternating block step's cursor. Callee-saved on purpose: x5-x9 all
+// carry live values inside the loop body.
+static const auto& _block_ptr = x26;
+static const auto& _block_hop = x27;
 
 static const auto& _vscratch = v31;
 static const auto& _vscratch2 = v30;
@@ -82,7 +98,6 @@ static const auto& _global_tmin = v15;
 static const auto& _global_tmax = v14;
 static const auto& _global_tmask = v13;
 static const auto& _const_movemskw_mask = v12;
-static const auto& _const_log2_coef = v11;
 static const auto& _temp_f = v10;
 static const auto& _d4_f = v9;
 
@@ -103,6 +118,8 @@ GSDrawScanlineCodeGenerator::GSDrawScanlineCodeGenerator(u64 key, void* code, si
 	// hopefully no constants which need to be moved to register first..
 	m_emitter.GetScratchRegisterList()->Remove(_xscratch.GetCode());
 	m_emitter.GetScratchRegisterList()->Remove(_xscratch2.GetCode());
+
+	m_block_split = GSBlockWalkIsSplit(4);
 }
 
 void GSDrawScanlineCodeGenerator::Generate()
@@ -120,7 +137,7 @@ void GSDrawScanlineCodeGenerator::Generate()
 		return;
 	}
 
-	armAsm->Sub(sp, sp, 128);
+	armAsm->Sub(sp, sp, 144);
 	armAsm->Stp(x19, x20, MemOperand(sp, 0));
 	armAsm->Stp(x21, x22, MemOperand(sp, 16));
 	armAsm->Stp(x23, x24, MemOperand(sp, 32));
@@ -129,6 +146,7 @@ void GSDrawScanlineCodeGenerator::Generate()
 	armAsm->Stp(d10, d11, MemOperand(sp, 80));
 	armAsm->Stp(d12, d13, MemOperand(sp, 96));
 	armAsm->Stp(d14, d15, MemOperand(sp, 112));
+	armAsm->Stp(x27, x28, MemOperand(sp, 128));
 
 	armAsm->Ldr(_globals, _local(gd));
 	armAsm->Ldr(_vm, _global(vm));
@@ -187,6 +205,7 @@ void GSDrawScanlineCodeGenerator::Generate()
 
 	armAsm->Bind(&exit);
 
+	armAsm->Ldp(x27, x28, MemOperand(sp, 128));
 	armAsm->Ldp(d14, d15, MemOperand(sp, 112));
 	armAsm->Ldp(d12, d13, MemOperand(sp, 96));
 	armAsm->Ldp(d10, d11, MemOperand(sp, 80));
@@ -195,7 +214,7 @@ void GSDrawScanlineCodeGenerator::Generate()
 	armAsm->Ldp(x23, x24, MemOperand(sp, 32));
 	armAsm->Ldp(x21, x22, MemOperand(sp, 16));
 	armAsm->Ldp(x19, x20, MemOperand(sp, 0));
-	armAsm->Add(sp, sp, 128);
+	armAsm->Add(sp, sp, 144);
 
 	armAsm->Ret();
 
@@ -206,6 +225,12 @@ void GSDrawScanlineCodeGenerator::Generate()
 
 void GSDrawScanlineCodeGenerator::Init()
 {
+	// Where this span starts inside its eight-pixel block indexes the colour and
+	// fog lane tables, and on a four-lane host decides which of the two alternating
+	// steps the walk begins on. Read off the true left edge, before vector
+	// alignment rounds it down. See GSColourWalk.h.
+	armAsm->And(w9, _left, 7);
+
 	if (!m_sel.notest)
 	{
 		// int skip = left & 3;
@@ -255,10 +280,26 @@ void GSDrawScanlineCodeGenerator::Init()
 	armAsm->Lsl(w8, w6, 1); // *2
 	armAsm->Add(x8, _scratchaddr, x8);
 
-	if ((m_sel.prim != GS_SPRITE_CLASS && ((m_sel.fwrite && m_sel.fge) || m_sel.zb)) || (m_sel.fb && (m_sel.edge || m_sel.tfx != TFX_NONE || m_sel.iip)))
-	{
-		// w1 = &m_local.d[skip]
+	// x26 = &m_local.d[left & 7]. The colour and fog inits below read their lane
+	// offsets from there; at the end of Init it moves to &m_local.dw[left & 7][0],
+	// where Step walks the alternating pair. x27 is the signed hop to the other
+	// phase, so stepping is one add and one negate with no alignment assumption.
+	//
+	// The shift is the row stride of both tables, hard-coded. A fifth GSVector4i in
+	// skip or blockstep, or a third phase, would silently index the wrong row.
+	static_assert(sizeof(GSScanlineLocalData::skip) == 128);
+	static_assert(sizeof(GSScanlineLocalData::blockstep) == 64);
+	static_assert(sizeof(GSScanlineLocalData::dw[0]) == 128);
+	static_assert(offsetof(GSScanlineLocalData, d) == 0);
+	armAsm->Add(_block_ptr, _locals, Operand(x9, LSL, 7));
 
+	if (m_block_split)
+		armAsm->Mov(_block_hop, sizeof(GSScanlineLocalData::blockstep));
+
+	// w1 = &m_local.d[skip], for the lanes indexed by the span's position inside
+	// the vector: depth and the texture coordinate. Colour and fog use _block_ptr.
+	if ((m_sel.prim != GS_SPRITE_CLASS && m_sel.zb) || (m_sel.fb && m_sel.tfx != TFX_NONE))
+	{
 		armAsm->Lsl(w1, w1, 3); // *8
 		armAsm->Add(x1, x1, _locals);
 		static_assert(offsetof(GSScanlineLocalData, d) == 0);
@@ -272,10 +313,11 @@ void GSDrawScanlineCodeGenerator::Init()
 
 			if (m_sel.fwrite && m_sel.fge)
 			{
-				// f = GSVector4i(v.t).zzzzh().zzzz().add16(m_local.d[skip].f);
+				// f = GSVector4i(v.t).zzzzh().zzzz().add16(m_local.d[left & 7].f);
 				armAsm->Ldr(_temp_f.S(), MemOperand(_v, offsetof(GSVertexSW, t.w)));
-				armAsm->Ldr(_vscratch, MemOperand(x1, offsetof(GSScanlineLocalData::skip, f)));
-				armAsm->Ldr(_d4_f, _local(d4.f));
+				armAsm->Ldr(_vscratch, MemOperand(_block_ptr, offsetof(GSScanlineLocalData::skip, f)));
+				if (!m_block_split)
+					armAsm->Ldr(_d4_f, _local(d4.f));
 
 				armAsm->Fcvtzs(_temp_f.S(), _temp_f.S());
 				armAsm->Dup(_temp_f.V8H(), _temp_f.V8H(), 0);
@@ -342,9 +384,21 @@ void GSDrawScanlineCodeGenerator::Init()
 		{
 			if (m_sel.fst)
 			{
-				// GSVector4i vti(vt);
+				// GSVector4i vti = GSVector4i(vt.floor()) & GS_UV_GRID_MASK;
+				//
+				// A span that walks the accumulator seeds on its 12.15 grid, floored below
+				// the exact plane (GSCoordinateWalk.h). FCVTMS is the floor; the BIC is the
+				// grid. A triangle's own ST plane keeps the truncating conversion.
 
-				armAsm->Fcvtzs(v6.V4S(), v4.V4S());
+				if (m_sel.uvwalk)
+				{
+					armAsm->Fcvtms(v6.V4S(), v4.V4S());
+					armAsm->Bic(v6.V4S(), (1 << GS_UV_GRID_SHIFT) - 1, 0);
+				}
+				else
+				{
+					armAsm->Fcvtzs(v6.V4S(), v4.V4S());
+				}
 
 				// s = vti.xxxx() + m_local.d[skip].s;
 				// t = vti.yyyy(); if (!sprite) t += m_local.d[skip].t;
@@ -364,7 +418,22 @@ void GSDrawScanlineCodeGenerator::Init()
 				{
 					if (m_sel.ltf)
 					{
-						armAsm->Trn1(_temp_vf.V8H(), _temp_t.V8H(), _temp_t.V8H());
+						// vf = GSTruncateCoordinate(v).xxzzlh().srl16(12);
+						//
+						// The sixteenth index truncates toward zero, so a negative coordinate takes
+						// a sixteenth less one first. A sprite's V never steps, so the weight is
+						// taken once here while the loop re-forms the index from t; both must read
+						// the same sixteenth, so the bias goes to the weight's register and t keeps
+						// the raw coordinate.
+						armAsm->Sshr(_temp_vf.V4S(), _temp_t.V4S(), 31);
+						armAsm->Ushr(_temp_vf.V4S(), _temp_vf.V4S(), 20);
+						armAsm->Add(_temp_vf.V4S(), _temp_t.V4S(), _temp_vf.V4S());
+
+						// The weight and the index have to read the same 12.4 field,
+						// and the loop saturates the index it re-forms from t.
+						SaturateCoordinate(_temp_vf, _vscratch);
+
+						armAsm->Trn1(_temp_vf.V8H(), _temp_vf.V8H(), _temp_vf.V8H());
 						armAsm->Ushr(_temp_vf.V8H(), _temp_vf.V8H(), 12);
 					}
 				}
@@ -383,9 +452,20 @@ void GSDrawScanlineCodeGenerator::Init()
 				armAsm->Dup(v3.V4S(), v4.V4S(), 1);
 				armAsm->Dup(v4.V4S(), v4.V4S(), 2);
 
-				armAsm->Fadd(_temp_s.V4S(), v2.V4S(), _temp_s.V4S());
-				armAsm->Fadd(_temp_t.V4S(), v3.V4S(), _temp_t.V4S());
-				armAsm->Fadd(_temp_q.V4S(), v4.V4S(), _temp_q.V4S());
+				if (m_sel.stqplane)
+				{
+					// Integer accumulators in units of g/2^14 (GSPerspectivePlane.h); the
+					// seed and the lane offsets are integers in the same lanes.
+					armAsm->Add(_temp_s.V4S(), v2.V4S(), _temp_s.V4S());
+					armAsm->Add(_temp_t.V4S(), v3.V4S(), _temp_t.V4S());
+					armAsm->Add(_temp_q.V4S(), v4.V4S(), _temp_q.V4S());
+				}
+				else
+				{
+					armAsm->Fadd(_temp_s.V4S(), v2.V4S(), _temp_s.V4S());
+					armAsm->Fadd(_temp_t.V4S(), v3.V4S(), _temp_t.V4S());
+					armAsm->Fadd(_temp_q.V4S(), v4.V4S(), _temp_q.V4S());
+				}
 			}
 
 			armAsm->Ldr(_d4_stq, _local(d4.stq));
@@ -409,8 +489,8 @@ void GSDrawScanlineCodeGenerator::Init()
 				// GSVector4i vc = GSVector4i(v.c);
 
 				armAsm->Ldr(v6, MemOperand(_v, offsetof(GSVertexSW, c)));
-				armAsm->Ldr(v1, MemOperand(x1, offsetof(GSScanlineLocalData::skip, rb)));
-				armAsm->Ldr(_vscratch, MemOperand(x1, offsetof(GSScanlineLocalData::skip, ga)));
+				armAsm->Ldr(v1, MemOperand(_block_ptr, offsetof(GSScanlineLocalData::skip, rb)));
+				armAsm->Ldr(_vscratch, MemOperand(_block_ptr, offsetof(GSScanlineLocalData::skip, ga)));
 				armAsm->Fcvtzs(v6.V4S(), v6.V4S());
 
 				// vc = vc.upl16(vc.zwxy());
@@ -427,7 +507,8 @@ void GSDrawScanlineCodeGenerator::Init()
 				armAsm->Add(_temp_rb.V8H(), _temp_rb.V8H(), v1.V8H());
 				armAsm->Add(_temp_ga.V8H(), _temp_ga.V8H(), _vscratch.V8H());
 
-				armAsm->Ldr(_d4_c, _local(d4.c));
+				if (!m_block_split)
+					armAsm->Ldr(_d4_c, _local(d4.c));
 			}
 			else
 			{
@@ -453,14 +534,21 @@ void GSDrawScanlineCodeGenerator::Init()
 
 	if (m_sel.mmin && !m_sel.lcm)
 	{
-		armAsm->Ldr(_const_log2_coef, _global(const_log2_coef));
-		armAsm->Ldr(_global_l, _global(l));
-		armAsm->Ldr(_global_k, _global(k));
-		armAsm->Ldr(_global_mxl, _global(mxl));
+		armAsm->Ldr(_global_lodshift, _global(lodshift));
+		armAsm->Ldr(_global_lodk, _global(lodk));
+		armAsm->Ldr(_global_mxl, _global(lodmxl));
+		armAsm->Ldr(_global_lodtab, _global(lodtab));
 	}
 
-	if (m_sel.fpsm == 2 && m_sel.dthe)
+	// Every colour destination is dithered, not just 16-bit ones (see WriteFrame
+	// in GSDrawScanline.cpp). fmt 3 is not a frame-buffer format.
+	if (m_sel.dthe && m_sel.fpsm != 3)
 		armAsm->Ldr(_global_dimx, _global(dimx));
+
+	// Lane-offset loads are done; hand the cursor to Step. dw has the same row
+	// stride as d, so this is one add.
+	if (m_block_split)
+		armAsm->Add(_block_ptr, _block_ptr, OFFSETOF(GSScanlineLocalData, dw));
 }
 
 void GSDrawScanlineCodeGenerator::Step()
@@ -487,7 +575,15 @@ void GSDrawScanlineCodeGenerator::Step()
 
 		if (m_sel.fwrite && m_sel.fge)
 		{
-			armAsm->Add(_temp_f.V8H(), _temp_f.V8H(), _d4_f.V8H());
+			if (m_block_split)
+			{
+				armAsm->Ldr(_vscratch, MemOperand(_block_ptr, offsetof(GSScanlineLocalData::blockstep, f)));
+				armAsm->Add(_temp_f.V8H(), _temp_f.V8H(), _vscratch.V8H());
+			}
+			else
+			{
+				armAsm->Add(_temp_f.V8H(), _temp_f.V8H(), _d4_f.V8H());
+			}
 		}
 	}
 
@@ -523,9 +619,19 @@ void GSDrawScanlineCodeGenerator::Step()
 				armAsm->Dup(_vscratch2.V4S(), _d4_stq.V4S(), 1);
 				armAsm->Dup(v1.V4S(), _d4_stq.V4S(), 2);
 
-				armAsm->Fadd(_temp_s.V4S(), _temp_s.V4S(), _vscratch.V4S());
-				armAsm->Fadd(_temp_t.V4S(), _temp_t.V4S(), _vscratch2.V4S());
-				armAsm->Fadd(_temp_q.V4S(), _temp_q.V4S(), v1.V4S());
+				if (m_sel.stqplane)
+				{
+					// The plane's accumulators are integers (GSPerspectivePlane.h).
+					armAsm->Add(_temp_s.V4S(), _temp_s.V4S(), _vscratch.V4S());
+					armAsm->Add(_temp_t.V4S(), _temp_t.V4S(), _vscratch2.V4S());
+					armAsm->Add(_temp_q.V4S(), _temp_q.V4S(), v1.V4S());
+				}
+				else
+				{
+					armAsm->Fadd(_temp_s.V4S(), _temp_s.V4S(), _vscratch.V4S());
+					armAsm->Fadd(_temp_t.V4S(), _temp_t.V4S(), _vscratch2.V4S());
+					armAsm->Fadd(_temp_q.V4S(), _temp_q.V4S(), v1.V4S());
+				}
 			}
 		}
 
@@ -538,8 +644,16 @@ void GSDrawScanlineCodeGenerator::Step()
 				// rb = rb.add16(c.xxxx());
 				// ga = ga.add16(c.yyyy());
 
-				armAsm->Dup(_vscratch.V4S(), _d4_c.V4S(), 0);
-				armAsm->Dup(_vscratch2.V4S(), _d4_c.V4S(), 1);
+				if (m_block_split)
+				{
+					armAsm->Ldr(_vscratch, MemOperand(_block_ptr, offsetof(GSScanlineLocalData::blockstep, rb)));
+					armAsm->Ldr(_vscratch2, MemOperand(_block_ptr, offsetof(GSScanlineLocalData::blockstep, ga)));
+				}
+				else
+				{
+					armAsm->Dup(_vscratch.V4S(), _d4_c.V4S(), 0);
+					armAsm->Dup(_vscratch2.V4S(), _d4_c.V4S(), 1);
+				}
 				armAsm->Movi(v1.V8H(), 0);
 
 				armAsm->Add(_temp_rb.V8H(), _temp_rb.V8H(), _vscratch.V8H());
@@ -551,6 +665,13 @@ void GSDrawScanlineCodeGenerator::Step()
 				armAsm->Smax(_temp_ga.V8H(), _temp_ga.V8H(), v1.V8H());
 			}
 		}
+	}
+
+	if (m_block_split)
+	{
+		// Hop to the other phase of the pair.
+		armAsm->Add(_block_ptr, _block_ptr, _block_hop);
+		armAsm->Neg(_block_hop, _block_hop);
 	}
 
 	if (!m_sel.notest)
@@ -682,6 +803,21 @@ void GSDrawScanlineCodeGenerator::TestZ(const VRegister& temp1, const VRegister&
 	}
 }
 
+// The formed coordinate saturates into a signed 12.4 field (GSCoordinateWalk.h):
+// take the sixteenth, saturate it to sixteen signed bits, put it back. The bits
+// below the sixteenth go with it; nothing downstream reads them (the texel is
+// bits 16 and up, the weight bits 12 to 15).
+//
+// SQXTN is the saturation; the C++ reference's min/max form computes the same
+// function.
+void GSDrawScanlineCodeGenerator::SaturateCoordinate(const VRegister& c, const VRegister& scratch)
+{
+	armAsm->Sshr(scratch.V4S(), c.V4S(), GS_COORD_SIXTEENTH_SHIFT);
+	armAsm->Sqxtn(scratch.V4H(), scratch.V4S());
+	armAsm->Sxtl(scratch.V4S(), scratch.V4H());
+	armAsm->Shl(c.V4S(), scratch.V4S(), GS_COORD_SIXTEENTH_SHIFT);
+}
+
 void GSDrawScanlineCodeGenerator::SampleTexture()
 {
 	if (!m_sel.fb || m_sel.tfx == TFX_NONE)
@@ -695,26 +831,132 @@ void GSDrawScanlineCodeGenerator::SampleTexture()
 	VRegister ureg = _temp_s;
 	VRegister vreg = _temp_t;
 
+	// All-ones in every lane whose pixel takes the linear filter. lod > 0 is
+	// exactly Q < the crossing constant, so the per-pixel MMAG/MMIN choice is one
+	// compare. Cheap enough to emit twice rather than hold a register.
+	const auto emit_ltfx_mask = [this](const VRegister& dst) {
+		VRegister q = _temp_q;
+
+		if (m_sel.stqplane)
+		{
+			// Q as a float: the count of g/4 times 2^(E - 16) (GSPerspectivePlane.h).
+			armAsm->Sshr(_vscratch.V4S(), _temp_q.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Scvtf(_vscratch.V4S(), _vscratch.V4S());
+			armAsm->Ldr(_vscratch2, _local(pwalk.qscale));
+			armAsm->Fmul(_vscratch.V4S(), _vscratch.V4S(), _vscratch2.V4S());
+			q = _vscratch;
+		}
+
+		armAsm->Ldr(dst, _global(ltfx_q));
+		armAsm->Fcmgt(dst.V4S(), dst.V4S(), q.V4S());
+
+		if (m_sel.ltfx_ge)
+			armAsm->Mvn(dst.V16B(), dst.V16B());
+	};
+
 	if (!m_sel.fst)
 	{
-		armAsm->Fdiv(v2.V4S(), _temp_s.V4S(), _temp_q.V4S());
-		armAsm->Fdiv(v3.V4S(), _temp_t.V4S(), _temp_q.V4S());
+		// Multiply by a reciprocal truncated to fourteen mantissa bits, not a divide.
+		// Clearing the low nine bits of the float32 mantissa is that grid; two BICs
+		// rather than a shift pair so the sign survives a negative Q. See
+		// GSDrawScanline.cpp for why the width is fourteen.
+		if (m_sel.stqplane)
+		{
+			// The console's planes (GSPerspectivePlane.h): the accumulators are integers
+			// in units of g/2^14. Floor each to g/4 (the shift) and convert, so S/Q is a
+			// quotient of two counts and the power of two that takes it to 16.16 texels
+			// (2^(16 + TW), 2^(16 + TH)) rides on the product. The reciprocal is taken
+			// of the count: cutting its mantissa commutes with a power-of-two scale.
+			armAsm->Sshr(v0.V4S(), _temp_q.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Scvtf(v0.V4S(), v0.V4S());
+			armAsm->Fmov(v1.V4S(), 1.0f);
+			armAsm->Fdiv(v0.V4S(), v1.V4S(), v0.V4S());
+			armAsm->Movi(v1.V4S(), GS_RECIP_ROUND_UP);
+			armAsm->Add(v0.V4S(), v0.V4S(), v1.V4S());
+			armAsm->Bic(v0.V4S(), 0xff, 0);
+
+			armAsm->Ldr(v1, _local(pwalk.stscale));
+			armAsm->Sshr(v2.V4S(), _temp_s.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Sshr(v3.V4S(), _temp_t.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Scvtf(v2.V4S(), v2.V4S());
+			armAsm->Scvtf(v3.V4S(), v3.V4S());
+			armAsm->Fmul(v2.V4S(), v2.V4S(), v0.V4S());
+			armAsm->Fmul(v3.V4S(), v3.V4S(), v0.V4S());
+			armAsm->Fmul(v2.V4S(), v2.V4S(), v1.S(), 0);
+			armAsm->Fmul(v3.V4S(), v3.V4S(), v1.S(), 1);
+		}
+		else
+		{
+			armAsm->Fmov(v0.V4S(), 1.0f);
+			armAsm->Fdiv(v0.V4S(), v0.V4S(), _temp_q.V4S());
+			armAsm->Movi(v1.V4S(), GS_RECIP_ROUND_UP);
+			armAsm->Add(v0.V4S(), v0.V4S(), v1.V4S());
+			armAsm->Bic(v0.V4S(), 0xff, 0);
+
+			armAsm->Fmul(v2.V4S(), _temp_s.V4S(), v0.V4S());
+			armAsm->Fmul(v3.V4S(), _temp_t.V4S(), v0.V4S());
+		}
+
 		ureg = v2;
 		vreg = v3;
 
 		armAsm->Fcvtzs(v2.V4S(), v2.V4S());
 		armAsm->Fcvtzs(v3.V4S(), v3.V4S());
-
-		if (m_sel.ltf)
-		{
-			// u -= 0x8000;
-			// v -= 0x8000;
-
-			armAsm->Movi(v1.V4S(), 0x8000);
-			armAsm->Sub(v2.V4S(), v2.V4S(), v1.V4S());
-			armAsm->Sub(v3.V4S(), v3.V4S(), v1.V4S());
-		}
 	}
+
+	// The coordinate DDA's lag: one 16.16 unit on an axis that walks forward, zero
+	// on one that is still or walks back. See GSDrawScanline.cpp. On the FST side
+	// ureg is the live accumulator, so the biased copy goes to the scratch pair the
+	// packing below consumes anyway.
+	if (m_sel.prim != GS_SPRITE_CLASS)
+	{
+		armAsm->Ldr(v0, _local(tclag.u));
+		armAsm->Sub(v2.V4S(), ureg.V4S(), v0.V4S());
+		armAsm->Ldr(v0, _local(tclag.v));
+		armAsm->Sub(v3.V4S(), vreg.V4S(), v0.V4S());
+		ureg = v2;
+		vreg = v3;
+	}
+
+	// GSTruncateCoordinate: the sixteenth index truncates toward zero, so a
+	// negative coordinate takes a sixteenth less one before the shifts below floor
+	// it into a texel and a weight. The result goes to the scratch pair, so this
+	// costs no register even where ureg is the live FST accumulator.
+	armAsm->Sshr(v0.V4S(), ureg.V4S(), 31);
+	armAsm->Sshr(v1.V4S(), vreg.V4S(), 31);
+	armAsm->Ushr(v0.V4S(), v0.V4S(), 20);
+	armAsm->Ushr(v1.V4S(), v1.V4S(), 20);
+	armAsm->Add(v2.V4S(), ureg.V4S(), v0.V4S());
+	armAsm->Add(v3.V4S(), vreg.V4S(), v1.V4S());
+	ureg = v2;
+	vreg = v3;
+
+	if (!m_sel.fst && m_sel.ltf)
+	{
+		// u -= 0x8000;
+		// v -= 0x8000;
+		//
+		// Exactly eight sixteenths, so it moves the texel index and never the
+		// weight. It is our step onto the tap pair, not part of the hardware
+		// coordinate, so it comes after the truncation. It applies only to pixels
+		// that filter linearly; the two filters do not sample the same point.
+		armAsm->Movi(v1.V4S(), 0x8000);
+
+		if (m_sel.ltfx)
+		{
+			emit_ltfx_mask(v0);
+			armAsm->And(v1.V16B(), v1.V16B(), v0.V16B());
+		}
+
+		armAsm->Sub(ureg.V4S(), ureg.V4S(), v1.V4S());
+		armAsm->Sub(vreg.V4S(), vreg.V4S(), v1.V4S());
+	}
+
+	// The 12.4 field, taken after the half-texel step (so the top of the field
+	// reads weight 15, not the 7 that clamping first would give) and before the
+	// tap pair below.
+	SaturateCoordinate(ureg, v0);
+	SaturateCoordinate(vreg, v0);
 
 	if (m_sel.ltf)
 	{
@@ -729,6 +971,19 @@ void GSDrawScanlineCodeGenerator::SampleTexture()
 
 			armAsm->Trn1(vf.V8H(), vreg.V8H(), vreg.V8H());
 			armAsm->Ushr(vf.V8H(), vf.V8H(), 12);
+		}
+
+		// A zero weight collapses the four-tap blend onto the nearest tap, so the
+		// nearest side of the crossing needs no separate path.
+		if (m_sel.ltfx)
+		{
+			emit_ltfx_mask(v0);
+			armAsm->Trn1(v1.V8H(), v0.V8H(), v0.V8H());
+
+			armAsm->And(uf.V16B(), uf.V16B(), v1.V16B());
+
+			if (m_sel.prim != GS_SPRITE_CLASS)
+				armAsm->And(vf.V16B(), vf.V16B(), v1.V16B());
 		}
 	}
 
@@ -1012,8 +1267,39 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 
 	if (!m_sel.fst)
 	{
-		armAsm->Fdiv(local0.V4S(), _temp_s.V4S(), _temp_q.V4S());
-		armAsm->Fdiv(local1.V4S(), _temp_t.V4S(), _temp_q.V4S());
+		// Truncated reciprocal, as in SampleTexture above.
+		if (m_sel.stqplane)
+		{
+			// As in SampleTexture: the accumulators are integers in units of g/2^14.
+			armAsm->Sshr(local2.V4S(), _temp_q.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Scvtf(local2.V4S(), local2.V4S());
+			armAsm->Fmov(local1.V4S(), 1.0f);
+			armAsm->Fdiv(local2.V4S(), local1.V4S(), local2.V4S());
+			armAsm->Movi(local1.V4S(), GS_RECIP_ROUND_UP);
+			armAsm->Add(local2.V4S(), local2.V4S(), local1.V4S());
+			armAsm->Bic(local2.V4S(), 0xff, 0);
+
+			armAsm->Ldr(v0, _local(pwalk.stscale));
+			armAsm->Sshr(local0.V4S(), _temp_s.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Sshr(local1.V4S(), _temp_t.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Scvtf(local0.V4S(), local0.V4S());
+			armAsm->Scvtf(local1.V4S(), local1.V4S());
+			armAsm->Fmul(local0.V4S(), local0.V4S(), local2.V4S());
+			armAsm->Fmul(local1.V4S(), local1.V4S(), local2.V4S());
+			armAsm->Fmul(local0.V4S(), local0.V4S(), v0.S(), 0);
+			armAsm->Fmul(local1.V4S(), local1.V4S(), v0.S(), 1);
+		}
+		else
+		{
+			armAsm->Fmov(local2.V4S(), 1.0f);
+			armAsm->Fdiv(local2.V4S(), local2.V4S(), _temp_q.V4S());
+			armAsm->Movi(local0.V4S(), GS_RECIP_ROUND_UP);
+			armAsm->Add(local2.V4S(), local2.V4S(), local0.V4S());
+			armAsm->Bic(local2.V4S(), 0xff, 0);
+
+			armAsm->Fmul(local0.V4S(), _temp_s.V4S(), local2.V4S());
+			armAsm->Fmul(local1.V4S(), _temp_t.V4S(), local2.V4S());
+		}
 
 		armAsm->Fcvtzs(local0.V4S(), local0.V4S());
 		armAsm->Fcvtzs(local1.V4S(), local1.V4S());
@@ -1022,76 +1308,78 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		uv1 = local1;
 	}
 
-	// TODO: if the fractional part is not needed in round-off mode then there is a faster integer log2 (just take the exp) (but can we round it?)
+	// The coordinate DDA's lag, taken before the level shift divides it away. See
+	// SampleTexture above.
+	if (m_sel.prim != GS_SPRITE_CLASS)
+	{
+		armAsm->Ldr(local2, _local(tclag.u));
+		armAsm->Sub(local0.V4S(), uv0.V4S(), local2.V4S());
+		armAsm->Ldr(local2, _local(tclag.v));
+		armAsm->Sub(local1.V4S(), uv1.V4S(), local2.V4S());
+		uv0 = local0;
+		uv1 = local1;
+	}
 
 	if (!m_sel.lcm)
 	{
-		// lod = -log2(Q) * (1 << L) + K
+		// LOD16 = K + (-e) * 2^(4+L) - T[L][idx], in sixteenths of a level.
+		//
+		// The logarithm is a 128-entry table on the top seven fractional bits of Q's
+		// mantissa (GSLevelOfDetail.h), not a polynomial log2.
 
+		// Q as a float. The plane rule keeps a count of g/4 (GSPerspectivePlane.h), so
+		// it is the count times 2^(E - 16); local2 held the reciprocal and is spent.
+		VRegister qf = _temp_q;
+
+		if (m_sel.stqplane)
+		{
+			armAsm->Sshr(local2.V4S(), _temp_q.V4S(), GS_PLANE_PIXEL_SHIFT);
+			armAsm->Scvtf(local2.V4S(), local2.V4S());
+			armAsm->Ldr(v1, _local(pwalk.qscale));
+			armAsm->Fmul(local2.V4S(), local2.V4S(), v1.V4S());
+			qf = local2;
+		}
+
+		// -e = 127 - ((q >> 23) & 0xff)
+		armAsm->Ushr(v0.V4S(), qf.V4S(), 23);
+		armAsm->Movi(v1.V4S(), 0xff);
+		armAsm->And(v0.V16B(), v0.V16B(), v1.V16B());
 		armAsm->Movi(v1.V4S(), 127);
-		armAsm->Shl(v0.V4S(), _temp_q.V4S(), 1);
-		armAsm->Ushr(v0.V4S(), v0.V4S(), 24);
+		armAsm->Sub(v0.V4S(), v1.V4S(), v0.V4S());
+
+		// (-e) << (4 + L), then + K
+		armAsm->Dup(v1.V4S(), _global_lodshift);
+		armAsm->Sshl(v0.V4S(), v0.V4S(), v1.V4S());
+		armAsm->Dup(v1.V4S(), _global_lodk);
+		armAsm->Add(v0.V4S(), v0.V4S(), v1.V4S());
+
+		// - T[idx], idx = (q >> 16) & 0x7f. One extract-add-load triple per lane,
+		// as in ReadTexelImpl, which is why the table is held as words.
+		armAsm->Ushr(v4.V4S(), qf.V4S(), 16);
+		armAsm->Movi(v1.V4S(), 0x7f);
+		armAsm->And(v4.V16B(), v4.V16B(), v1.V16B());
+
+		for (int i = 0; i < 4; i++)
+		{
+			armAsm->Mov(_scratchaddr.W(), v4.V4S(), i);
+			armAsm->Add(_scratchaddr, _global_lodtab, Operand(_scratchaddr, UXTW, 2));
+
+			if (i == 0)
+				armAsm->Ldr(v1.S(), MemOperand(_scratchaddr));
+			else
+				armAsm->Ld1(v1.V4S(), i, MemOperand(_scratchaddr));
+		}
+
 		armAsm->Sub(v0.V4S(), v0.V4S(), v1.V4S());
-		armAsm->Scvtf(v0.V4S(), v0.V4S());
 
-		// v0 = (float)(exp(q) - 127)
-
-		armAsm->Shl(v4.V4S(), _temp_q.V4S(), 9);
-		armAsm->Ushr(v4.V4S(), v4.V4S(), 9);
-
-		armAsm->Dup(v1.V4S(), _const_log2_coef.V4S(), 3);
-		armAsm->Orr(v4.V16B(), v4.V16B(), v1.V16B()); // m_log2_coef_128b[3]
-
-		// v4 = mant(q) | 1.0f
-		// v4 = log2(Q) = ((((c0 * v4) + c1) * v4) + c2) * (v4 - 1.0f) + v0
-
-#if 0
-		// non-fma
-		armAsm->Dup(v1.V4S(), _const_log2_coef.V4S(), 0);
-		armAsm->Fmul(v5.V4S(), v4.V4S(), v1.V4S());
-
-		armAsm->Dup(v1.V4S(), _const_log2_coef.V4S(), 1);
-		armAsm->Fadd(v5.V4S(), v5.V4S(), v1.V4S());
-
-		armAsm->Fmul(v5.V4S(), v5.V4S(), v4.V4S());
-
-		armAsm->Dup(v1.V4S(), _const_log2_coef.V4S(), 3);
-		armAsm->Fsub(v4.V4S(), v4.V4S(), v1.V4S());
-			
-		armAsm->Dup(v1.V4S(), _const_log2_coef.V4S(), 2);
-		armAsm->Fadd(v5.V4S(), v5.V4S(), v1.V4S());
-
-		armAsm->Fmul(v4.V4S(), v4.V4S(), v5.V4S());
-		armAsm->Fadd(v4.V4S(), v4.V4S(), v0.V4S());
-
-		armAsm->Dup(v0.V4S(), _global_l);
-		armAsm->Dup(v1.V4S(), _global_k);
-
-		armAsm->Fmul(v4.V4S(), v4.V4S(), v0.V4S());
-		armAsm->Fadd(v4.V4S(), v4.V4S(), v1.V4S());
-#else
-		// fma
-		armAsm->Dup(v1.V4S(), _const_log2_coef.V4S(), 0); // v1 = c0
-		armAsm->Dup(local2.V4S(), _const_log2_coef.V4S(), 1); // local2 = c1
-		armAsm->Fmla(local2.V4S(), v4.V4S(), v1.V4S()); // local2 = c0 * v4 + c1
-		armAsm->Dup(v1.V4S(), _const_log2_coef.V4S(), 2); // v1 = c2
-		armAsm->Fmla(v1.V4S(), local2.V4S(), v4.V4S()); // v1 = ((c0 * v4 + c1) * v4) + c2
-		armAsm->Dup(local2.V4S(), _const_log2_coef.V4S(), 3); // local2 = c3
-		armAsm->Fsub(v4.V4S(), v4.V4S(), local2.V4S()); // v4 -= 1.0f
-		armAsm->Fmla(v0.V4S(), v4.V4S(), v1.V4S()); // v0 = (v4 - 1.0f) * (((c0 * v4 + c1) * v4) + c2) + v0
-
-		armAsm->Dup(v1.V4S(), _global_l); // v1 = llll
-		armAsm->Dup(v4.V4S(), _global_k); // v4 = kkkk
-		armAsm->Fmla(v4.V4S(), v0.V4S(), v1.V4S()); // v4 = k + v0 * l
-#endif
-
-		// v4 = (-log2(Q) * (1 << L) + K) * 0x10000
-
+		// Sixteenths -> 16.16, then the ceiling. The `+ 0x8000` round-off below is
+		// then (LOD16 + 8) >> 4 with ties up, and the trilinear weight from the top
+		// four fraction bits is LOD16 & 15.
+		armAsm->Shl(v4.V4S(), v0.V4S(), 12);
 		armAsm->Dup(v0.V4S(), _global_mxl);
-		armAsm->Movi(v1.V4S(), 0);
-		armAsm->Fminnm(v4.V4S(), v4.V4S(), v0.V4S());
-		armAsm->Fmaxnm(v4.V4S(), v4.V4S(), v1.V4S());
-		armAsm->Fcvtzs(v4.V4S(), v4.V4S());
+		armAsm->Smin(v4.V4S(), v4.V4S(), v0.V4S());
+		armAsm->Movi(v0.V4S(), 0);
+		armAsm->Smax(v4.V4S(), v4.V4S(), v0.V4S());
 
 		if (m_sel.mmin == 1) // round-off mode
 		{
@@ -1158,15 +1446,32 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		armAsm->Ldr(v6, _local(temp.uv_minmax[1]));
 	}
 
+	// GSTruncateCoordinate, as in SampleTexture above. Into the scratch pair, so
+	// uv0/uv1 keep this level's own coordinate for the level above it.
+	armAsm->Sshr(v0.V4S(), uv0.V4S(), 31);
+	armAsm->Sshr(v1.V4S(), uv1.V4S(), 31);
+	armAsm->Ushr(v0.V4S(), v0.V4S(), 20);
+	armAsm->Ushr(v1.V4S(), v1.V4S(), 20);
+	armAsm->Add(v2.V4S(), uv0.V4S(), v0.V4S());
+	armAsm->Add(v3.V4S(), uv1.V4S(), v1.V4S());
+
 	if (m_sel.ltf)
 	{
 		// u -= 0x8000;
 		// v -= 0x8000;
 
 		armAsm->Movi(v4.V4S(), 0x8000);
-		armAsm->Sub(v2.V4S(), uv0.V4S(), v4.V4S());
-		armAsm->Sub(v3.V4S(), uv1.V4S(), v4.V4S());
+		armAsm->Sub(v2.V4S(), v2.V4S(), v4.V4S());
+		armAsm->Sub(v3.V4S(), v3.V4S(), v4.V4S());
+	}
 
+	// The 12.4 field, as in SampleTexture above, taken at the same point in this
+	// level's copy of the chain.
+	SaturateCoordinate(v2, v0);
+	SaturateCoordinate(v3, v0);
+
+	if (m_sel.ltf)
+	{
 		// GSVector4i uf = u.xxzzlh().srl16(1);
 
 		armAsm->Trn1(uf.V8H(), v2.V8H(), v2.V8H());
@@ -1180,8 +1485,8 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 
 	// GSVector4i uv0 = u.sra32(16).ps32(v.sra32(16));
 
-	armAsm->Sshr(v2.V4S(), m_sel.ltf ? v2.V4S() : uv0.V4S(), 16);
-	armAsm->Sshr(v3.V4S(), m_sel.ltf ? v3.V4S() : uv1.V4S(), 16);
+	armAsm->Sshr(v2.V4S(), v2.V4S(), 16);
+	armAsm->Sshr(v3.V4S(), v3.V4S(), 16);
 	armAsm->Sqxtn(v2.V4H(), v2.V4S());
 	armAsm->Sqxtn2(v2.V8H(), v3.V4S());
 
@@ -1220,6 +1525,15 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		armAsm->Ushr(v5.V8H(), v5.V8H(), 1);
 		armAsm->Ushr(v6.V8H(), v6.V8H(), 1);
 
+		// GSTruncateCoordinate, as above.
+
+		armAsm->Sshr(v0.V4S(), v2.V4S(), 31);
+		armAsm->Sshr(v1.V4S(), v3.V4S(), 31);
+		armAsm->Ushr(v0.V4S(), v0.V4S(), 20);
+		armAsm->Ushr(v1.V4S(), v1.V4S(), 20);
+		armAsm->Add(v2.V4S(), v2.V4S(), v0.V4S());
+		armAsm->Add(v3.V4S(), v3.V4S(), v1.V4S());
+
 		if (m_sel.ltf)
 		{
 			// u -= 0x8000;
@@ -1228,7 +1542,15 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 			armAsm->Movi(v4.V4S(), 0x8000);
 			armAsm->Sub(v2.V4S(), v2.V4S(), v4.V4S());
 			armAsm->Sub(v3.V4S(), v3.V4S(), v4.V4S());
+		}
 
+		// The 12.4 field, as in SampleTexture above, taken at the same point in this
+		// level's copy of the chain.
+		SaturateCoordinate(v2, v0);
+		SaturateCoordinate(v3, v0);
+
+		if (m_sel.ltf)
+		{
 			// GSVector4i uf = u.xxzzlh().srl16(1);
 
 			armAsm->Trn1(uf.V8H(), v2.V8H(), v2.V8H());
@@ -1273,7 +1595,10 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		// v5: rb
 		// v6: ga
 
-		armAsm->Ushr(v0.V8H(), local2.V8H(), 1);
+		// Four-bit trilinear weight, truncated: (f & 0xf000) >> 1, which is the
+		// >> 1 the lerp wants folded into the quantisation. See GSDrawScanline.cpp.
+		armAsm->Ushr(v0.V8H(), local2.V8H(), 12);
+		armAsm->Shl(v0.V8H(), v0.V8H(), 11);
 
 		lerp16(v5, local0, v0, 0);
 		lerp16(v6, local1, v0, 0);
@@ -1404,16 +1729,16 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 
 			// GSVector4i ga = iip ? gaf : m_local.c.ga;
 
-			// gat = gat.modulate16<1>(ga).clamp8();
-			// modulate16(v6, v4, 1);
-			modulate16(v6, _temp_ga, 1);
+			// gat = gat.modulate16<1>(ga.srl16<7>().sll16<7>()).clamp8();
+			storedVertexColor(_vscratch, _temp_ga);
+			modulate16(v6, _vscratch, 1);
 			clamp16(v6, v3);
 
 			// if (!tcc) gat = gat.mix16(ga.srl16(7));
 
 			if (!m_sel.tcc)
 			{
-				armAsm->Ushr(v4.V8H(), _temp_ga.V8H(), 7);
+				walkColorByte(v4, _temp_ga);
 
 				mix16(v6, v4, v3);
 			}
@@ -1428,7 +1753,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 			{
 				// GSVector4i ga = iip ? gaf : m_local.c.ga;
 
-				armAsm->Ushr(v4.V8H(), _temp_ga.V8H(), 7);
+				walkColorByte(v4, _temp_ga);
 				mix16(v6, v4, v3);
 			}
 
@@ -1439,7 +1764,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 			// GSVector4i ga = iip ? gaf : m_local.c.ga;
 
 			// gat = gat.mix16(!tcc ? ga.srl16(7) : gat.addus8(ga.srl16(7)));
-			armAsm->Ushr(v4.V8H(), _temp_ga.V8H(), 7);
+			walkColorByte(v4, _temp_ga);
 
 			if (m_sel.tcc)
 				armAsm->Uqadd(v4.V16B(), v4.V16B(), v6.V16B());
@@ -1455,7 +1780,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 			if (!m_sel.tcc)
 			{
 				// GSVector4i ga = iip ? gaf : m_local.c.ga;
-				armAsm->Ushr(v4.V8H(), _temp_ga.V8H(), 7);
+				walkColorByte(v4, _temp_ga);
 
 				mix16(v6, v4, v3);
 			}
@@ -1467,7 +1792,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 			// gat = iip ? ga.srl16(7) : ga;
 
 			if (m_sel.iip)
-				armAsm->Ushr(v6.V8H(), _temp_ga.V8H(), 7);
+				walkColorByte(v6, _temp_ga);
 			else
 				armAsm->Mov(v6, _temp_ga);
 
@@ -1608,9 +1933,10 @@ void GSDrawScanlineCodeGenerator::ColorTFX()
 
 			// GSVector4i rb = iip ? rbf : m_local.c.rb;
 
-			// rbt = rbt.modulate16<1>(rb).clamp8();
+			// rbt = rbt.modulate16<1>(rb.srl16<7>().sll16<7>()).clamp8();
 
-			modulate16(v5, _temp_rb, 1);
+			storedVertexColor(_vscratch, _temp_rb);
+			modulate16(v5, _vscratch, 1);
 			clamp16(v5, v1);
 
 			break;
@@ -1626,10 +1952,15 @@ void GSDrawScanlineCodeGenerator::ColorTFX()
 			// gat = gat.modulate16<1>(ga).add16(af).clamp8().mix16(gat);
 
 			armAsm->Mov(v1, v6);
-			modulate16(v6, _temp_ga, 1);
+			storedVertexColor(_vscratch, _temp_ga);
+			modulate16(v6, _vscratch, 1);
 
-			armAsm->Trn2(v2.V8H(), _temp_ga.V8H(), _temp_ga.V8H());
-			armAsm->Ushr(v2.V8H(), v2.V8H(), 7);
+			// af is the walked alpha as the stored byte, so a negative the walk carries
+			// must be clamped to zero before the shift (GSWalkColorByte / walkColorByte).
+			// A plain logical shift turns a negative into up to 511, HIGHLIGHT adds it to
+			// the colour, and the clamp below drives every channel to 255.
+			armAsm->Trn2(_vscratch.V8H(), _temp_ga.V8H(), _temp_ga.V8H());
+			walkColorByte(v2, _vscratch);
 			armAsm->Add(v6.V8H(), v6.V8H(), v2.V8H());
 
 			clamp16(v6, v0);
@@ -1640,7 +1971,8 @@ void GSDrawScanlineCodeGenerator::ColorTFX()
 
 			// rbt = rbt.modulate16<1>(rb).add16(af).clamp8();
 
-			modulate16(v5, _temp_rb, 1);
+			storedVertexColor(_vscratch, _temp_rb);
+			modulate16(v5, _vscratch, 1);
 			armAsm->Add(v5.V8H(), v5.V8H(), v2.V8H());
 
 			clamp16(v5, v0);
@@ -1652,7 +1984,7 @@ void GSDrawScanlineCodeGenerator::ColorTFX()
 			// rbt = iip ? rb.srl16(7) : rb;
 
 			if (m_sel.iip)
-				armAsm->Ushr(v5.V8H(), _temp_rb.V8H(), 7);
+				walkColorByte(v5, _temp_rb);
 			else
 				armAsm->Mov(v5, _temp_rb);
 
@@ -1667,16 +1999,24 @@ void GSDrawScanlineCodeGenerator::Fog()
 		return;
 	}
 
-	// rb = m_local.gd->frb.lerp16<0>(rb, f);
-	// ga = m_local.gd->fga.lerp16<0>(ga, f).mix16(ga);
+	// rb = m_local.gd->frb.lerp16<0>(rb, floor(f));
+	// ga = m_local.gd->fga.lerp16<0>(ga, floor(f)).mix16(ga);
+	//
+	// The blend takes an integer F; see the C++ twin in GSDrawScanline.cpp for
+	// why lerp16<0> is already the 256 - F floor rule. storedVertexColor is that
+	// truncation plus the pack's saturation: fog rides the colour DDA, so a fog
+	// lane carried below zero saturates to 0 like a colour lane. It goes to a
+	// scratch because _temp_f is the walk's accumulator and Step carries it on
+	// with its fraction intact.
+	storedVertexColor(_vscratch3, _temp_f);
 
 	armAsm->Dup(_vscratch.V4S(), _global_frb);
 	armAsm->Dup(_vscratch2.V4S(), _global_fga);
 	armAsm->Mov(v1, v6);
 
-	lerp16(v5, _vscratch, _temp_f, 0);
+	lerp16(v5, _vscratch, _vscratch3, 0);
 
-	lerp16(v6, _vscratch2, _temp_f, 0);
+	lerp16(v6, _vscratch2, _vscratch3, 0);
 	mix16(v6, v1, v0);
 }
 
@@ -1715,10 +2055,9 @@ void GSDrawScanlineCodeGenerator::TestDestAlpha()
 	{
 		if (m_sel.fpsm == 2)
 		{
-			armAsm->Movi(v0.V4S(), 0);
 			armAsm->Shl(v1.V4S(), _fd.V4S(), 16);
 			armAsm->Ushr(v1.V4S(), v1.V4S(), 31);
-			armAsm->Cmeq(v1.V4S(), v0.V4S(), 0);
+			armAsm->Cmeq(v1.V4S(), v1.V4S(), 0);
 		}
 		else
 		{
@@ -1779,7 +2118,9 @@ void GSDrawScanlineCodeGenerator::WriteMask()
 	}
 	else if (m_sel.zwrite)
 	{
-		armAsm->Cmeq(v1.V4S(), v1.V4S(), v4.V4S());
+		// Both halves narrow from the register the compare wrote. Narrowing from
+		// anything else gives a depth-only draw an arbitrary write mask.
+		armAsm->Cmeq(_vscratch.V4S(), v1.V4S(), v4.V4S());
 		armAsm->Sqxtn(v1.V4H(), _vscratch.V4S());
 		armAsm->Sqxtn2(v1.V8H(), _vscratch.V4S());
 	}
@@ -2066,7 +2407,7 @@ void GSDrawScanlineCodeGenerator::WriteFrame()
 		return;
 	}
 
-	if (m_sel.fpsm == 2 && m_sel.dthe)
+	if (m_sel.dthe && m_sel.fpsm != 3)
 	{
 		armAsm->And(w5, _top, 3);
 		armAsm->Lsl(w5, w5, 5);
@@ -2371,15 +2712,42 @@ void GSDrawScanlineCodeGenerator::modulate16(const VRegister& a, const VRegister
 
 void GSDrawScanlineCodeGenerator::modulate16(const VRegister& d, const VRegister& a, const VRegister& f, u8 shift)
 {
-	if (shift)
-	{
-		armAsm->Shl(d.V8H(), a.V8H(), shift);
-		armAsm->Sqdmulh(d.V8H(), d.V8H(), f.V8H());
-	}
-	else
-	{
-		armAsm->Sqdmulh(a.V8H(), d.V8H(), f.V8H());
-	}
+	// GSVector4i::modulate16<shift>(f) is `sll16<shift + 1>().mul16hs(f)`: the
+	// shift happens in 16-bit lanes and wraps, then the widening multiply takes
+	// the product's high half.
+	//
+	// SQDMULH after a shift of `shift` agrees on every reachable lane but differs
+	// once a lane reaches 8192 (the reference wraps `a << (shift + 1)`) and it
+	// saturates where the reference does not. Matching the reference keeps x86,
+	// the C++ fallback and this path identical.
+	//
+	// Shifting by shift + 1 puts the 16-bit wrap where the reference has it;
+	// halving afterwards is exact because the shifted value is even, and SQDMULH's
+	// doubling puts it back. Three instructions, no extra register.
+	armAsm->Shl(d.V8H(), a.V8H(), shift + 1);
+	armAsm->Sshr(d.V8H(), d.V8H(), 1);
+	armAsm->Sqdmulh(d.V8H(), d.V8H(), f.V8H());
+}
+
+// The walk's carried colour as the stored byte. SQSHRUN is a signed shift
+// right by seven then unsigned saturating narrow, so a lane carried below zero
+// saturates to 0 instead of becoming 511; UXTL widens back to sixteen bits.
+// The top saturation changes nothing: 32767 >> 7 is already 255.
+//
+// The walk itself is not clamped; see the C++ twin in GSDrawScanline.cpp.
+void GSDrawScanlineCodeGenerator::walkColorByte(const VRegister& d, const VRegister& c)
+{
+	armAsm->Sqshrun(d.V8B(), c.V8H(), 7);
+	armAsm->Uxtl(d.V8H(), d.V8B());
+}
+
+// The stored eight-bit colour, put back on the seven-fraction grid the
+// modulate expects. The texture function multiplies the stored byte, not the
+// wider DDA value; same rule as GSStoredVertexColor in GSDrawScanline.cpp.
+void GSDrawScanlineCodeGenerator::storedVertexColor(const VRegister& d, const VRegister& c)
+{
+	walkColorByte(d, c);
+	armAsm->Shl(d.V8H(), d.V8H(), 7);
 }
 
 void GSDrawScanlineCodeGenerator::lerp16(const VRegister& a, const VRegister& b, const VRegister& f, u8 shift)

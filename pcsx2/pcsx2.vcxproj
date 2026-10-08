@@ -24,6 +24,7 @@
     <Import Condition="$(Configuration.Contains(Devel))" Project="$(SolutionDir)common\vsprops\CodeGen_Devel.props" />
     <Import Condition="$(Configuration.Contains(Release))" Project="$(SolutionDir)common\vsprops\CodeGen_Release.props" />
     <Import Condition="!$(Configuration.Contains(Release))" Project="$(SolutionDir)common\vsprops\IncrementalLinking.props" />
+    <Import Project="$(SolutionDir)common\vsprops\ShaderToCpp.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -48,7 +49,6 @@
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(SolutionDir)3rdparty\soundtouch\soundtouch</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(SolutionDir)3rdparty\discord-rpc\include</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(SolutionDir)3rdparty\jpgd</AdditionalIncludeDirectories>
-      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(SolutionDir)3rdparty\ffmpeg\include</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(Platform)'=='x64'">%(AdditionalIncludeDirectories);$(SolutionDir)3rdparty\glad\include</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(Platform)'=='x64'">%(AdditionalIncludeDirectories);$(SolutionDir)3rdparty\vulkan\include</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(SolutionDir)3rdparty\d3d12memalloc\include</AdditionalIncludeDirectories>
@@ -70,8 +70,101 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\cas.glsl">
+      <VarName>vulkan_cas</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\convert.glsl">
+      <VarName>vulkan_convert</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\imgui.glsl">
+      <VarName>vulkan_imgui</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\interlace.glsl">
+      <VarName>vulkan_interlace</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\merge.glsl">
+      <VarName>vulkan_merge</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\present.glsl">
+      <VarName>vulkan_present</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\shadeboost.glsl">
+      <VarName>vulkan_shadeboost</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\vulkan\tfx.glsl">
+      <VarName>vulkan_tfx</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\cas.glsl">
+      <VarName>opengl_cas</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\convert.glsl">
+      <VarName>opengl_convert</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\imgui.glsl">
+      <VarName>opengl_imgui</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\interlace.glsl">
+      <VarName>opengl_interlace</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\merge.glsl">
+      <VarName>opengl_merge</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\shadeboost.glsl">
+      <VarName>opengl_shadeboost</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\tfx_fs.glsl">
+      <VarName>opengl_tfx_fs</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\tfx_vgs.glsl">
+      <VarName>opengl_tfx_vgs</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\opengl\present.glsl">
+      <VarName>opengl_present</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\cas.hlsl">
+      <VarName>dx11_cas</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\convert.fx">
+      <VarName>dx11_convert</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\interlace.fx">
+      <VarName>dx11_interlace</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\merge.fx">
+      <VarName>dx11_merge</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\shadeboost.fx">
+      <VarName>dx11_shadeboost</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\tfx.fx">
+      <VarName>dx11_tfx</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\imgui.fx">
+      <VarName>dx11_imgui</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\dx11\present.fx">
+      <VarName>dx11_present</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\common\fxaa.fx">
+      <VarName>common_fxaa</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\common\ffx_a.h">
+      <VarName>common_ffx_a</VarName>
+    </ShaderToCpp>
+    <ShaderToCpp Include="..\bin\resources\shaders\common\ffx_cas.h">
+      <VarName>common_ffx_cas</VarName>
+    </ShaderToCpp>
+    <None Include="..\bin\resources\shaders\common\fxaa.fx" />
+    <None Include="..\bin\resources\shaders\opengl\cas.glsl" />
+    <None Include="..\bin\resources\shaders\opengl\convert.glsl" />
     <None Include="..\bin\resources\shaders\opengl\imgui.glsl" />
+    <None Include="..\bin\resources\shaders\opengl\interlace.glsl" />
+    <None Include="..\bin\resources\shaders\opengl\merge.glsl" />
     <None Include="..\bin\resources\shaders\opengl\present.glsl" />
+    <None Include="..\bin\resources\shaders\opengl\shadeboost.glsl" />
+    <None Include="..\bin\resources\shaders\opengl\tfx_fs.glsl" />
+    <None Include="..\bin\resources\shaders\opengl\tfx_vgs.glsl" />
+    <None Include="..\bin\resources\shaders\vulkan\cas.glsl" />
     <None Include="..\bin\resources\shaders\vulkan\convert.glsl" />
     <None Include="..\bin\resources\shaders\vulkan\imgui.glsl" />
     <None Include="..\bin\resources\shaders\vulkan\interlace.glsl" />
@@ -79,20 +172,14 @@
     <None Include="..\bin\resources\shaders\vulkan\present.glsl" />
     <None Include="..\bin\resources\shaders\vulkan\shadeboost.glsl" />
     <None Include="..\bin\resources\shaders\vulkan\tfx.glsl" />
-    <None Include="..\bin\resources\shaders\opengl\convert.glsl" />
-    <None Include="..\bin\resources\shaders\opengl\interlace.glsl" />
-    <None Include="..\bin\resources\shaders\opengl\merge.glsl" />
-    <None Include="..\bin\resources\shaders\opengl\shadeboost.glsl" />
-    <None Include="..\bin\resources\shaders\opengl\tfx_fs.glsl" />
-    <None Include="..\bin\resources\shaders\opengl\tfx_vgs.glsl" />
     <None Include="..\bin\resources\shaders\dx11\convert.fx" />
-    <None Include="..\bin\resources\shaders\common\fxaa.fx" />
+    <None Include="..\bin\resources\shaders\dx11\imgui.fx" />
     <None Include="..\bin\resources\shaders\dx11\interlace.fx" />
     <None Include="..\bin\resources\shaders\dx11\merge.fx" />
+    <None Include="..\bin\resources\shaders\dx11\present.fx" />
     <None Include="..\bin\resources\shaders\dx11\shadeboost.fx" />
     <None Include="..\bin\resources\shaders\dx11\tfx.fx" />
-    <None Include="..\bin\resources\shaders\dx11\imgui.fx" />
-    <None Include="..\bin\resources\shaders\dx11\present.fx" />
+    <None Include="..\bin\resources\shaders\dx11\cas.hlsl" />
     <None Include="GS\Renderers\Vulkan\VKEntryPoints.inl">
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </None>
@@ -157,6 +244,16 @@
     <ClCompile Include="DebugTools\MipsStackWalk.cpp" />
     <ClCompile Include="DebugTools\SymbolGuardian.cpp" />
     <ClCompile Include="DebugTools\SymbolImporter.cpp" />
+    <ClCompile Include="DEV9\ACATA.cpp" />
+    <ClCompile Include="DEV9\ACATAPI.cpp" />
+    <ClCompile Include="DEV9\ACATA_IO.cpp" />
+    <ClCompile Include="DEV9\ACATA_IO_CHD.cpp" />
+    <ClCompile Include="DEV9\ACCORE.cpp" />
+    <ClCompile Include="DEV9\ACJV.cpp" />
+    <ClCompile Include="DEV9\ACRAM.cpp" />
+    <ClCompile Include="DEV9\ACSRAM.cpp" />
+    <ClCompile Include="DEV9\ACUART.cpp" />
+    <ClCompile Include="DEV9\ACUART_GLUE.cpp" />
     <ClCompile Include="DEV9\AdapterUtils.cpp" />
     <ClCompile Include="DEV9\ATA\Commands\ATA_Command.cpp" />
     <ClCompile Include="DEV9\ATA\Commands\ATA_CmdDMA.cpp" />
@@ -202,6 +299,7 @@
     <ClCompile Include="DEV9\smap.cpp" />
     <ClCompile Include="DEV9\sockets.cpp" />
     <ClCompile Include="DEV9\net.cpp" />
+    <ClCompile Include="DEV9\LocalLinkAdapter.cpp" />
     <ClCompile Include="DEV9\Win32\tap-win32.cpp" />
     <ClCompile Include="GameList.cpp" />
     <ClCompile Include="GS\GSDrawingEnvironment.cpp" />
@@ -268,6 +366,7 @@
     <ClCompile Include="GS\Renderers\DX12\GSTexture12.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSTextureReplacementLoaders.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSTextureReplacements.cpp" />
+    <ClCompile Include="GS\Renderers\HW\GSTextureUpscaler.cpp" />
     <ClCompile Include="GS\Renderers\Vulkan\GSDeviceVK.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </ClCompile>
@@ -336,6 +435,7 @@
     <ClCompile Include="GS\GS.cpp" />
     <ClCompile Include="GS\GSBlock.cpp" />
     <ClCompile Include="GS\GSCapture.cpp" />
+    <ClCompile Include="GS\GSCacheFile.cpp" />
     <ClCompile Include="GS\GSClut.cpp" />
     <ClCompile Include="GS\Renderers\Common\GSDevice.cpp" />
     <ClCompile Include="GS\Renderers\DX11\GSDevice11.cpp" />
@@ -343,6 +443,7 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="GS\Renderers\Common\GSDirtyRect.cpp" />
+    <ClCompile Include="GS\Renderers\Common\GSFieldShiftDetector.cpp" />
     <ClCompile Include="GS\GSDrawingContext.cpp" />
     <ClCompile Include="GS\Renderers\SW\GSDrawScanline.cpp" />
     <ClCompile Include="GS\Renderers\SW\GSDrawScanlineCodeGenerator.all.cpp">
@@ -350,6 +451,15 @@
     </ClCompile>
     <ClCompile Include="GS\GSDump.cpp" />
     <ClCompile Include="GS\Renderers\Common\GSFunctionMap.cpp" />
+    <ClCompile Include="GS\DriverReport\GSDriverReport.cpp" />
+    <ClCompile Include="GS\DriverReport\GSDriverReportActive.cpp" />
+    <ClCompile Include="GS\DriverReport\GSDriverReportClassify.cpp" />
+    <ClCompile Include="GS\DriverReport\GSDriverReportJson.cpp" />
+    <ClCompile Include="GS\DriverReport\GSDriverReportProfile.cpp" />
+    <ClCompile Include="GS\DriverReport\GSDriverReportSystem.cpp" />
+    <ClCompile Include="GS\DriverReport\GSDriverReportVulkan.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="GS\Renderers\Common\GSGPUDriverProfile.cpp" />
     <ClCompile Include="GS\Renderers\Common\GSGPUProfile.cpp" />
     <ClCompile Include="GS\Renderers\Common\GSGPUProfileMali.cpp" />
@@ -364,9 +474,11 @@
     <ClCompile Include="GS\GSRingHeap.cpp" />
     <ClCompile Include="GS\Renderers\SW\GSRasterizer.cpp" />
     <ClCompile Include="GS\Renderers\Common\GSRenderer.cpp" />
+    <ClCompile Include="GS\Renderers\HW\GSLineRuns.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSRendererHW.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSRendererHWMultiISA.cpp" />
     <ClCompile Include="GS\Renderers\Null\GSRendererNull.cpp" />
+    <ClCompile Include="GS\Renderers\Null\GSDeviceNone.cpp" />
     <ClCompile Include="GS\Renderers\SW\GSRendererSW.cpp" />
     <ClCompile Include="GS\Renderers\SW\GSSetupPrimCodeGenerator.all.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
@@ -379,11 +491,13 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="GS\Renderers\HW\GSTextureCache.cpp" />
+    <ClCompile Include="GS\Renderers\HW\GSDrawLog.cpp" />
     <ClCompile Include="GS\Renderers\SW\GSTextureCacheSW.cpp" />
     <ClCompile Include="GS\GSUtil.cpp" />
     <ClCompile Include="GS\GSVector.cpp" />
     <ClCompile Include="GS\Renderers\Common\GSVertexTrace.cpp" />
     <ClCompile Include="GS\Renderers\Common\GSVertexTraceFMM.cpp" />
+    <ClCompile Include="GS\Renderers\Common\GSPassScheduler.cpp" />
     <ClCompile Include="GS\GSXXH.cpp" />
     <ClCompile Include="GS\MultiISA.cpp" />
     <ClCompile Include="StateWrapper.cpp" />
@@ -556,6 +670,12 @@
     <ClCompile Include="Ipu\yuv2rgb.cpp" />
     <ClCompile Include="GS.cpp" />
     <ClCompile Include="MTGS.cpp" />
+    <ClCompile Include="VU1Trace.cpp" />
+    <ClCompile Include="ee_divtrace.cpp" />
+    <ClCompile Include="microVU_Divtrace.cpp" />
+    <ClCompile Include="no-jit-improvements.cpp" />
+    <ClCompile Include="vu_capture.cpp" />
+    <ClCompile Include="PerGameOverrides.cpp" />
     <ClCompile Include="DebugTools\DisR3000A.cpp" />
     <ClCompile Include="DebugTools\DisR5900asm.cpp" />
     <ClCompile Include="DebugTools\DisVU0Micro.cpp" />
@@ -614,6 +734,20 @@
     <ClInclude Include="DebugTools\MipsStackWalk.h" />
     <ClInclude Include="DebugTools\SymbolGuardian.h" />
     <ClInclude Include="DebugTools\SymbolImporter.h" />
+    <ClInclude Include="DEV9\ACATA.h" />
+    <ClInclude Include="DEV9\ACATAPI.h" />
+    <ClInclude Include="DEV9\ACATA_IO_CHD.h" />
+    <ClInclude Include="DEV9\ACATA_IO_WRITES.h" />
+    <ClInclude Include="DEV9\ACATA_internal.h" />
+    <ClInclude Include="DEV9\ACCORE.h" />
+    <ClInclude Include="DEV9\ACDEV.h" />
+    <ClInclude Include="DEV9\ACJV.h" />
+    <ClInclude Include="DEV9\ACJV_Inputs.h" />
+    <ClInclude Include="DEV9\ACMACROS.h" />
+    <ClInclude Include="DEV9\ACRAM.h" />
+    <ClInclude Include="DEV9\ACSRAM.h" />
+    <ClInclude Include="DEV9\ACUART.h" />
+    <ClInclude Include="DEV9\ACUART_GLUE.h" />
     <ClInclude Include="DEV9\AdapterUtils.h" />
     <ClInclude Include="DEV9\ATA\ATA.h" />
     <ClInclude Include="DEV9\ATA\HddCreate.h" />
@@ -720,7 +854,10 @@
     <ClInclude Include="GS\Renderers\DX11\D3D.h" />
     <ClInclude Include="GS\Renderers\DX12\GSDevice12.h" />
     <ClInclude Include="GS\Renderers\DX12\GSTexture12.h" />
+    <ClInclude Include="GS\Renderers\HW\GSTexelAddressedDraw.h" />
     <ClInclude Include="GS\Renderers\HW\GSTextureReplacements.h" />
+    <ClInclude Include="GS\Renderers\HW\GSTextureUpscaleSupport.h" />
+    <ClInclude Include="GS\Renderers\HW\GSTextureUpscaler.h" />
     <ClInclude Include="GS\Renderers\Vulkan\GSDeviceVK.h">
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </ClInclude>
@@ -728,6 +865,7 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="Host.h" />
+    <ClInclude Include="Input\AndroidNativeRumble.h" />
     <ClInclude Include="Input\DInputSource.h" />
     <ClInclude Include="Input\InputManager.h" />
     <ClInclude Include="Input\InputSource.h" />
@@ -779,6 +917,7 @@
     <ClInclude Include="GS\GSAlignedClass.h" />
     <ClInclude Include="GS\GSBlock.h" />
     <ClInclude Include="GS\GSCapture.h" />
+    <ClInclude Include="GS\GSCacheFile.h" />
     <ClInclude Include="GS\GSClut.h" />
     <ClInclude Include="GS\Renderers\Common\GSShaderEnums.h" />
     <ClInclude Include="GS\Renderers\Common\GSDevice.h" />
@@ -803,18 +942,31 @@
     <ClInclude Include="GS\Renderers\Common\GSGPUProfilePrivate.h" />
     <ClInclude Include="GS\GSLocalMemory.h" />
     <ClInclude Include="GS\GSLzma.h" />
+    <ClInclude Include="GS\GSCompileStats.h" />
     <ClInclude Include="GS\GSPerfMon.h" />
     <ClInclude Include="GS\GSPng.h" />
     <ClInclude Include="GS\GSRingHeap.h" />
     <ClInclude Include="GS\Renderers\SW\GSRasterizer.h" />
     <ClInclude Include="GS\Renderers\Common\GSRenderer.h" />
+    <ClInclude Include="GS\Renderers\Common\GSSwPrimRender.h" />
     <ClInclude Include="GS\Renderers\HW\GSRendererHW.h" />
     <ClInclude Include="GS\Renderers\Null\GSRendererNull.h" />
+    <ClInclude Include="GS\Renderers\Null\GSDeviceNone.h" />
+    <ClInclude Include="GS\Renderers\Null\GSNullDeviceProfile.h" />
     <ClInclude Include="GS\Renderers\SW\GSRendererSW.h" />
+    <ClInclude Include="GS\Renderers\SW\GSBlockWalk.h" />
+    <ClInclude Include="GS\Renderers\SW\GSColourWalk.h" />
+    <ClInclude Include="GS\Renderers\SW\GSCoordinateLag.h" />
+    <ClInclude Include="GS\Renderers\SW\GSCoordinateWalk.h" />
+    <ClInclude Include="GS\Renderers\SW\GSDepthWalk.h" />
+    <ClInclude Include="GS\Renderers\SW\GSLevelOfDetail.h" />
+    <ClInclude Include="GS\Renderers\SW\GSPerspectivePlane.h" />
     <ClInclude Include="GS\Renderers\SW\GSScanlineEnvironment.h" />
+    <ClInclude Include="GS\Renderers\SW\GSVertexQDivide.h" />
     <ClInclude Include="GS\Renderers\SW\GSSetupPrimCodeGenerator.all.h">
       <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
     </ClInclude>
+    <ClInclude Include="GS\GSSpriteCover.h" />
     <ClInclude Include="GS\GSState.h" />
     <ClInclude Include="GS\GSTables.h" />
     <ClInclude Include="GS\Renderers\Common\GSTexture.h" />
@@ -824,6 +976,7 @@
     </ClInclude>
     <ClInclude Include="GS\Renderers\HW\GSTextureCache.h" />
     <ClInclude Include="GS\Renderers\SW\GSTextureCacheSW.h" />
+    <ClInclude Include="GS\Renderers\SW\GSSwTextureDirty.h" />
     <ClInclude Include="GS\GSJobQueue.h" />
     <ClInclude Include="GS\GSUtil.h" />
     <ClInclude Include="GS\GSVector.h" />
@@ -833,10 +986,49 @@
     <ClInclude Include="GS\GSVector8.h" />
     <ClInclude Include="GS\Renderers\Common\GSVertex.h" />
     <ClInclude Include="GS\Renderers\HW\GSVertexHW.h" />
+    <ClInclude Include="GS\Renderers\HW\GSAlphaKnownBits.h" />
+    <ClInclude Include="GS\Renderers\HW\GSDepthCoverage.h" />
+    <ClInclude Include="GS\Renderers\HW\GSDrawAlphaMask.h" />
+    <ClInclude Include="GS\Renderers\HW\GSDrawLog.h" />
+    <ClInclude Include="GS\Renderers\HW\GSLineRuns.h" />
+    <ClInclude Include="GS\Renderers\HW\GSLineWalk.h" />
+    <ClInclude Include="GS\Renderers\HW\GSPointPlace.h" />
+    <ClInclude Include="GS\Renderers\HW\GSSpriteEdgeSnap.h" />
     <ClInclude Include="GS\Renderers\SW\GSVertexSW.h" />
     <ClInclude Include="GS\Renderers\Common\GSVertexTrace.h" />
+    <ClInclude Include="GS\Renderers\Common\GSFieldShiftDetector.h" />
+    <ClInclude Include="GS\Renderers\Common\GSFieldShiftPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSBlendConstantPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSBackThreadPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSCopyRoadBlendingPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSDynamicFeedbackLoopPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSAlphaBitLogicOp.h" />
+    <ClInclude Include="GS\Renderers\Common\GSReplacementAlphaSnap.h" />
+    <ClInclude Include="GS\Renderers\Common\GSFastStencilShadow.h" />
+    <ClInclude Include="GS\Renderers\Common\GSFramebufferFetchPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSMeasurementOverrides.h" />
+    <ClInclude Include="GS\Renderers\Common\GSInterlaceModePolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSNativeTexelGridPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSPassScheduler.h" />
+    <ClInclude Include="GS\Renderers\Common\GSPresentationPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSDrawRoad.h" />
+    <ClInclude Include="GS\Renderers\Common\GSSelfReadRoadPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSSnapshotPolicy.h" />
+    <ClInclude Include="GS\Renderers\Common\GSStreamRingFlushRange.h" />
+    <ClInclude Include="GS\Renderers\Common\GSStreamRingGrowth.h" />
+    <ClInclude Include="GS\DriverReport\GSDriverReport.h" />
+    <ClInclude Include="GS\DriverReport\GSDriverReportActive.h" />
+    <ClInclude Include="GS\DriverReport\GSDriverReportClassify.h" />
+    <ClInclude Include="GS\DriverReport\GSDriverReportJson.h" />
+    <ClInclude Include="GS\DriverReport\GSDriverReportProfile.h" />
+    <ClInclude Include="GS\DriverReport\GSDriverReportSystem.h" />
+    <ClInclude Include="GS\DriverReport\GSDriverReportVulkan.h" />
+    <ClInclude Include="GS\Renderers\Common\GSStreamRingMemoryPolicy.h" />
     <ClInclude Include="GS\GSXXH.h" />
     <ClInclude Include="GS\MultiISA.h" />
+    <ClInclude Include="GS\GSBackQueue.h" />
+    <ClInclude Include="GS\GSVertexKick.h" />
+    <ClInclude Include="GS\GSVertexKickKernel.h" />
     <ClInclude Include="IPU\IPUdma.h" />
     <ClInclude Include="Mdec.h" />
     <ClInclude Include="Patch.h" />
@@ -909,6 +1101,7 @@
     <ClInclude Include="x86\R5900_Profiler.h" />
     <ClInclude Include="VUflags.h" />
     <ClInclude Include="VUops.h" />
+    <ClInclude Include="VuMulBand.h" />
     <ClInclude Include="Sif.h" />
     <ClInclude Include="Sifcmd.h" />
     <ClInclude Include="Vif.h" />
@@ -921,18 +1114,7 @@
     <ClInclude Include="R5900.h" />
     <ClInclude Include="R5900OpcodeTables.h" />
     <ClInclude Include="COP0.h" />
-    <ClInclude Include="x86\iCOP0.h" />
-    <ClInclude Include="x86\iFPU.h" />
-    <ClInclude Include="x86\iMMI.h" />
     <ClInclude Include="x86\iR5900.h" />
-    <ClInclude Include="x86\iR5900Arit.h" />
-    <ClInclude Include="x86\iR5900AritImm.h" />
-    <ClInclude Include="x86\iR5900Branch.h" />
-    <ClInclude Include="x86\iR5900Jump.h" />
-    <ClInclude Include="x86\iR5900LoadStore.h" />
-    <ClInclude Include="x86\iR5900Move.h" />
-    <ClInclude Include="x86\iR5900MultDiv.h" />
-    <ClInclude Include="x86\iR5900Shift.h" />
     <ClInclude Include="IopBios.h" />
     <ClInclude Include="IopCounters.h" />
     <ClInclude Include="IopDma.h" />
@@ -978,6 +1160,16 @@
     <ClInclude Include="x86\BaseblockEx.h" />
     <ClInclude Include="ps2\BiosTools.h" />
     <ClInclude Include="MemoryTypes.h" />
+    <ClInclude Include="MTGS.h" />
+    <ClInclude Include="VU1Trace.h" />
+    <ClInclude Include="ee_divtrace.h" />
+    <ClInclude Include="microVU_Divtrace.h" />
+    <ClInclude Include="no-jit-improvements.h" />
+    <ClInclude Include="vu_capture.h" />
+    <ClInclude Include="EeFpuFormat.h" />
+    <ClInclude Include="EeFpuModel.h" />
+    <ClInclude Include="VuEfuModel.h" />
+    <ClInclude Include="PerGameOverrides.h" />
     <ClInclude Include="x86\iCore.h" />
   </ItemGroup>
   <ItemGroup>
@@ -1041,5 +1233,6 @@
   </ItemGroup>
   <Import Condition="$(Configuration.Contains(Debug)) Or $(Configuration.Contains(Devel))" Project="$(SolutionDir)3rdparty\winpixeventruntime\WinPixEventRuntime.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(SolutionDir)common\vsprops\ShaderToCpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

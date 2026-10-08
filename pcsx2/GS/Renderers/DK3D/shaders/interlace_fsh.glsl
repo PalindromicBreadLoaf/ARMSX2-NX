@@ -11,6 +11,8 @@ layout(binding = 0) uniform sampler2D samp0;
 layout(std140, binding = 0) uniform cb0
 {
 	vec4 ZrH; // x: buffer index, y: 1/vres, z: vres, w: MAD sensitivity
+	// xy: device rows [x, y) of the merge left undrawn for this field, which Merge drew a native line lower
+	vec4 FieldPad;
 	uint u_mode;
 };
 
@@ -21,7 +23,11 @@ void mode_weave()
 	const int vpos  = int(gl_FragCoord.y);
 
 	if ((vpos & 1) == field)
-		oColor = textureLod(samp0, vTexCoord, 0.0);
+	{
+		// Read the first drawn row instead of the cleared hole
+		const float src_row = (float(vpos) >= FieldPad.x && float(vpos) < FieldPad.y) ? FieldPad.y : float(vpos);
+		oColor = textureLod(samp0, vTexCoord + vec2(0.0, (src_row - float(vpos)) * ZrH.y), 0.0);
+	}
 	else
 		discard;
 }
@@ -51,7 +57,12 @@ void mode_mad_buffer()
 	const int vpos  = int(gl_FragCoord.y) + lofs;
 
 	if ((vpos & 1) == field)
-		oColor = textureLod(samp0, vTexCoord, 0.0);
+	{
+		// Same undrawn band as weave; this pass writes one bank of a target twice the source's height
+		const int   srow    = int(gl_FragCoord.y) - bank * vres;
+		const float src_row = (float(srow) >= FieldPad.x && float(srow) < FieldPad.y) ? FieldPad.y : float(srow);
+		oColor = textureLod(samp0, vTexCoord + vec2(0.0, (src_row - float(srow)) / float(vres)), 0.0);
+	}
 	else
 		discard;
 }

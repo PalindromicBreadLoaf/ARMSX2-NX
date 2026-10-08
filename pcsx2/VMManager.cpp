@@ -43,11 +43,19 @@
 #include "Vif_Dynarec.h"
 #include "VMManager.h"
 #include "ps2/BiosTools.h"
+#include "DEV9/ACATA.h"
+#include "DEV9/ACATAPI.h"
+#include "DEV9/ACCORE.h"
+#include "DEV9/ACJV.h"
+#include "DEV9/ACRAM.h"
+#include "DEV9/ACSRAM.h"
 
+#include "common/ARCADE.h"
 #include "common/Console.h"
 #include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/FPControl.h"
+#include "common/HostSys.h"
 #include "common/Perf.h"
 #include "common/ScopedGuard.h"
 #include "common/SettingsWrapper.h"
@@ -76,9 +84,22 @@
 #endif
 
 #include <atomic>
+#include <bit>
 #include <mutex>
 #include <sstream>
 #include <common/RedtapeWilCom.h>
+
+#if defined(__linux__)
+// Performance-core selection: std::popcount/max_element for the mask, and plain POSIX I/O
+// for the sysfs capacity nodes (they report st_size == 0, so buffered reads come back empty).
+#include <algorithm>
+#include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
@@ -124,6 +145,10 @@ namespace VMManager
 	static void WarnAboutUnsafeSettings();
 
 	static bool AutoDetectSource(const std::string& filename, Error* error = nullptr);
+	static bool OpenArcadeGame(const VMBootParameters& boot_params, Error* error);
+	static void CloseArcadeGame();
+	static void ApplyArcadeSessionSettings(SettingsInterface& si);
+	static u32 GetCRCForPatches();
 	static void UpdateDiscDetails(bool booting);
 	static void ClearDiscDetails();
 	static void HandleELFChange(bool verbose_patches_if_changed);
@@ -203,6 +228,7 @@ static std::string s_disc_version;
 static std::string s_title;
 static std::string s_title_en_search;
 static std::string s_title_en_replace;
+static std::string s_cur_region;
 static u32 s_disc_crc;
 static u32 s_current_crc;
 static u32 s_elf_entry_point = 0xFFFFFFFFu;
@@ -210,11 +236,27 @@ static std::string s_elf_path;
 static std::pair<u32, u32> s_elf_text_range;
 static bool s_elf_executed = false;
 static std::string s_elf_override;
+static std::string s_game_settings_override;
+
+// Namco System 246/256 arcade boards (PCSX2x6, see common/ARCADE.h): what the running arcade game's .acgame
+// set up, for OpenArcadeGame() and the settings reloads of its session.
+std::atomic<bool> Arcade::s_session{false};
+std::string ArcadeiLinkID;
+static std::string s_arcade_gameid;
+static std::string s_arcade_title;
+static std::string s_arcade_dongle; // memory card file in slot 1: the game's security dongle
+static std::string s_arcade_card;   // memory card file in slot 2, empty for none
+static std::string s_arcade_bios;   // the BIOS (in the BIOS folder) the game runs on, empty to search at boot
 static std::string s_input_profile_name;
 static u32 s_frame_advance_count = 0;
 static bool s_fast_boot_requested = false;
 static bool s_gs_open_on_initialize = false;
 static bool s_thread_affinities_set = false;
+// Cluster mask covering wherever the EE/VU/GS threads were just placed, published for helper
+// threads that want to sit alongside them (the Oboe audio callback). Atomic because that
+// callback is a real-time thread and must not walk cpuinfo itself; 0 means "affinity is off",
+// which is also the correct answer whenever placement failed or was cleared.
+static std::atomic<u64> s_perf_cluster_mask{0};
 
 static LimiterModeType s_limiter_mode = LimiterModeType::Nominal;
 static s64 s_limiter_ticks_per_frame = 0;
@@ -524,7 +566,14 @@ void VMManager::Internal::CPUThreadShutdown()
 	PerformanceMetrics::SetCPUThread(Threading::ThreadHandle());
 	PerformanceMetrics::AdpfShutdown(); // ADPF: close the hint session on VM shutdown (Android)
 
+	// On Android this runs at the end of every game, not once at app exit as on desktop, and the
+	// settings screen lists the USB devices from this registry between games. Emptying it here left
+	// that list with nothing but "Not Connected" after the first game until the app restarted (#752).
+	// The registry only holds device factories, filled once at app start (native-lib's initialize);
+	// a game's own devices are closed by USBclose().
+#if !defined(__ANDROID__)
 	USBshutdown();
+#endif
 
 	MTGS::ShutdownThread();
 	GSJoinSnapshotThreads();
@@ -548,13 +597,10 @@ void VMManager::Internal::CPUThreadShutdown()
 
 u64 VMManager::Internal::GetPerformanceClusterAffinityMask()
 {
-	// TODO(android-monorepo): full impl (in the known-good core) unions the CPU
-	// clusters of the EE/VU/GS target processors via ClusterAffinityMaskForOSId(),
-	// which isn't ported into this core yet. Returning 0 leaves adjacent helper
-	// threads (Oboe audio callback) on the kernel's default affinity — correct,
-	// just not big-cluster-pinned. Wire up when the thread-affinity subsystem is
-	// reconciled.
-	return 0;
+	// Unions the CPU clusters of the EE/VU/GS target processors. Computed on the CPU thread
+	// in SetEmuThreadAffinities and only read here, so this stays a single relaxed load —
+	// the caller is Oboe's audio data thread, on its callback deadline.
+	return s_perf_cluster_mask.load(std::memory_order_relaxed);
 }
 
 void VMManager::Internal::SetFileLogPath(std::string path)
@@ -811,6 +857,35 @@ void VMManager::LoadCoreSettings(SettingsInterface& si)
 	}
 
 	ClampRuntimeConfigToAvailableCPUProviders();
+
+	if (Arcade::IsActive())
+		ApplyArcadeSessionSettings(si);
+}
+
+// What an arcade board is, laid over the player's settings for as long as its game runs. Nothing is
+// written back: the player's own BIOS, memory cards and multitap are all there again for the next game.
+void VMManager::ApplyArcadeSessionSettings(SettingsInterface& si)
+{
+	// The board's own BIOS: the one OpenArcadeGame() found the game runs on (FindArcadeBiosFor), else the one
+	// the player picked; empty = the best COH-H dump in the BIOS folder (LoadBIOS).
+	EmuConfig.BaseFilenames.Bios = !s_arcade_bios.empty() ? s_arcade_bios : si.GetStringValue("Filenames", "ArcadeBIOS", "");
+
+	// mc0: holds the game's security dongle, mc1: a second card only a few games read (Soul Calibur
+	// II's Conquest card), or nothing.
+	EmuConfig.Mcd[0].Enabled = true;
+	EmuConfig.Mcd[0].Type = MemoryCardType::File;
+	EmuConfig.Mcd[0].Filename = s_arcade_dongle;
+	EmuConfig.Mcd[1].Enabled = !s_arcade_card.empty();
+	EmuConfig.Mcd[1].Type = MemoryCardType::File;
+	EmuConfig.Mcd[1].Filename = s_arcade_card;
+
+	// A multitap would move the dongle away from the port the board reads it on.
+	EmuConfig.Pad.MultitapPort0_Enabled = false;
+	EmuConfig.Pad.MultitapPort1_Enabled = false;
+
+	// The boards have more RAM than a console (a System 256 game needs 64MB EE and 4MB IOP); PCSX2x6
+	// runs every arcade game with the 128MB/8MB map, the arcade TOOL's.
+	EmuConfig.Cpu.ExtraMemory = true;
 }
 
 void VMManager::LoadInputBindings(SettingsInterface& si, std::unique_lock<std::mutex>& lock)
@@ -874,6 +949,22 @@ void VMManager::WarnAboutUnconfiguredController()
 
 void VMManager::ApplyGameFixes()
 {
+	// An arcade game's own ELF comes off its dongle, after the boot program, so HasBootedELF() can stay
+	// false for the whole game. Its database entry is known from the gameid from the start, so it applies
+	// from the start too, under what the BIOS case below adds (PCSX2x6).
+	if (Arcade::IsActive())
+	{
+		if (const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(s_disc_serial))
+		{
+			PerGameOverrides overrides;
+			if (const SettingsInterface* game_layer = Host::Internal::GetGameSettingsLayer())
+				overrides = ComputePerGameOverrides(*game_layer);
+
+			game->applyGameFixes(EmuConfig, EmuConfig.EnableGameFixes, overrides);
+			game->applyGSHardwareFixes(EmuConfig.GS, overrides);
+		}
+	}
+
 	if (!HasBootedELF() && !GSDumpReplayer::IsReplayingDump())
 	{
 		// Instant DMA needs to be on for this BIOS (font rendering is broken without it, possible cache issues).
@@ -992,6 +1083,10 @@ bool VMManager::ReloadGameSettings()
 
 std::string VMManager::GetGameSettingsPath(const std::string_view game_serial, u32 game_crc)
 {
+	// Game settings override via -gamecfg command line flag
+	if (!s_game_settings_override.empty())
+		return s_game_settings_override;
+
 	std::string sanitized_serial(Path::SanitizeFileName(game_serial));
 
 	return game_serial.empty() ?
@@ -1048,7 +1143,6 @@ void VMManager::Internal::UpdateEmuFolders()
 	const std::string old_patches_directory(EmuFolders::Patches);
 	const std::string old_memcards_directory(EmuFolders::MemoryCards);
 	const std::string old_textures_directory(EmuFolders::Textures);
-	const std::string old_videos_directory(EmuFolders::Videos);
 
 	auto lock = Host::GetSettingsLock();
 	EmuFolders::LoadConfig(*Host::Internal::GetBaseSettingsLayer());
@@ -1058,7 +1152,7 @@ void VMManager::Internal::UpdateEmuFolders()
 	{
 		if ((EmuFolders::Cheats != old_cheats_directory || EmuFolders::Patches != old_patches_directory) &&
 			!ArePatchesDisabledByEmulationOnlyMode())
-			Patch::ReloadPatches(s_disc_serial, s_current_crc, true, false, true, true);
+			Patch::ReloadPatches(s_disc_serial, GetCRCForPatches(), true, false, true, true);
 
 		if (EmuFolders::MemoryCards != old_memcards_directory)
 		{
@@ -1080,12 +1174,6 @@ void VMManager::Internal::UpdateEmuFolders()
 				if (VMManager::HasValidVM())
 					GSTextureReplacements::ReloadReplacementMap();
 			});
-		}
-
-		if (EmuFolders::Videos != old_videos_directory)
-		{
-			if (VMManager::HasValidVM())
-				MTGS::RunOnGSThread(&GSEndCapture);
 		}
 	}
 }
@@ -1159,17 +1247,32 @@ std::string VMManager::GetSerialForGameSettings()
 {
 	// If we're running an ELF, we don't want to use the serial for any ISO override
 	// for game settings, since the game settings is where we define the override.
+	// An arcade game boots through an ELF too, but is its gameid (PCSX2x6).
 	std::unique_lock lock(s_info_mutex);
-	return s_elf_override.empty() ? std::string(s_disc_serial) : std::string();
+	return (s_elf_override.empty() || Arcade::IsActive()) ? std::string(s_disc_serial) : std::string();
 }
+
+#if defined(__ANDROID__)
+// Set by the Android frontend. Its per-game settings live in the app's own store, and the file
+// read below is a copy it writes -- which it cannot even name until the disc CRC is known, and
+// that is here. Called with the name just before the read, so the file the database consults
+// for what the player claimed already says what they chose, from the very first boot.
+void (*g_android_before_game_settings_load)(const std::string& serial, const std::string& path) = nullptr;
+#endif
 
 bool VMManager::UpdateGameSettingsLayer()
 {
 	std::unique_ptr<INISettingsInterface> new_interface;
-	if (s_disc_crc != 0)
+	// An arcade game's settings are its gameid's, with CRC 0 (PCSX2x6).
+	if (s_disc_crc != 0 || (Arcade::IsActive() && !s_disc_serial.empty()))
 	{
-		std::string filename(GetGameSettingsPath(GetSerialForGameSettings(), s_disc_crc));
-		if (!FileSystem::FileExists(filename.c_str()))
+		const std::string serial = GetSerialForGameSettings();
+		std::string filename(GetGameSettingsPath(serial, s_disc_crc));
+#if defined(__ANDROID__)
+		if (g_android_before_game_settings_load)
+			g_android_before_game_settings_load(serial, filename);
+#endif
+		if (!FileSystem::FileExists(filename.c_str()) && !Arcade::IsActive())
 		{
 			// try the legacy format (crc.ini)
 			filename = GetGameSettingsPath({}, s_disc_crc);
@@ -1230,6 +1333,11 @@ bool VMManager::UpdateGameSettingsLayer()
 	return true;
 }
 
+bool VMManager::ReloadGameSettingsLayer()
+{
+	return UpdateGameSettingsLayer();
+}
+
 void VMManager::UpdateDiscDetails(bool booting)
 {
 	std::string memcardFilters;
@@ -1247,11 +1355,24 @@ void VMManager::UpdateDiscDetails(bool booting)
 			s_disc_crc = GSDumpReplayer::GetDumpCRC();
 			s_disc_elf = {};
 			s_disc_version = {};
+			s_cur_region = "NTSC";
 			serial_is_valid = !s_disc_serial.empty();
+		}
+		else if (Arcade::IsActive())
+		{
+			// An arcade game is its .acgame's gameid, with CRC 0 for whatever its media is: patches, game
+			// settings and the database all key off the gameid alone (PCSX2x6). A CD game's disc sits in
+			// the drive too, but has no SYSTEM.CNF a console would boot.
+			s_disc_serial = s_arcade_gameid;
+			s_disc_elf = {};
+			s_disc_version = {};
+			s_disc_crc = 0;
+			s_cur_region = "NTSC";
+			serial_is_valid = true;
 		}
 		else if (CDVDsys_GetSourceType() != CDVD_SourceType::NoDisc)
 		{
-			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_disc_crc, nullptr);
+			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_cur_region, &s_disc_crc, nullptr);
 			serial_is_valid = !s_disc_serial.empty();
 		}
 		else if (!s_elf_override.empty())
@@ -1259,17 +1380,20 @@ void VMManager::UpdateDiscDetails(bool booting)
 			s_disc_serial = Path::GetFileTitle(s_elf_override);
 			s_disc_version = {};
 			s_disc_crc = 0; // set below
+			s_cur_region = "NTSC";
 		}
 		else
 		{
 			s_disc_serial = BiosSerial;
 			s_disc_version = {};
 			s_disc_crc = 0;
+			s_cur_region = (BiosZone == "Europe") ? "PAL" : "NTSC";
 			title = fmt::format(TRANSLATE_FS("VMManager", "PS2 BIOS ({})"), BiosZone);
 		}
 
-		// If we're booting an ELF, use its CRC, not the disc (if any).
-		if (!s_elf_override.empty())
+		// If we're booting an ELF, use its CRC, not the disc (if any). An arcade game's boot program
+		// is not the game.
+		if (!s_elf_override.empty() && !Arcade::IsActive())
 			s_disc_crc = cdvdGetElfCRC(s_elf_override);
 
 		if (!booting && s_disc_serial == old_serial && s_disc_crc == old_crc)
@@ -1295,8 +1419,13 @@ void VMManager::UpdateDiscDetails(bool booting)
 
 				std::string game_title = custom_title.empty() ? game->name : std::move(custom_title);
 
-				// Append the ELF override if we're using it with a disc.
-				if (!s_elf_override.empty())
+				// Append the ELF override if we're using it with a disc. An arcade game's .acgame may
+				// name the game itself.
+				if (Arcade::IsActive())
+				{
+					title = s_arcade_title.empty() ? std::move(game_title) : s_arcade_title;
+				}
+				else if (!s_elf_override.empty())
 				{
 					title = fmt::format(
 						"{} [{}]", game_title, Path::GetFileTitle(s_elf_override));
@@ -1313,6 +1442,9 @@ void VMManager::UpdateDiscDetails(bool booting)
 				Console.Warning(fmt::format("Serial '{}' not found in GameDB.", s_disc_serial));
 			}
 		}
+
+		if (title.empty() && Arcade::IsActive())
+			title = s_arcade_title;
 
 		if (title.empty())
 		{
@@ -1345,7 +1477,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 	// Patches are game-dependent, thus should get applied after game settings ia loaded.
 	if (!ArePatchesDisabledByEmulationOnlyMode())
 	{
-		Patch::ReloadPatches(s_disc_serial, HasBootedELF() ? s_current_crc : 0, true, true, false, false);
+		Patch::ReloadPatches(s_disc_serial, HasBootedELF() ? GetCRCForPatches() : 0, true, true, false, false);
 	}
 
 	ReportGameChangeToHost();
@@ -1384,7 +1516,7 @@ void VMManager::HandleELFChange(bool verbose_patches_if_changed)
 
 	Console.WriteLn(Color_StrongOrange, fmt::format("ELF changed, active CRC {:08X} ({})", crc_to_report, s_elf_path));
 	if (!ArePatchesDisabledByEmulationOnlyMode())
-		Patch::ReloadPatches(s_disc_serial, crc_to_report, false, false, false, verbose_patches_if_changed);
+		Patch::ReloadPatches(s_disc_serial, HasBootedELF() ? GetCRCForPatches() : 0, false, false, false, verbose_patches_if_changed);
 	ApplyCoreSettings();
 }
 
@@ -1437,6 +1569,12 @@ bool VMManager::HasBootedELF()
 	return s_current_crc != 0 && s_elf_executed;
 }
 
+u32 VMManager::GetCRCForPatches()
+{
+	// An arcade game's patches are its gameid's alone, whatever ELF runs (PCSX2x6).
+	return Arcade::IsActive() ? 0 : s_current_crc;
+}
+
 bool VMManager::AutoDetectSource(const std::string& filename, Error* error)
 {
 	if (!filename.empty())
@@ -1484,6 +1622,284 @@ bool VMManager::AutoDetectSource(const std::string& filename, Error* error)
 		CDVDsys_ChangeSource(CDVD_SourceType::NoDisc);
 		return true;
 	}
+}
+
+// The board as a freshly started emulator has it: no interrupt or DMA pending, nothing half transferred
+// in the drive, its registers zero, JVS off until the game starts it. At a game's start and at every
+// reset of it (ARMSX2: the board outlives a game here, where PCSX2x6 started a new process). The
+// board's RAM and SRAM, which a reset keeps, are left alone.
+static void ResetArcadeBoard()
+{
+	ACCORE::Reset();
+	ACATA::Reset();
+	ACJV::enabled = false;
+}
+
+// Namco System 246/256 (PCSX2x6). An .acgame is an INI naming what the board needs; only the gameid is
+// mandatory, everything else has a default (PCSX2x6's game config documentation):
+//   [game] name, gameid (NM and five digits), platform (246, 256 or super256, else the game database's)
+//   [data] subdir (the gameid; where elf, mediasrc and sram are, "" for next to the .acgame),
+//          elf (boot.elf), mediasrc (GAMEID.chd), media (CD, DVD or HDD, else the database's),
+//          dongle (GAMEID.ps2, in the memory cards folder), card (none), sram (sram.bin),
+//          256Region (ASIA4, ASIA5 or JAPAN), jvsmode, args
+// A host whose game folders are not plain paths (Android's documents) finds the ELF, the media and the
+// SRAM itself and passes them in boot_params.arcade_*. Everything set up here is taken down by
+// CloseArcadeGame(), on a failed boot too (Initialize's close_state).
+bool VMManager::OpenArcadeGame(const VMBootParameters& boot_params, Error* error)
+{
+	const std::string& filename = boot_params.filename;
+	if (!FileSystem::FileExists(filename.c_str()))
+	{
+		Error::SetStringFmt(error, TRANSLATE_FS("VMManager", "Requested filename '{}' does not exist."), filename);
+		return false;
+	}
+
+	INISettingsInterface ini(filename);
+	if (!ini.Load())
+	{
+		Error::SetStringFmt(error, TRANSLATE_FS("VMManager", "Cannot read the arcade game file '{}'."), filename);
+		return false;
+	}
+
+	const std::string gameid = ini.GetStringValue("game", "gameid", "");
+	if (!Arcade::IsGameId(gameid))
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("VMManager", "'{}' is not an arcade game ID. It is NM followed by five digits, as in NM00004."),
+			gameid);
+		return false;
+	}
+
+	const GameDatabaseSchema::GameEntry* const db = GameDatabase::findGame(gameid);
+
+	// The board: System 246, or the overclocked System 256 / Super System 256.
+	std::string platform = StringUtil::toLower(ini.GetStringValue("game", "platform", ""));
+	if (platform.empty() && db)
+	{
+		if (db->region == "System256")
+			platform = "256";
+		else if (db->region == "System SUPER256")
+			platform = "super256";
+	}
+	u32 clock;
+	if (platform.empty() || platform == "246")
+		clock = PS2CLK_DEFAULT;
+	else if (platform == "256")
+		clock = PS2CLK_S256;
+	else if (platform == "super256")
+		clock = PS2CLK_SS256;
+	else
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("VMManager", "Unknown arcade platform '{}'. It is 246, 256 or super256."), platform);
+		return false;
+	}
+
+	std::string media_name = StringUtil::toUpper(ini.GetStringValue("data", "media", ""));
+	if (media_name.empty() && db)
+		media_name = StringUtil::toUpper(db->arcade.media);
+	const ACMEDIATYPE media_type = ACMEDIATYPE_FROM_STRING(media_name);
+	if (media_type == ACMEDIATYPE::ACUNK)
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("VMManager", "Unknown arcade media type '{}'. It is CD, DVD or HDD."), media_name);
+		return false;
+	}
+
+	const std::string region = StringUtil::toUpper(ini.GetStringValue("data", "256Region", ""));
+	if (!region.empty() && region != "ASIA4" && region != "ASIA5" && region != "JAPAN")
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("VMManager", "Unknown System 256 region '{}'. It is ASIA4, ASIA5 or JAPAN."), region);
+		return false;
+	}
+
+	// JVS input board: from the gameid, unless the .acgame forces one.
+	const std::string jvsmode = StringUtil::toLower(ini.GetStringValue("data", "jvsmode", ""));
+	JVS_MODE mode;
+	if (jvsmode.empty())
+		mode = ACJV::ResolveModeFromGameId(gameid);
+	else if (jvsmode == "lightgun")
+		mode = JVS_MODE::LIGHTGUN;
+	else if (jvsmode == "fighting")
+		mode = JVS_MODE::FIGHTING;
+	else if (jvsmode == "drum")
+		mode = JVS_MODE::DRUM;
+	else if (jvsmode == "racing")
+		mode = JVS_MODE::DRIVE;
+	else if (jvsmode == "standard")
+		mode = JVS_MODE::STANDARD;
+	else if (jvsmode == "twinstick")
+		mode = JVS_MODE::TWINSTICK;
+	else if (jvsmode == "touch")
+		mode = JVS_MODE::TOUCH;
+	else
+		mode = JVS_MODE::DEFAULT;
+
+	// The files next to it.
+	std::string basedir(Path::GetDirectory(filename));
+	const std::string subdir = ini.GetStringValue("data", "subdir", gameid.c_str());
+	if (!subdir.empty())
+		basedir = Path::Combine(basedir, subdir);
+	const auto locate = [&ini, &basedir](const std::string& found, const char* key, const std::string& default_name) {
+		if (!found.empty())
+			return found;
+		std::string name = ini.GetStringValue("data", key, default_name.c_str());
+		if (name.empty())
+			name = default_name;
+		return Path::IsAbsolute(name) ? name : Path::Combine(basedir, name);
+	};
+	const std::string elf = locate(boot_params.arcade_elf, "elf", "boot.elf");
+	const std::string media = locate(boot_params.arcade_media, "mediasrc", gameid + ".chd");
+	const std::string sram = locate(boot_params.arcade_sram, "sram", "sram.bin");
+	if (!FileSystem::FileExists(elf.c_str()))
+	{
+		Error::SetStringFmt(error, TRANSLATE_FS("VMManager", "The arcade game's boot program '{}' is missing."), elf);
+		return false;
+	}
+	if (!FileSystem::FileExists(media.c_str()))
+	{
+		Error::SetStringFmt(error, TRANSLATE_FS("VMManager", "The arcade game's media image '{}' is missing."), media);
+		return false;
+	}
+
+	// The memory cards. Missing ones would otherwise be made, blank, by the memory card code, and a blank
+	// dongle boots nothing.
+	std::string dongle = ini.GetStringValue("data", "dongle", "");
+	if (dongle.empty())
+		dongle = gameid + ".ps2";
+	std::string card = ini.GetStringValue("data", "card", "");
+	// Soul Calibur II is the one game that reads a card of its own in slot 2, its Conquest card; PCSX2x6's testers
+	// saw its opponents' AI go wrong without one (issue #793). An .acgame that names no card gets the one named
+	// after the game in the memory cards folder, when there is one (ARMSX2 for Android puts SC2MAKER's blank card
+	// there). It is a raw card, its spare bytes the game's own checksums, so never a .bin (converted as a card
+	// without ECC). Every other game keeps slot 2 empty unless its .acgame names a card.
+	if (card.empty() && gameid == "NM00007" &&
+		FileSystem::FileExists(Path::Combine(EmuFolders::MemoryCards, "NM00007.conquestcard").c_str()))
+	{
+		card = "NM00007.conquestcard";
+	}
+	if (!FileSystem::FileExists(Path::Combine(EmuFolders::MemoryCards, dongle).c_str()))
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("VMManager", "The arcade game's security dongle '{}' is not in the memory cards folder."), dongle);
+		return false;
+	}
+	if (!card.empty() && !FileSystem::FileExists(Path::Combine(EmuFolders::MemoryCards, card).c_str()))
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("VMManager", "The arcade game's memory card '{}' is not in the memory cards folder."), card);
+		return false;
+	}
+
+	// The board's BIOS (FindArcadeBiosFor): every arcade BIOS in the BIOS folder is in use, the System 256 one
+	// for every game and the System 246 one for a game that refuses it (Battle Gear 3), so none is picked.
+	std::string picked;
+	{
+		auto lock = Host::GetSettingsLock();
+		picked = Host::GetSettingsInterface()->GetStringValue("Filenames", "ArcadeBIOS", "");
+	}
+	std::string needs;
+	std::string bios = FindArcadeBiosFor(gameid, picked, &needs);
+	if (bios.empty() && !needs.empty())
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("VMManager", "This game does not run on the arcade BIOS in the BIOS folder. It needs the {} BIOS."), needs);
+		return false;
+	}
+
+	// From here on the board exists, for this boot and every reset of it. It starts as a freshly started
+	// emulator would have it, whatever the last arcade game left behind.
+	ResetArcadeBoard();
+	Arcade::s_session = true;
+	s_arcade_gameid = gameid;
+	s_arcade_title = ini.GetStringValue("game", "name", "");
+	s_arcade_dongle = std::move(dongle);
+	s_arcade_card = std::move(card);
+	s_arcade_bios = std::move(bios);
+	ArcadeiLinkID = region;
+	PS2CLK = clock;
+
+	if (!ACRAM::Allocate())
+	{
+		Error::SetString(error, TRANSLATE_STR("VMManager", "Not enough memory for the arcade board's RAM."));
+		return false;
+	}
+
+	ACJV::SetGameId(gameid);
+	ACJV::SetMode(mode);
+	{
+		auto lock = Host::GetSettingsLock();
+		ACJV::LoadConfig(*Host::GetSettingsInterface());
+		// The BIOS and the memory cards are read before the game's settings are, so the board's go in now.
+		ApplyArcadeSessionSettings(*Host::GetSettingsInterface());
+	}
+
+	ACATA::SetImage(media, media_type);
+	// What the game writes to a hard drive that is a CHD is kept beside its SRAM (ChdWrites).
+	ACATA::SetWritesFile(Path::Combine(Path::GetDirectory(sram), "hdd-writes.bin"));
+	if (ACATA::TH::IO_OpenImage() != 0)
+	{
+		if (!ACATA::TH::open_error.empty())
+			Error::SetString(error, ACATA::TH::open_error);
+		else
+			Error::SetStringFmt(error, TRANSLATE_FS("VMManager", "Cannot open the arcade game's media image '{}'."), media);
+		return false;
+	}
+
+	// The board has no disc drive of its own (PCSX2x6); a CD game's disc is in the console's drive as well.
+	if (media_type == ACMEDIATYPE::ACCD)
+	{
+		CDVDsys_SetFile(CDVD_SourceType::Iso, media);
+		CDVDsys_ChangeSource(CDVD_SourceType::Iso);
+	}
+	else
+	{
+		CDVDsys_ChangeSource(CDVD_SourceType::NoDisc);
+	}
+
+	s_elf_override = elf;
+	EmuConfig.CurrentGameArgs = ini.GetStringValue("data", "args", "");
+	ACSRAM::filepath = sram;
+
+	Console.WriteLn(Color_StrongGreen, fmt::format("Arcade game {} ({}): platform {}, media {}, JVS mode {}{}",
+		gameid, s_arcade_title, platform.empty() ? "246" : platform, media_name, static_cast<int>(mode),
+		region.empty() ? std::string() : fmt::format(", System 256 region {}", region)));
+	Console.WriteLn(Color_StrongGreen, fmt::format("  elf: {}", elf));
+	Console.WriteLn(Color_StrongGreen, fmt::format("  media: {}", media));
+	Console.WriteLn(Color_StrongGreen, fmt::format("  dongle: {}{}", s_arcade_dongle,
+		s_arcade_card.empty() ? std::string() : fmt::format(", card: {}", s_arcade_card)));
+	Console.WriteLn(Color_StrongGreen, fmt::format("  sram: {}", sram));
+	Console.WriteLn(Color_StrongGreen, fmt::format("  bios: {}", s_arcade_bios.empty() ? std::string("(searched at boot)") : s_arcade_bios));
+	return true;
+}
+
+// Takes the board down again: everything OpenArcadeGame() set up, in a boot that failed half way too. Only
+// does anything after an arcade session, so a console game's boot and shutdown pass straight through.
+void VMManager::CloseArcadeGame()
+{
+	if (!Arcade::IsActive())
+		return;
+
+	ACATA::TH::IO_CloseImage();
+	ACATAPI::Reset(); // the next game gets a fresh MODE SENSE page
+	ACRAM::Release();
+	ACSRAM::filepath = {};
+	ArcadeiLinkID = {};
+	PS2CLK = PS2CLK_DEFAULT;
+	PSXCLK = 36864000;
+	EmuConfig.CurrentGameArgs = {};
+	s_arcade_gameid = {};
+	s_arcade_title = {};
+	s_arcade_dongle = {};
+	s_arcade_card = {};
+	s_arcade_bios = {};
+	Arcade::s_session = false;
+}
+
+bool VMManager::IsArcadeGameFileName(const std::string_view path)
+{
+	return StringUtil::EndsWithNoCase(path, ".acgame");
 }
 
 void VMManager::PrecacheCDVDFile()
@@ -1565,10 +1981,13 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 	VMManager::Internal::ResetVMHotkeyState();
 
 	ScopedGuard close_state = [] {
+		CloseArcadeGame();
+
 		if (GSDumpReplayer::IsReplayingDump())
 			GSDumpReplayer::Shutdown();
 
 		s_elf_override = {};
+		s_game_settings_override = {};
 		ClearELFInfo();
 		ClearDiscDetails();
 
@@ -1628,6 +2047,13 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 		CDVDsys_SetFile(boot_params.source_type.value(), boot_params.filename);
 		CDVDsys_ChangeSource(boot_params.source_type.value());
 	}
+	else if (IsArcadeGameFileName(boot_params.filename) || !boot_params.arcade_elf.empty())
+	{
+		// A Namco System 246/256 game: the board comes up with it. A host that found the game's files
+		// says so even when the .acgame's URI does not carry its name (a document with an opaque ID).
+		if (!OpenArcadeGame(boot_params, error))
+			return VMBootResult::StartupFailure;
+	}
 	else
 	{
 		// Automatic type detection of boot parameter based on filename.
@@ -1643,6 +2069,12 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 		Console.WriteLn("Loading BIOS...");
 		if (!LoadBIOS())
 		{
+			if (Arcade::IsActive())
+			{
+				Error::SetString(error, TRANSLATE_STR("VMManager",
+					"Arcade games need the BIOS of a Namco System 246 or 256 board (a COH-H BIOS) in the BIOS folder."));
+				return VMBootResult::StartupFailure;
+			}
 			Error::SetStringFmt(error,
 				TRANSLATE_FS("VMManager",
 					"PCSX2 requires a PlayStation 2 BIOS in order to run.\n\n"
@@ -1656,6 +2088,10 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 
 		// Must happen after BIOS load, depends on BIOS version.
 		cdvdLoadNVRAM();
+
+		// The arcade board's settings memory (its test menu's settings), kept per game.
+		if (Arcade::IsActive())
+			ACSRAM::ReadFile();
 	}
 
 	Error cdvd_error;
@@ -1668,6 +2104,23 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 		return VMBootResult::StartupFailure;
 	}
 	ScopedGuard close_cdvd(&DoCDVDclose);
+
+	if (!boot_params.game_config.empty())
+	{
+		if (!StringUtil::compareNoCase(Path::GetExtension(boot_params.game_config), "ini"))
+		{
+			Error::SetStringFmt(error,
+				TRANSLATE_FS("VMManager", "Requested game config '{}' is not an INI file."), boot_params.game_config);
+			return VMBootResult::StartupFailure;
+		}
+		else if (!FileSystem::FileExists(boot_params.game_config.c_str()))
+		{
+			Error::SetStringFmt(error,
+				TRANSLATE_FS("VMManager", "Requested game config '{}' does not exist."), boot_params.game_config);
+			return VMBootResult::StartupFailure;
+		}
+		s_game_settings_override = boot_params.game_config;
+	}
 
 	// Figure out which game we're running! This also loads game settings.
 	UpdateDiscDetails(true);
@@ -1896,6 +2349,7 @@ void VMManager::Shutdown(bool save_resume_state)
 
 	SaveSessionTime(s_disc_serial);
 	s_elf_override = {};
+	s_game_settings_override = {};
 	ClearELFInfo();
 	CDVDsys_ClearFiles();
 
@@ -1948,6 +2402,10 @@ void VMManager::Shutdown(bool save_resume_state)
 		GSDumpReplayer::Shutdown();
 	else
 		cdvdSaveNVRAM();
+
+	if (Arcade::IsActive())
+		ACSRAM::WriteFile();
+	CloseArcadeGame();
 
 	cdvdUnlock();
 
@@ -2018,6 +2476,8 @@ void VMManager::Reset()
 	SysMemory::Reset();
 	cpuReset();
 	hwReset();
+	if (Arcade::IsActive())
+		ResetArcadeBoard();
 
 	if (g_InputRecording.isActive())
 	{
@@ -2499,7 +2959,7 @@ void VMManager::ResetFrameLimiter()
 	s_limiter_frame_start = GetCPUTicks();
 }
 
-void VMManager::Internal::Throttle()
+void VMManager::Internal::Throttle(bool vsync_start)
 {
 	if (s_target_speed == 0.0f || s_use_vsync_for_timing)
 	{
@@ -2509,15 +2969,16 @@ void VMManager::Internal::Throttle()
 		return;
 	}
 
-	// ADPF: report the active-work period that just ended (before the limiter sleep below), then
-	// re-open a new period AFTER the sleep. The ScopedGuard fires on EVERY exit past here —
-	// including the missed-frame early return — so measurement survives the can't-hit-target case.
-	PerformanceMetrics::AdpfOnFrameWorkComplete();
+	// ADPF: close the active-work segment that just ended (before the limiter sleep below), then
+	// re-open one AFTER the sleep. The frame's two segments are reported together at the vsync-end
+	// wait. The ScopedGuard fires on EVERY exit past here — including the missed-frame early
+	// return — so measurement survives the can't-hit-target case.
+	PerformanceMetrics::AdpfEndWorkSegment(!vsync_start);
 	ScopedGuard adpf_begin_next_work([]() { PerformanceMetrics::AdpfBeginFrameWork(); });
 
 	const u64 uExpectedEnd =
 		s_limiter_frame_start +
-		s_limiter_ticks_per_frame; // Compute when we would expect this frame to end, assuming everything goes perfectly perfect.
+		(vsync_start ? (s_limiter_ticks_per_frame * 0.9) : s_limiter_ticks_per_frame); // Compute when we would expect this frame to end, assuming everything goes perfectly perfect.
 	const u64 iEnd = GetCPUTicks(); // The current tick we actually stopped on.
 	const s64 sDeltaTime = iEnd - uExpectedEnd; // The diff between when we stopped and when we expected to.
 
@@ -2542,13 +3003,17 @@ void VMManager::Internal::Throttle()
 	}
 
 	// Conversion to milliseconds loses some precision; after sleeping off whole milliseconds,
-	// spin the thread without sleeping until we finally reach our expected end time.
+	// spin the thread without sleeping until we finally reach our expected end time. Hint the
+	// spin with the calibrated pause bursts (pause on x86, isb on AArch64) instead of hammering
+	// the counter bare - the hint keeps the co-resident cores' throughput and cuts power.
 	while (GetCPUTicks() < uExpectedEnd)
-	{
-	}
+		ShortSpin();
 
-	// Finally, set our next frame start to when this one ends
-	s_limiter_frame_start = uExpectedEnd;
+	if (!vsync_start)
+	{
+		// Finally, set our next frame start to when this one ends
+		s_limiter_frame_start = uExpectedEnd;
+	}
 }
 
 void VMManager::Internal::FrameRateChanged()
@@ -3118,6 +3583,11 @@ bool VMManager::Internal::IsFastBootInProgress()
 	return s_fast_boot_requested && !HasBootedELF();
 }
 
+std::string VMManager::Internal::GetCurrentRegion()
+{
+	return s_cur_region;
+}
+
 void VMManager::Internal::DisableFastBoot()
 {
 	if (!s_fast_boot_requested)
@@ -3470,7 +3940,7 @@ void VMManager::ReloadPatches(bool reload_files, bool reload_enabled_list, bool 
 	if (!HasValidVM() || ArePatchesDisabledByEmulationOnlyMode())
 		return;
 
-	Patch::ReloadPatches(s_disc_serial, HasBootedELF() ? s_current_crc : 0, reload_files, reload_enabled_list, verbose, verbose_if_changed);
+	Patch::ReloadPatches(s_disc_serial, HasBootedELF() ? GetCRCForPatches() : 0, reload_files, reload_enabled_list, verbose, verbose_if_changed);
 
 	// Might change widescreen mode.
 	if (Patch::ReloadPatchAffectingOptions())
@@ -3575,7 +4045,6 @@ void VMManager::ReleaseNonEssentialRuntimeResources(u32 release_flags)
 		GSConfig.OsdShowSettings = false;
 		GSConfig.OsdshowPatches = false;
 		GSConfig.OsdShowInputs = false;
-		GSConfig.OsdShowVideoCapture = false;
 		GSConfig.OsdShowInputRec = false;
 		GSConfig.OsdShowTextureReplacements = false;
 	}
@@ -3711,6 +4180,11 @@ void VMManager::WarnAboutUnsafeSettings()
 			append(ICON_FA_CIRCLE_EXCLAMATION,
 				TRANSLATE_SV("VMManager", "Draw Buffering is enabled, this may result in graphical errors."));
 		}
+		if (EmuConfig.GS.UserHacks_RewriteLargeSTCoords)
+		{
+			append(ICON_FA_CIRCLE_EXCLAMATION,
+				TRANSLATE_SV("VMManager", "Rewrite large ST is enabled, this may reduce performance."));
+		}
 		if (EmuConfig.GS.DumpReplaceableTextures)
 		{
 			append(ICON_FA_CIRCLE_EXCLAMATION,
@@ -3803,13 +4277,15 @@ void VMManager::WarnAboutUnsafeSettings()
 			TRANSLATE_SV("VMManager", "VU1 Round Mode is not set to default, this may break some games."));
 	}
 	if (!EmuConfig.Cpu.Recompiler.vu0Overflow || EmuConfig.Cpu.Recompiler.vu0ExtraOverflow ||
-		EmuConfig.Cpu.Recompiler.vu0SignOverflow || !EmuConfig.Cpu.Recompiler.vu1Overflow ||
-		EmuConfig.Cpu.Recompiler.vu1ExtraOverflow || EmuConfig.Cpu.Recompiler.vu1SignOverflow)
+		EmuConfig.Cpu.Recompiler.vu0SignOverflow || EmuConfig.Cpu.Recompiler.vu0ExactMode ||
+		!EmuConfig.Cpu.Recompiler.vu1Overflow || EmuConfig.Cpu.Recompiler.vu1ExtraOverflow ||
+		EmuConfig.Cpu.Recompiler.vu1SignOverflow || EmuConfig.Cpu.Recompiler.vu1ExactMode)
 	{
 		append(ICON_PF_MICROCHIP,
 			TRANSLATE_SV("VMManager", "VU Clamp Mode is not set to default, this may break some games."));
 	}
-	if (EmuConfig.Cpu.ExtraMemory)
+	// An arcade board runs with Extended RAM because it has it (ApplyArcadeSessionSettings).
+	if (EmuConfig.Cpu.ExtraMemory && !Arcade::IsActive())
 	{
 		append(ICON_PF_MICROCHIP,
 			TRANSLATE_SV("VMManager", "Extended RAM is enabled. Compatibility with some games may be affected."));
@@ -3935,7 +4411,11 @@ void VMManager::SaveSessionTime(const std::string& prev_serial)
 
 u64 VMManager::GetSessionPlayedTime()
 {
-	return static_cast<u64>(std::round(Common::Timer::ConvertValueToSeconds(s_session_accumulated_playtime)));
+	u64 played = s_session_accumulated_playtime;
+	// The stretch since the last resume is only added on pause.
+	if (s_state.load(std::memory_order_acquire) == VMState::Running)
+		played += static_cast<u64>(Common::Timer::GetCurrentValue()) - s_session_resume_timestamp;
+	return static_cast<u64>(std::round(Common::Timer::ConvertValueToSeconds(played)));
 }
 
 #ifdef _WIN32
@@ -3984,6 +4464,178 @@ static u32 GetProcessorIdForProcessor(const cpuinfo_processor* proc)
 	return 0;
 #endif
 }
+
+#if defined(__linux__)
+// Per-CPU scheduler capacity, as the kernel's own EAS uses it. Read with plain POSIX I/O:
+// these sysfs nodes report st_size == 0, so any size-based read comes back EMPTY.
+// Returns 0 when the node is missing (older kernels) or unreadable.
+static u32 ReadCpuSysfsU32(u32 cpu, const char* node)
+{
+	char path[128];
+	std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u/%s", cpu, node);
+
+	const int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+
+	char buf[32] = {};
+	const ssize_t got = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (got <= 0)
+		return 0;
+
+	return static_cast<u32>(std::strtoul(buf, nullptr, 10));
+}
+
+// How "fast" each processor is, on whatever scale we can actually read. Only the RATIO between
+// entries matters, so the three sources never mix within one call:
+//   1. cpu_capacity   — what EAS itself ranks by, and present on Android where the others aren't
+//   2. cpuinfo_max_freq — every cpufreq kernel has it, even without capacity-aware scheduling
+//   3. cpuinfo's frequency — last resort, and 0 on many Android SoCs (hence the two above)
+// An all-zero result means "we cannot tell the clusters apart", which callers must treat as
+// "do not confine anything" rather than guessing.
+static std::vector<u32> GetProcessorWeights()
+{
+	const u32 count = cpuinfo_get_processors_count();
+	std::vector<u32> weights(count, 0);
+
+	for (const char* node : {"cpu_capacity", "cpufreq/cpuinfo_max_freq"})
+	{
+		bool any = false;
+		for (u32 i = 0; i < count; i++)
+		{
+			const cpuinfo_processor* proc = cpuinfo_get_processor(i);
+			if (!proc)
+				continue;
+			weights[i] = ReadCpuSysfsU32(GetProcessorIdForProcessor(proc), node);
+			any |= (weights[i] != 0);
+		}
+		if (any)
+			return weights;
+	}
+
+	for (u32 i = 0; i < count; i++)
+	{
+		const cpuinfo_processor* proc = cpuinfo_get_processor(i);
+		weights[i] = (proc && proc->core) ? proc->core->frequency : 0;
+	}
+	return weights;
+}
+
+// Every processor within PERF_CLUSTER_RATIO of the fastest one. Deliberately NOT "the cluster
+// owning the fastest core": cpuinfo starts a new cluster whenever max_frequency differs, so on
+// any 1+3+4 or 1+2+2+3 flagship the prime core is a cluster of ONE, and confining EE/VU/GS to
+// a single core is far worse than not confining them at all. Ranking by capacity puts the prime
+// and the big cores in one mask, which is the grouping a human means by "performance cores".
+static u64 GetPerformanceCoresMask()
+{
+	const std::vector<u32> weights = GetProcessorWeights();
+	const u32 peak = weights.empty() ? 0 : *std::max_element(weights.begin(), weights.end());
+	if (peak == 0)
+		return 0; // Indistinguishable cores — caller must not confine.
+
+	// 0.75 keeps a 4x A715 @ 855 tier with an X3 @ 1024 (0.83), while dropping an A510 @ 280
+	// (0.27). Mid tiers on 1+2+2+3 parts sit around 0.80-0.90 and are kept on purpose.
+	constexpr double PERF_CLUSTER_RATIO = 0.75;
+	const u32 threshold = static_cast<u32>(static_cast<double>(peak) * PERF_CLUSTER_RATIO);
+
+	u64 mask = 0;
+	for (u32 i = 0; i < weights.size(); i++)
+	{
+		const cpuinfo_processor* proc = cpuinfo_get_processor(i);
+		if (!proc || proc->smt_id != 0 || weights[i] < threshold)
+			continue;
+		mask |= static_cast<u64>(1) << GetProcessorIdForProcessor(proc);
+	}
+	return mask;
+}
+#endif
+
+// Widen a mask of individual processors to every processor sharing their clusters. cpuinfo
+// splits ARM clusters by MIDR, so this is "the same core type", which is what a helper thread
+// wants: near the emu threads' cache, without stealing one of their specific cores.
+static u64 ClusterMaskForProcessorMask(u64 processor_mask)
+{
+	if (processor_mask == 0)
+		return 0;
+
+	const u32 count = cpuinfo_get_processors_count();
+	u64 mask = 0;
+	for (u32 i = 0; i < count; i++)
+	{
+		const cpuinfo_processor* seed = cpuinfo_get_processor(i);
+		if (!seed || !seed->cluster)
+			continue;
+		if (!(processor_mask & (static_cast<u64>(1) << GetProcessorIdForProcessor(seed))))
+			continue;
+
+		for (u32 j = 0; j < count; j++)
+		{
+			const cpuinfo_processor* peer = cpuinfo_get_processor(j);
+			if (peer && peer->cluster == seed->cluster)
+				mask |= static_cast<u64>(1) << GetProcessorIdForProcessor(peer);
+		}
+	}
+	return mask;
+}
+
+// Where the back thread goes when the MTGS (front) thread is confined to gs_mask and the
+// processors in occupied are pinned to other busy emu threads. Every draw crosses between
+// front and back through a shared ring, so the back wants the front's cache: measured on the
+// M2 (Spider-Man 3, 2x), back on the front's P-cluster 8.6 ms/frame, the other P-cluster
+// 11.5-12.0 ms, an E-core 22-23 ms. So, in order: the rest of the front's cluster if it is in
+// the performance tier, then the rest of the tier, each first without the occupied processors
+// and then with them. Never the front's own core(s) while anything else is left: both threads
+// are busy, and a back thread allowed onto a single-core front's core gets migrated there
+// whenever the front sleeps and then preempted by every front wake (SD865, front pinned to
+// one core: 560-930 back preemptions per frame against ~2). If the topology gives no answer,
+// every processor except the front's; 0 (unpinned) only when there is nothing else.
+static u64 ChooseGSBackThreadAffinity(u64 gs_mask, u64 occupied)
+{
+	if (gs_mask == 0)
+		return 0;
+
+#if defined(__linux__)
+	const u64 tier = GetPerformanceCoresMask();
+#else
+	const u64 tier = 0; // No capacity source on Windows; the cluster alone decides.
+#endif
+	const u64 cluster = ClusterMaskForProcessorMask(gs_mask) & ~gs_mask;
+	const u64 fast_cluster = tier ? (cluster & tier) : cluster;
+	const u64 fast_rest = tier & ~gs_mask;
+	u64 others = 0;
+	const u32 count = cpuinfo_get_processors_count();
+	for (u32 i = 0; i < count; i++)
+	{
+		if (const cpuinfo_processor* proc = cpuinfo_get_processor(i))
+			others |= static_cast<u64>(1) << GetProcessorIdForProcessor(proc);
+	}
+	others &= ~gs_mask;
+	for (const u64 candidate : {fast_cluster & ~occupied, fast_rest & ~occupied, fast_cluster, fast_rest, others})
+	{
+		if (candidate != 0)
+			return candidate;
+	}
+	return 0;
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+// Desktop Linux with thread pinning off: the performance tier, or 0 when the machine has no
+// slower tier to keep away from (every processor qualifies) or it cannot be read.
+static u64 GetUnpinnedGSTierMask()
+{
+	const u64 tier = GetPerformanceCoresMask();
+	u64 all = 0;
+	const u32 count = cpuinfo_get_processors_count();
+	for (u32 i = 0; i < count; i++)
+	{
+		const cpuinfo_processor* proc = cpuinfo_get_processor(i);
+		if (proc && proc->smt_id == 0)
+			all |= static_cast<u64>(1) << GetProcessorIdForProcessor(proc);
+	}
+	return (tier != 0 && tier != all && std::popcount(tier) >= 2) ? tier : 0;
+}
+#endif
 
 static void InitializeProcessorList()
 {
@@ -4145,13 +4797,73 @@ void VMManager::EnsureCPUInfoInitialized()
 	std::call_once(s_processor_list_initialized, InitializeProcessorList);
 }
 
+// The GS back thread (GS multi-threading) belongs to the renderer, which the MTGS thread creates
+// and destroys whenever a renderer opens, so the thread registers itself here instead of
+// VMManager holding its handle. One mutex covers the handle and the mask: a placement change on
+// the CPU thread can coincide with the back thread starting or exiting, and SetAffinity must
+// never be handed the id of a thread that has already exited. A thread that registers after a
+// placement was chosen picks that placement up; one that registers before gets it pushed.
+static std::mutex s_gs_back_thread_mutex;
+static Threading::ThreadHandle s_gs_back_thread_handle;
+static u64 s_gs_back_thread_affinity = 0; // 0 = any processor
+
+static void SetGSBackThreadAffinityLocked(u64 mask)
+{
+#ifdef __SWITCH__
+	// Core 3 is withheld from every other emulator thread, so the opt-in placement overrides any
+	// mask chosen here; SetAffinity(0) would otherwise move the thread back onto cores 0-2.
+	if (EmuConfig.GS.BackThreadUseCore3 && (Horizon::GetProcessCoreMask() & 8))
+		mask = 8;
+#endif
+	std::unique_lock lock(s_gs_back_thread_mutex);
+	s_gs_back_thread_affinity = mask;
+	if (s_gs_back_thread_handle)
+		s_gs_back_thread_handle.SetAffinity(mask);
+}
+
+u64 VMManager::Internal::RegisterGSBackThread(const Threading::ThreadHandle* handle)
+{
+	std::unique_lock lock(s_gs_back_thread_mutex);
+	s_gs_back_thread_handle = handle ? *handle : Threading::ThreadHandle();
+	// Applied even when 0: the new thread inherited the MTGS thread's mask, which may be a
+	// single core, and sharing that core would serialize the split again.
+	if (s_gs_back_thread_handle)
+		s_gs_back_thread_handle.SetAffinity(s_gs_back_thread_affinity);
+	return s_gs_back_thread_affinity;
+}
+
+void VMManager::Internal::SetGSBackThreadAffinity(u64 mask)
+{
+	SetGSBackThreadAffinityLocked(mask);
+}
+
+u64 VMManager::Internal::PlaceGSBackThreadNearGSThread()
+{
+	EnsureCPUInfoInitialized();
+	const auto pinned = [](const Threading::ThreadHandle& h) -> u64 {
+		const u64 mask = h ? h.GetAffinity() : 0;
+		return (std::popcount(mask) == 1) ? mask : 0;
+	};
+	const u64 gs_mask = MTGS::GetThreadHandle() ? MTGS::GetThreadHandle().GetAffinity() : 0;
+	const u64 occupied = gs_mask | pinned(s_vm_thread_handle) | pinned(vu1Thread.GetThreadHandle());
+#if defined(__linux__) || defined(_WIN32)
+	const u64 mask = ChooseGSBackThreadAffinity(gs_mask, occupied);
+#else
+	const u64 mask = 0; // No topology here (Darwin cannot pin threads anyway).
+#endif
+	SetGSBackThreadAffinityLocked(mask);
+	return mask;
+}
+
 #if defined(__ANDROID__)
 // Android "Affinity Control Mode", set by the app from NativeApp.setAffinityMode() before the VM
 // boots (see SetEmuThreadAffinities below for the semantics of each value):
 //   0 Disabled (default — scheduler decides)   1 EE>VU>GS   2 EE>GS>VU   3 VU>EE>GS
 //   4 VU>GS>EE   5 GS>EE>VU   6 GS>VU>EE       7 Performance Cores
 // A plain int like g_gs_android_prefer_vk: written once at startup/boot, read on the CPU thread.
-int g_android_affinity_mode = 0;
+// Default 7 = Performance Cores; see the Kotlin Settings.affinityMode doc. The app pushes
+// the user's value before runVMThread, so this only applies if that push never happened.
+int g_android_affinity_mode = 7;
 #endif
 
 void VMManager::SetEmuThreadAffinities()
@@ -4167,18 +4879,24 @@ void VMManager::SetEmuThreadAffinities()
 	// devices (all clusters report 0 MHz), so the frequency-ordered pin is unreliable
 	// anyway. Release any affinity so the scheduler can use the prime for VU.
 	//
-	// Affinity Control Mode (g_android_affinity_mode, default 0 = Disabled) is the opt-in
-	// escape hatch from that default. It exists because the reasoning above is not universal:
-	// on GS-bound titles an unpinned GS thread measurably regressed (Burnout 3), and community
-	// testers on other SoCs report gains from explicit placement. It is EXPERIMENTAL and
-	// off by default — the unpinned scheduler path below stays the recommended setting.
+	// All of the above is about modes 1-6, which hand out INDIVIDUAL cores. They stay
+	// EXPERIMENTAL and opt-in: they exist because the reasoning is not universal (on GS-bound
+	// titles an unpinned GS thread measurably regressed on Burnout 3, and community testers on
+	// other SoCs report gains from explicit placement), but the VU hazard above is real.
+	//
+	// Mode 7 (Performance Cores) is the DEFAULT and is a different mechanism: it confines the
+	// emu threads to the big/prime TIER and lets EAS keep placing them within it, so VU can
+	// still float to the prime. It never selects fewer processors than there are threads to
+	// place, and falls back to fully unpinned when it cannot resolve the tier at all.
 	if (g_android_affinity_mode == 0)
 	{
 		MTGS::GetThreadHandle().SetAffinity(0);
 		vu1Thread.GetThreadHandle().SetAffinity(0);
 		s_vm_thread_handle.SetAffinity(0);
+		SetGSBackThreadAffinityLocked(0);
 		s_software_renderer_processor_list = {};
 		s_thread_affinities_set = false;
+		s_perf_cluster_mask.store(0, std::memory_order_relaxed);
 		return;
 	}
 
@@ -4189,62 +4907,61 @@ void VMManager::SetEmuThreadAffinities()
 		MTGS::GetThreadHandle().SetAffinity(0);
 		vu1Thread.GetThreadHandle().SetAffinity(0);
 		s_vm_thread_handle.SetAffinity(0);
+		SetGSBackThreadAffinityLocked(0);
 		s_software_renderer_processor_list = {};
 		s_thread_affinities_set = false;
+		s_perf_cluster_mask.store(0, std::memory_order_relaxed);
 		return;
 	}
 
 	const bool android_mtvu = EmuConfig.Speedhacks.vuThread;
 
-	// Mode 7 = "Performance Cores": don't hand out individual cores at all, just confine all
-	// three threads to the big/prime cluster and let EAS place them within it. This is the
-	// safest of the pinning modes because it never pins VU to a specific mid-tier core.
+	// Mode 7 = "Performance Cores": don't hand out individual cores at all, just confine the
+	// emu threads to the big/prime tier and let EAS place them within it. This is the safest
+	// of the pinning modes because it never pins VU to a specific mid-tier core.
 	if (g_android_affinity_mode == 7)
 	{
-		// NOTE: deliberately NOT Internal::GetPerformanceClusterAffinityMask() — that is still a
-		// stub returning 0 in this core, which would make this mode silently do nothing. Derive
-		// the cluster from cpuinfo here instead: find the cluster owning the highest-frequency
-		// core and union every processor in it. cpuinfo reports 0 MHz for all cores on many
-		// Android SoCs, in which case this settles on the first cluster it lists — still a
-		// coherent cluster rather than a garbage mask.
-		const u64 perf_mask = [] {
-			const u32 count = cpuinfo_get_processors_count();
-			const cpuinfo_cluster* target = nullptr;
-			u32 best_freq = 0;
-			for (u32 i = 0; i < count; i++)
-			{
-				const cpuinfo_processor* proc = cpuinfo_get_processor(i);
-				if (!proc || proc->smt_id != 0 || !proc->core || !proc->cluster)
-					continue;
-				if (!target || proc->core->frequency > best_freq)
-				{
-					target = proc->cluster;
-					best_freq = proc->core->frequency;
-				}
-			}
-			u64 mask = 0;
-			if (!target)
-				return mask;
-			for (u32 i = 0; i < count; i++)
-			{
-				const cpuinfo_processor* proc = cpuinfo_get_processor(i);
-				if (!proc || proc->smt_id != 0 || proc->cluster != target)
-					continue;
-				mask |= static_cast<u64>(1) << GetProcessorIdForProcessor(proc);
-			}
-			return mask;
-		}();
-		if (perf_mask != 0)
+		const u64 perf_mask = GetPerformanceCoresMask();
+		// Confining N busy threads to fewer than N processors is strictly worse than leaving
+		// them alone — they end up timesharing one core instead of running concurrently. This
+		// is the guard that makes the mode safe enough to be the default: when the topology
+		// can't be read, or the fast tier is too narrow, we do NOTHING rather than something
+		// harmful. Note this deliberately does NOT fall through to the ordered per-core path
+		// below; that path is the pinning this mode exists to avoid.
+		const u32 threads_to_place = android_mtvu ? 3 : 2;
+		if (perf_mask != 0 && static_cast<u32>(std::popcount(perf_mask)) >= threads_to_place)
 		{
-			INFO_LOG("Affinity mode: Performance Cores (mask 0x{:x})", perf_mask);
+			INFO_LOG("Affinity mode: Performance Cores (mask 0x{:x}, {} processors, mtvu={})",
+				perf_mask, std::popcount(perf_mask), android_mtvu ? 1 : 0);
 			s_vm_thread_handle.SetAffinity(perf_mask);
 			MTGS::GetThreadHandle().SetAffinity(perf_mask);
 			vu1Thread.GetThreadHandle().SetAffinity(android_mtvu ? perf_mask : 0);
+			// The GS back thread (GS multi-threading) is busy 50-100% of the frame in GS-heavy
+			// titles, so it joins the tier only when the tier has a processor for it as well;
+			// otherwise it stays unpinned. It is placed separately so that it can never cost the
+			// other threads their placement. Set whether or not multi-threading is on: the mask
+			// is only used if a back thread starts.
+			const bool back_fits = static_cast<u32>(std::popcount(perf_mask)) >= threads_to_place + 1;
+			INFO_LOG("  GS back thread {}", back_fits ? "shares the performance cores" :
+														"left unpinned (no processor left for it in the tier)");
+			SetGSBackThreadAffinityLocked(back_fits ? perf_mask : 0);
 			s_thread_affinities_set = true;
+			// Already a whole tier — hand it to helper threads unchanged.
+			s_perf_cluster_mask.store(perf_mask, std::memory_order_relaxed);
 			return;
 		}
-		// No usable cluster mask — fall through to the ordered path rather than silently
-		// leaving the user's chosen mode doing nothing.
+
+		INFO_LOG("Affinity mode: Performance Cores unavailable (mask 0x{:x} covers {} of the {} "
+				 "threads to place) — leaving threads unpinned.",
+			perf_mask, std::popcount(perf_mask), threads_to_place);
+		MTGS::GetThreadHandle().SetAffinity(0);
+		vu1Thread.GetThreadHandle().SetAffinity(0);
+		s_vm_thread_handle.SetAffinity(0);
+		SetGSBackThreadAffinityLocked(0);
+		s_software_renderer_processor_list = {};
+		s_thread_affinities_set = false;
+		s_perf_cluster_mask.store(0, std::memory_order_relaxed);
+		return;
 	}
 
 	// Modes 1-6: explicit EE/VU/GS priority over s_processor_list, which is ordered fastest
@@ -4279,15 +4996,25 @@ void VMManager::SetEmuThreadAffinities()
 
 	s_vm_thread_handle.SetAffinity(android_ee_affinity);
 	MTGS::GetThreadHandle().SetAffinity(android_gs_affinity);
-	vu1Thread.GetThreadHandle().SetAffinity(android_mtvu ? affinity_for_rank(vu_rank) : 0);
+	const u64 android_vu_affinity = android_mtvu ? affinity_for_rank(vu_rank) : 0;
+	vu1Thread.GetThreadHandle().SetAffinity(android_vu_affinity);
+	const u64 android_gs_back_affinity = ChooseGSBackThreadAffinity(
+		android_gs_affinity, android_ee_affinity | android_gs_affinity | android_vu_affinity);
+	INFO_LOG("  GS back thread may run on 0x{:x}", android_gs_back_affinity);
+	SetGSBackThreadAffinityLocked(android_gs_back_affinity);
 	s_thread_affinities_set = true;
+	s_perf_cluster_mask.store(
+		ClusterMaskForProcessorMask(android_ee_affinity | android_gs_affinity | android_vu_affinity),
+		std::memory_order_relaxed);
 	return;
 #else
-	const bool new_pin_enable = (GetState() != VMState::Shutdown && EmuConfig.EnableThreadPinning);
-#ifndef __SWITCH__
-	if (s_thread_affinities_set == new_pin_enable)
-		return;
-#endif
+	// Runs on every call rather than only when pinning toggles: the GS pair is placed even with
+	// pinning off, and a VM boot with pinning off is exactly the call a toggle check would skip.
+	// Threads we never narrowed are left alone, so a mask inherited from taskset survives.
+	const bool vm_running = (GetState() != VMState::Shutdown);
+	const bool new_pin_enable = (vm_running && EmuConfig.EnableThreadPinning);
+	const bool was_pinned = s_thread_affinities_set;
+	static bool s_gs_tier_confined = false;
 
 	// Track whether pinning is *currently effective*, not just EmuConfig.EnableThreadPinning
 	// (matches refresh-experimental — a shutdown call with pinning enabled must not leave this
@@ -4308,12 +5035,31 @@ void VMManager::SetEmuThreadAffinities()
 		if (new_pin_enable)
 			ERROR_LOG("Insufficient processors for thread pinning.");
 
-		MTGS::GetThreadHandle().SetAffinity(0);
-		vu1Thread.GetThreadHandle().SetAffinity(0);
-		s_vm_thread_handle.SetAffinity(0);
+		if (was_pinned)
+		{
+			vu1Thread.GetThreadHandle().SetAffinity(0);
+			s_vm_thread_handle.SetAffinity(0);
+		}
 		s_software_renderer_processor_list = {};
+
+		// With pinning off, the GS front and back threads still stay off the slow tier of a
+		// big.LITTLE part: a back thread on an M2 E-core measured 22-23 ms/frame against 8.6 ms
+		// on a P-core, and Stuntman unpinned put it on E-cores for 46-88% of its cycles. Both
+		// get the same mask so the pair stays consistent. EE and VU are left to the scheduler.
+#if defined(__linux__)
+		const u64 gs_tier = vm_running ? GetUnpinnedGSTierMask() : 0;
+#else
+		const u64 gs_tier = 0;
+#endif
+		if (gs_tier != 0)
+			INFO_LOG("Thread pinning off: GS thread and GS back thread confined to the performance tier 0x{:x}", gs_tier);
+		if (gs_tier != 0 || was_pinned || s_gs_tier_confined)
+			MTGS::GetThreadHandle().SetAffinity(gs_tier);
+		SetGSBackThreadAffinityLocked(gs_tier);
+		s_gs_tier_confined = (gs_tier != 0);
 		return;
 	}
+	s_gs_tier_confined = false;
 
 	// steal vu's thread if mtvu is off
 	const u32 ee_index = s_processor_list[0];
@@ -4340,6 +5086,15 @@ void VMManager::SetEmuThreadAffinities()
 	INFO_LOG("  GS thread is on processor {} (0x{:x})", gs_index, gs_affinity);
 	MTGS::GetThreadHandle().SetAffinity(gs_affinity);
 
+	const u64 occupied = ee_affinity | gs_affinity | (mtvu ? (static_cast<u64>(1) << vu_index) : 0);
+#if defined(__linux__) || defined(_WIN32)
+	const u64 gs_back_affinity = ChooseGSBackThreadAffinity(gs_affinity, occupied);
+#else
+	const u64 gs_back_affinity = 0; // No topology here (Darwin cannot pin threads anyway).
+#endif
+	INFO_LOG("  GS back thread may run on 0x{:x}", gs_back_affinity);
+	SetGSBackThreadAffinityLocked(gs_back_affinity);
+
 #ifdef __SWITCH__
 	INFO_LOG("Switch: actual thread masks EE=0x{:x}, VU=0x{:x}, GS=0x{:x}",
 		s_vm_thread_handle.GetAffinity(), mtvu ? vu1Thread.GetThreadHandle().GetAffinity() : 0,
@@ -4360,6 +5115,7 @@ void VMManager::SetEmuThreadAffinities()
 	// Try to find some threads for the software renderer.
 	// They should be in the same cluster as the main GS thread. If they're not, for example,
 	// we had 4 P cores and 6 E cores, let the OS schedule them instead.
+	s_software_renderer_processor_list.clear();
 	s_software_renderer_processor_list.reserve(s_processor_list.size() - (mtvu ? 3 : 2));
 	const u32 gs_cluster_id = cpuinfo_get_processor(gs_index)->cluster->cluster_id;
 	for (size_t i = mtvu ? 3 : 2; i < s_processor_list.size(); i++)

@@ -38,6 +38,8 @@
 extern u32 g_cop2ClampConstEstablishCount; // iCOP2-arm64.cpp
 int cop2TestGetSyncStubCount();            // iCOP2-arm64.cpp
 const u8* cop2TestGetSyncStub(int kind);   // iCOP2-arm64.cpp
+int cop2TestGetModelStubCount();           // iCOP2-arm64.cpp
+const u8* cop2TestGetModelStub(int kind);  // iCOP2-arm64.cpp
 bool mVUTestProbe_NeonPoolUsable(int hostreg, bool cop2mode); // microVU-arm64.cpp
 bool eeTestNeonRegIsReserved(int hostreg); // iCore-arm64.cpp
 
@@ -68,14 +70,20 @@ void SeedOverflowOperands(EeRecTestHarness& h, u32 fs, u32 ft)
 	h.IgnoreVu0Vi(REG_MAC_FLAG);
 }
 
+// The JIT's value only. The interpreter answers 0x7FFFFFFF here -- the VU's
+// largest value is one binade above FLT_MAX -- so the two no longer agree on
+// what an overflowing product comes back as; kWhyClampCeiling below records
+// that, and these tests are about where the clamp constants live rather than
+// about which ceiling is right.
 void ExpectClampedToFltMax(EeRecTestHarness& h, u32 vf)
 {
 	for (char l : {'x', 'y', 'z', 'w'})
-	{
 		EXPECT_EQ(h.GetVu0VfBitsJit(vf, l), kFltMaxBits) << "lane " << l;
-		EXPECT_EQ(h.GetVu0VfBitsJit(vf, l), h.GetVu0VfBitsInterp(vf, l)) << "lane " << l;
-	}
 }
+
+constexpr const char* kWhyClampCeiling =
+	"the emitters clamp an overflowing FMAC to FLT_MAX; the interpreter "
+	"saturates at 0x7FFFFFFF, which is what the console returns";
 
 // Micro at PC 0: 32 NOP pairs (outlasts the 16-cycle sync kickstart window)
 // then E-bit. Idempotent — pure NOPs, so JIT/interp replay divergence is
@@ -111,6 +119,7 @@ TEST(EeVu0Cop2ClampResidency, EstablishOncePerStraightLineChain)
 		VMUL_C2(mask_xyzw, 5, 1, 2),
 	});
 	const u32 before = g_cop2ClampConstEstablishCount;
+	h.RequireVu0Divergence(kWhyClampCeiling);
 	h.Run();
 	EXPECT_EQ(g_cop2ClampConstEstablishCount - before, 1u)
 		<< "3 clamping FMACs in one block must establish q25/q26 exactly once";
@@ -140,6 +149,7 @@ TEST(EeVu0Cop2ClampResidency, ReestablishAfterCCallSeam)
 		VMUL_C2(mask_xyzw, 4, 1, 2),
 	});
 	const u32 before = g_cop2ClampConstEstablishCount;
+	h.RequireVu0Divergence(kWhyClampCeiling);
 	h.Run();
 	EXPECT_EQ(g_cop2ClampConstEstablishCount - before, 2u)
 		<< "the C-call seam must invalidate; the post-seam FMAC re-establishes";
@@ -169,6 +179,7 @@ TEST(EeVu0Cop2ClampResidency, ClampCorrectAfterTakenSyncSeam)
 		VMUL_C2(mask_xyzw, 4, 1, 2), // sync seam TAKEN (drains micro), then clamp
 		VMUL_C2(mask_xyzw, 5, 1, 2), // rides the post-seam establishment
 	});
+	h.RequireVu0Divergence(kWhyClampCeiling);
 	h.Run();
 	ExpectClampedToFltMax(h, 3);
 	ExpectClampedToFltMax(h, 4);
@@ -198,6 +209,7 @@ TEST(EeVu0Cop2ClampResidency, ForkArmsShareEstablishment)
 			VMUL_C2(mask_xyzw, 5, 1, 2),  // fall-through arm
 			VMUL_C2(mask_xyzw, 6, 1, 2),  // branch target
 		});
+		h.RequireVu0Divergence(kWhyClampCeiling);
 		h.Run();
 		ExpectClampedToFltMax(h, 3);
 		ExpectClampedToFltMax(h, 4);
@@ -251,6 +263,48 @@ TEST(EeVu0Cop2ClampResidency, SyncStubsReDupClampConsts)
 	}
 }
 
+TEST(EeVu0Cop2ClampResidency, ModelStubsRestoreWhatTheySpill)
+{
+	EeRecTestHarness h;
+	h.LoadProgram({NOP});
+	h.Run();
+
+	constexpr u32 kLdStPairMask = 0xFFC00000u; // opc/V/index/L, bits 31-22
+	constexpr u32 kStpQ = 0xAD000000u, kLdpQ = 0xAD400000u;
+	constexpr u32 kStpX = 0xA9000000u, kLdpX = 0xA9400000u;
+	constexpr u32 kSpImmMask = 0xFFC003FFu;
+	constexpr u32 kSubSp = 0xD10003FFu, kAddSp = 0x910003FFu;
+	constexpr u32 kRet = 0xD65F03C0u;
+
+	ASSERT_GT(cop2TestGetModelStubCount(), 0);
+	for (int kind = 0; kind < cop2TestGetModelStubCount(); kind++)
+	{
+		const u32* words = reinterpret_cast<const u32*>(cop2TestGetModelStub(kind));
+		ASSERT_NE(words, nullptr) << "stub " << kind;
+
+		int stores = 0, loads = 0, subs = 0, adds = 0, i = 0;
+		for (; i < 128; i++)
+		{
+			const u32 w = words[i];
+			if ((w & kLdStPairMask) == kStpQ || (w & kLdStPairMask) == kStpX)
+				stores++;
+			else if ((w & kLdStPairMask) == kLdpQ || (w & kLdStPairMask) == kLdpX)
+				loads++;
+			else if ((w & kSpImmMask) == kSubSp)
+				subs++;
+			else if ((w & kSpImmMask) == kAddSp)
+				adds++;
+			else if (w == kRet)
+				break;
+		}
+		EXPECT_LT(i, 128) << "stub " << kind << " has no Ret in the scan window";
+		EXPECT_GT(stores, 0) << "stub " << kind << " spills nothing";
+		EXPECT_EQ(stores, loads) << "stub " << kind << " reloads fewer pairs than it spilled";
+		EXPECT_EQ(subs, 1) << "stub " << kind << " frame";
+		EXPECT_EQ(adds, 1) << "stub " << kind << " frame";
+	}
+}
+
 // q25/q26 are reserved out of the EE NEON allocator pool (like q8/q9, and like
 // q11 = NEON_RESERVED_EEFPU_UNSCALE); the rest of the pool is untouched.
 //
@@ -269,19 +323,21 @@ TEST(EeVu0Cop2ClampResidency, EeAllocatorReservesClampRegs)
 		EXPECT_FALSE(eeTestNeonRegIsReserved(usable)) << "q" << usable;
 }
 
-// COP2 macro mode runs mVU emitters (the mVU-reuse wrappers) inline in EE
-// blocks WITHOUT a C-call seam, and clamp validity deliberately rides
-// through them — so the macro-mode mVU NEON pool must exclude q25/q26.
-// Micro mode keeps the full pool.
-TEST(EeVu0Cop2ClampResidency, MacroModeNeonPoolExcludesClampRegs)
+// Both modes keep q25/q26 out of the mVU NEON pool, for the same reason in
+// each: they hold the clamp bounds. Macro mode runs mVU emitters (the
+// mVU-reuse wrappers) inline in EE blocks WITHOUT a C-call seam and clamp
+// validity deliberately rides through them; micro mode reads the bounds out of
+// those two registers at every mVUclamp1.
+TEST(EeVu0Cop2ClampResidency, NeonPoolExcludesClampRegsInBothModes)
 {
-	EXPECT_FALSE(mVUTestProbe_NeonPoolUsable(25, /*cop2mode*/ true));
-	EXPECT_FALSE(mVUTestProbe_NeonPoolUsable(26, /*cop2mode*/ true));
-	EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(25, /*cop2mode*/ false));
-	EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(26, /*cop2mode*/ false));
-	EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(0, /*cop2mode*/ true));
-	EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(24, /*cop2mode*/ true));
-	EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(27, /*cop2mode*/ true));
+	for (bool cop2mode : {false, true})
+	{
+		EXPECT_FALSE(mVUTestProbe_NeonPoolUsable(25, cop2mode)) << "cop2mode " << cop2mode;
+		EXPECT_FALSE(mVUTestProbe_NeonPoolUsable(26, cop2mode)) << "cop2mode " << cop2mode;
+		EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(0, cop2mode)) << "cop2mode " << cop2mode;
+		EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(24, cop2mode)) << "cop2mode " << cop2mode;
+		EXPECT_TRUE(mVUTestProbe_NeonPoolUsable(27, cop2mode)) << "cop2mode " << cop2mode;
+	}
 }
 
 // The mVU-reuse wrappers must not disturb validity: FMAC → VMFIR (mVU-reuse
@@ -300,6 +356,7 @@ TEST(EeVu0Cop2ClampResidency, ValidityRidesThroughMvuReuseWrapper)
 		VMUL_C2(mask_xyzw, 4, 1, 2),
 	});
 	const u32 before = g_cop2ClampConstEstablishCount;
+	h.RequireVu0Divergence(kWhyClampCeiling);
 	h.Run();
 	EXPECT_EQ(g_cop2ClampConstEstablishCount - before, 1u)
 		<< "the mVU-reuse wrapper must not invalidate (its pool excludes q25/q26)";

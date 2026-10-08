@@ -26,10 +26,16 @@
 			armAsm->Lsl(gprReg, gprReg, ADD_XYZW); \
 	} while (0)
 
+// `vUnderflow` and `vOverflow` are the exact MAC U and MAC O predicates
+// (mVUemitMulUO / mVUemitAddSubO). They ride the same single ADDV as sign and
+// zero: the weight vector gains their two nibbles and armEmitPackSignZeroBits
+// an SLI apiece. Only their reduction to STATUS costs anything else.
 static void mVUupdateFlags(mV, const a64::VRegister& reg,
 	const a64::VRegister& regT1in = a64::NoVReg,
 	const a64::VRegister& regT2in = a64::NoVReg,
-	bool modXYZW = true)
+	bool modXYZW = true,
+	const a64::VRegister& vUnderflow = a64::NoVReg,
+	const a64::VRegister& vOverflow = a64::NoVReg)
 {
 	const a64::Register& mReg = gprT1;
 	const a64::Register& sReg = getFlagReg(sFLAG.write);
@@ -56,11 +62,19 @@ static void mVUupdateFlags(mV, const a64::VRegister& reg,
 	const bool macPath = mFLAG.doFlag && !(_XYZW_SS && modXYZW);
 
 	// The overflow gamefix ORs its bits in at the MAC O nibble *before*
-	// SHIFT_XYZW rotates the whole word, so that path keeps the rotate as a real
-	// Lsl and packs with unshifted weights. Everywhere else the rotate is an
-	// emit-time constant that folds into the weight vector for nothing.
+	// SHIFT_XYZW rotates the whole word, so on its own that path keeps the
+	// rotate as a real Lsl and packs with unshifted weights. Everywhere else the
+	// rotate folds into the weight vector for nothing -- the exact models
+	// included, reaching the O nibble through the weights; where both are live
+	// the gamefix shifts its own bits to match.
 	const bool doOverflow = sFLAG.doFlag && CHECK_VUOVERFLOWHACK;
-	const int foldShift = (mFLAG.doFlag && !doOverflow) ? ADD_XYZW : 0;
+	const int weightVariant = (vUnderflow.IsValid() ? mVUmacW_ZSU : 0)
+	                        | (vOverflow.IsValid() ? mVUmacW_ZSO : 0);
+	const int foldShift = (mFLAG.doFlag && (!doOverflow || weightVariant != 0)) ? ADD_XYZW : 0;
+
+	// Either way mReg now carries bits above 7, which the STATUS write has to
+	// mask off.
+	const bool wideMac = doOverflow || weightVariant != 0;
 
 	if (sFLAG.doFlag)
 	{
@@ -74,8 +88,9 @@ static void mVUupdateFlags(mV, const a64::VRegister& reg,
 
 	armEmitPackSignZeroBits(mReg.W(), reg, RQSCRATCH3, regT1, RQSCRATCH3,
 		[&](const a64::VRegister& w) {
-			armAsm->Ldr(w, mVUglobMem(mVUmacWeightVec(AND_XYZW, macPath, foldShift)));
-		});
+			armAsm->Ldr(w, mVUglobMem(mVUmacWeightVec(AND_XYZW, macPath, foldShift, weightVariant)));
+		},
+		vUnderflow, vOverflow);
 
 	//--------- Overflow flags (VUOverflowHack gamefix only) ---------
 	// Port of x86 microVU_Upper.inl CHECK_VUOVERFLOWHACK block. We can't
@@ -93,7 +108,7 @@ static void mVUupdateFlags(mV, const a64::VRegister& reg,
 		armAsm->Cmge(regT1.V4S(), regT1.V4S(), RQSCRATCH3.V4S()); // all-1s where |x| >= FLT_MAX
 		// Reuse the shared weight vector: on an all-1s lane it contributes both
 		// nibbles, so the mask falls out of the low one.
-		armAsm->Ldr(RQSCRATCH3, mVUglobMem(mVUmacWeightVec(AND_XYZW, macPath, 0)));
+		armAsm->Ldr(RQSCRATCH3, mVUglobMem(mVUmacWeightVec(AND_XYZW, macPath, 0, mVUmacW_ZS)));
 		armAsm->And(regT1.V16B(), regT1.V16B(), RQSCRATCH3.V16B());
 		armAsm->Addv(a64::VRegister(regT1.GetCode(), 32), regT1.V4S());
 		armAsm->Fmov(gprT2, a64::VRegister(regT1.GetCode(), 32));
@@ -103,7 +118,7 @@ static void mVUupdateFlags(mV, const a64::VRegister& reg,
 		armAsm->Cbz(gprT2, &noOverflow);
 		armAsm->Orr(sReg.W(), sReg.W(), 0x820000);
 		if (mFLAG.doFlag)
-			armAsm->Orr(mReg.W(), mReg.W(), a64::Operand(gprT2, a64::LSL, 12)); // MAC O nibble
+			armAsm->Orr(mReg.W(), mReg.W(), a64::Operand(gprT2, a64::LSL, 12 + foldShift)); // MAC O nibble
 		armAsm->Bind(&noOverflow);
 	}
 
@@ -118,9 +133,8 @@ static void mVUupdateFlags(mV, const a64::VRegister& reg,
 
 	if (sFLAG.doFlag)
 	{
-		if (doOverflow)
+		if (wideMac)
 		{
-			// Only this path can leave bits above 7 in mReg.
 			armAsm->And(a64::w12, mReg.W(), 0xFF);
 			armAsm->Orr(sReg.W(), sReg.W(), a64::w12);
 			if (sFLAG.doNonSticky)
@@ -133,6 +147,30 @@ static void mVUupdateFlags(mV, const a64::VRegister& reg,
 			armAsm->Orr(sReg.W(), sReg.W(), mReg.W());
 			if (sFLAG.doNonSticky)
 				armAsm->Orr(sReg.W(), sReg.W(), a64::Operand(mReg.W(), a64::LSL, 8));
+		}
+
+		// STATUS carries one U and one O for the whole op, at bits 16 and 17 of
+		// the denormalized word, with their stickies six bits up. Both come off
+		// the MAC nibbles the pack has just built, so the reduction is a pair of
+		// TSTs.
+		if (weightVariant != 0)
+		{
+			if (vUnderflow.IsValid())
+			{
+				armAsm->Tst(mReg.W(), 0x0f00);
+				armAsm->Cset(gprT2, a64::ne);
+			}
+			if (vOverflow.IsValid())
+			{
+				armAsm->Tst(mReg.W(), 0xf000);
+				armAsm->Cset(gprT3, a64::ne);
+				if (vUnderflow.IsValid())
+					armAsm->Orr(gprT2, gprT2, a64::Operand(gprT3, a64::LSL, 1));
+				else
+					armAsm->Lsl(gprT2, gprT3, 1);
+			}
+			armAsm->Orr(gprT2, gprT2, a64::Operand(gprT2, a64::LSL, 6));
+			armAsm->Orr(sReg.W(), sReg.W(), a64::Operand(gprT2, a64::LSL, 16));
 		}
 	}
 
@@ -390,21 +428,29 @@ static __fi void mVUsetFlags(mV, microFlagCycles& mFC)
 #define getFlagReg3(x) ((gFlag == x) ? gprT1 : getFlagReg(x))
 #define getFlagReg4(x) ((gFlag == x) ? gprT1 : gprT2)
 
-// Emit NEON lane-shuffle equivalent to x86's SHUF.PS xmm, xmm, pattern.
-// bFlag[i] names the source lane that should end up in dest lane i.
-// Clobbers one temp NEON register.
-static __fi void mVUshuffleFlagVec(a64::VRegister vec, const int* bFlag, a64::VRegister tmp)
+// Reorder one flag queue in place: the four instances at `mem` become
+// { q[bFlag[0]], q[bFlag[1]], q[bFlag[2]], q[bFlag[3]] }. The gather lands in
+// `tmp` and is stored from there, which leaves `vec` holding the instances
+// every element insert reads and lets the opening shuffle write a whole
+// register rather than copy one first.
+static __fi void mVUshuffleFlagQueue(const a64::MemOperand& mem, const int* bFlag,
+	a64::VRegister vec, a64::VRegister tmp)
 {
-	// If already identity, nothing to do.
+	// An identity reorder would store back the bytes it just loaded.
 	if (bFlag[0] == 0 && bFlag[1] == 1 && bFlag[2] == 2 && bFlag[3] == 3)
-		return;
-	// Copy source so we can read lanes before overwriting them.
-	armAsm->Mov(tmp.V16B(), vec.V16B());
-	for (int i = 0; i < 4; i++)
 	{
-		if (bFlag[i] != i)
-			armAsm->Ins(vec.V4S(), i, tmp.V4S(), bFlag[i]);
+#ifdef PCSX2_RECOMPILER_TESTS
+		g_mvuFlagQueueIdentities++;
+#endif
+		return;
 	}
+	armAsm->Ldr(vec, mem);
+	[[maybe_unused]] const int emitted = armEmitLaneGather32(tmp, vec, bFlag);
+	armAsm->Str(tmp, mem);
+#ifdef PCSX2_RECOMPILER_TESTS
+	g_mvuFlagQueueReorders++;
+	g_mvuFlagQueueWorst = std::max(g_mvuFlagQueueWorst, static_cast<u32>(emitted));
+#endif
 }
 
 // Recompiles code for proper flags on block linkings (equivalent to x86's mVUsetupFlags).
@@ -475,17 +521,13 @@ static __fi void mVUsetupFlags(mV, microFlagCycles& mFC)
 	{
 		int bMac[4];
 		sortFlag(mFC.xMac, bMac, mFC.cycles);
-		armAsm->Ldr(qmmT1, a64::MemOperand(gprMVUFlag));
-		mVUshuffleFlagVec(qmmT1, bMac, qmmT2);
-		armAsm->Str(qmmT1, a64::MemOperand(gprMVUFlag));
+		mVUshuffleFlagQueue(a64::MemOperand(gprMVUFlag), bMac, qmmT1, qmmT2);
 	}
 
 	if (doCFlagInsts && __Clip)
 	{
 		int bClip[4];
 		sortFlag(mFC.xClip, bClip, mFC.cycles);
-		armAsm->Ldr(qmmT2, a64::MemOperand(gprMVUFlag, 16));
-		mVUshuffleFlagVec(qmmT2, bClip, qmmT1);
-		armAsm->Str(qmmT2, a64::MemOperand(gprMVUFlag, 16));
+		mVUshuffleFlagQueue(a64::MemOperand(gprMVUFlag, 16), bClip, qmmT2, qmmT1);
 	}
 }

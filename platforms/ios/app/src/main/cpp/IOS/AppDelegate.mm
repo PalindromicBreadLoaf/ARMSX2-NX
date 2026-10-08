@@ -19,6 +19,17 @@
 #include "common/Darwin/DarwinMisc.h"
 
 #import <UIKit/UIKit.h>
+#import <GameController/GameController.h>
+
+#if __has_include("ARMSX2iOS-Swift.h")
+#import "ARMSX2iOS-Swift.h"
+#define ARMSX2_HAS_SWIFTUI 1
+#elif __has_include("ARMSX2-Swift.h")
+#import "ARMSX2-Swift.h"
+#define ARMSX2_HAS_SWIFTUI 1
+#else
+#define ARMSX2_HAS_SWIFTUI 0
+#endif
 
 #include "IOSRuntime.h"
 #import "IOS/PCSX2AppDelegate.h"
@@ -26,6 +37,25 @@
 
 // Written fresh on every build, see cmake/WriteGitHash.cmake.
 #include "armsx2_git_hash.h"
+
+@interface ARMSX2Application : UIApplication
+@end
+
+@implementation ARMSX2Application
+
+- (void)sendEvent:(UIEvent *)event
+{
+#if ARMSX2_HAS_SWIFTUI
+    if ([event isKindOfClass:[UIPressesEvent class]] &&
+        [SwiftUIHost handleControllerPressesEvent:(UIPressesEvent *)event])
+    {
+        return;
+    }
+#endif
+    [super sendEvent:event];
+}
+
+@end
 
 #pragma mark - SetupIOSDirectories
 static void SetupIOSDirectories(const std::string& dataRoot)
@@ -52,7 +82,6 @@ static void SetupIOSDirectories(const std::string& dataRoot)
     EmuFolders::GameSettings = dataRoot + "/gamesettings";
     EmuFolders::Textures = dataRoot + "/textures";
     EmuFolders::InputProfiles = dataRoot + "/inputprofiles";
-    EmuFolders::Videos = dataRoot + "/videos";
     EmuFolders::UserResources = dataRoot + "/resources";
 }
 
@@ -158,11 +187,9 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 }
 
 - (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession options:(UISceneConnectionOptions *)options {
-    // Called when a new scene session is being created.
-    // Use this method to select a configuration to create the new scene with.
-    UISceneConfiguration *config = [[UISceneConfiguration alloc] initWithName:@"Default Configuration" sessionRole:connectingSceneSession.role];
-    config.delegateClass = [PCSX2SceneDelegate class];
-    return config;
+    const BOOL external = [connectingSceneSession.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
+    return [UISceneConfiguration configurationWithName:(external ? @"External Display" : @"Default Configuration")
+        sessionRole:connectingSceneSession.role];
 }
 
 - (void)application:(UIApplication *)application didDiscardSceneSessions:(NSSet<UISceneSession *> *)sceneSessions {
@@ -174,6 +201,8 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 int main(int argc, char * argv[]) {
     @autoreleasepool {
         // SDL_MAIN_HANDLED is set, so we use standard main()
-        return UIApplicationMain(argc, argv, nil, NSStringFromClass([PCSX2AppDelegate class]));
+        return UIApplicationMain(argc, argv,
+                                 NSStringFromClass([ARMSX2Application class]),
+                                 NSStringFromClass([PCSX2AppDelegate class]));
     }
 }

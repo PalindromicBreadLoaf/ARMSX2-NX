@@ -63,6 +63,79 @@ else()
 	find_package(plutovg 1.1.0 REQUIRED)
 	find_package(plutosvg 0.0.7 REQUIRED)
 endif()
+
+# No CONFIG keyword above, so that's Module-mode find_package(Freetype) resolving
+# through CMake's own FindFreetype.cmake, which knows nothing of HarfBuzz. A shared
+# libfreetype.so records its own HarfBuzz dependency and needs nothing from us; a
+# static libfreetype.a (build-dependencies-runner.sh's ARMSX2_DEPS_STATIC=1 path,
+# built with FT_REQUIRE_HARFBUZZ=TRUE) genuinely calls hb_* symbols and does not,
+# same as libwebp/sharpyuv above (cmake/FindWebP.cmake). Gate on the archive we
+# actually found being static, so every shared resolution (Qt desktop, macOS,
+# Windows) stays a no-op.
+#
+# Static does not always mean it calls HarfBuzz, and the two prefixes we build
+# differ: the Android one
+# (.github/workflows/scripts/android/build-dependencies.sh) and the iOS one
+# (platforms/ios/.../SearchForStuff.cmake) build FreeType with
+# FT_DISABLE_HARFBUZZ=ON and ship no HarfBuzz at all, so requiring one there
+# fails a build whose libfreetype.a wants nothing - which is exactly how the
+# android-arm64-v8a job died. So ask the archive instead of assuming: nm lists
+# what it leaves undefined, and an FT_REQUIRE_HARFBUZZ build leaves hb_* there.
+get_filename_component(FREETYPE_LIBRARY_EXT "${FREETYPE_LIBRARY}" EXT)
+if (NOT WIN32 AND NOT HORIZON AND FREETYPE_LIBRARY_EXT STREQUAL "${CMAKE_STATIC_LIBRARY_SUFFIX}")
+	# CMAKE_NM is what the toolchain (including the NDK's) points at; nm and
+	# llvm-nm are the fallbacks for a plain host build. Mach-O prefixes the
+	# underscore, hence the optional one in the pattern.
+	set(FREETYPE_NEEDS_HARFBUZZ FALSE)
+	find_program(ARMSX2_NM NAMES "${CMAKE_NM}" nm llvm-nm)
+	if (ARMSX2_NM)
+		execute_process(COMMAND "${ARMSX2_NM}" -u "${FREETYPE_LIBRARY}"
+			OUTPUT_VARIABLE FREETYPE_UNDEFINED
+			ERROR_VARIABLE FREETYPE_NM_ERROR
+			RESULT_VARIABLE FREETYPE_NM_RESULT
+			OUTPUT_STRIP_TRAILING_WHITESPACE)
+		if (NOT FREETYPE_NM_RESULT EQUAL 0)
+			# Cannot tell: keep the old assumption rather than hand the linker an
+			# archive with unresolved hb_* in it.
+			message(STATUS "Could not run ${ARMSX2_NM} on ${FREETYPE_LIBRARY}, assuming it needs HarfBuzz")
+			set(FREETYPE_NEEDS_HARFBUZZ TRUE)
+		elseif (FREETYPE_UNDEFINED MATCHES "[ \t]_?hb_")
+			set(FREETYPE_NEEDS_HARFBUZZ TRUE)
+		endif()
+		unset(FREETYPE_UNDEFINED)
+		unset(FREETYPE_NM_ERROR)
+		unset(FREETYPE_NM_RESULT)
+	else()
+		message(STATUS "No nm to inspect ${FREETYPE_LIBRARY} with, assuming it needs HarfBuzz")
+		set(FREETYPE_NEEDS_HARFBUZZ TRUE)
+	endif()
+endif()
+
+if (FREETYPE_NEEDS_HARFBUZZ)
+	# Archive first. The static prefix has libharfbuzz.a, and resolving a system
+	# libharfbuzz.so here would put a NEEDED entry back onto a binary whose whole
+	# purpose is carrying everything it needs.
+	find_library(HARFBUZZ_LIBRARY
+		NAMES "${CMAKE_STATIC_LIBRARY_PREFIX}harfbuzz${CMAKE_STATIC_LIBRARY_SUFFIX}"
+		      harfbuzz libharfbuzz)
+	if (NOT HARFBUZZ_LIBRARY)
+		message(FATAL_ERROR "${FREETYPE_LIBRARY} leaves hb_* undefined but no HarfBuzz was found: "
+			"a static libfreetype.a built with FT_REQUIRE_HARFBUZZ calls into HarfBuzz "
+			"directly and won't resolve without it.")
+	endif()
+	# HarfBuzz, then FreeType again. The two archives call into each other, and a
+	# single-pass linker only resolves that if whichever still owes symbols comes
+	# last. Both orders worked on binutils 2.44; CI runs an older one, and being
+	# wrong here leaves undefined symbols in a .so that links clean and then
+	# fails at dlopen, which is the failure this whole change exists to remove.
+	set_property(TARGET Freetype::Freetype APPEND PROPERTY
+		INTERFACE_LINK_LIBRARIES "${HARFBUZZ_LIBRARY}" "${FREETYPE_LIBRARY}")
+endif()
+unset(FREETYPE_NEEDS_HARFBUZZ)
+unset(FREETYPE_LIBRARY_EXT)
+# NOT taking upstream's find_package(ryml): we re-vendor rapidyaml in-tree (see the
+# add_subdirectory note further down) precisely so handheld and cross builds stay
+# self-contained. Upstream un-bundled it; we deliberately did not follow.
 if (WIN32)
 	find_package(DirectX-Headers 1.618.1 REQUIRED)
 endif()
@@ -75,37 +148,34 @@ if(USE_VULKAN)
 	endif()
 endif()
 
-if(HORIZON)
-	set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
-endif()
-
 # Platform-specific dependencies.
 if (WIN32)
 	add_subdirectory(3rdparty/D3D12MemAlloc EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/winpixeventruntime EXCLUDE_FROM_ALL)
 	add_subdirectory(3rdparty/winwil EXCLUDE_FROM_ALL)
-	set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
 	find_package(Vtune)
 elseif(NOT HORIZON)
-	find_package(CURL REQUIRED)
+	# Neither iOS nor tvOS has a libcurl to link against, and common/CMakeLists
+	# already leaves HTTPDownloaderCurl.cpp out there for that reason -
+	# HTTPDownloader::Create() returns nothing and its callers (achievements,
+	# cover downloads) treat the downloader as unavailable. So this must not be
+	# REQUIRED there either; it was the first thing an iOS configure stopped on.
 	if(NOT IOS)
+		find_package(CURL REQUIRED)
 		find_package(PCAP REQUIRED)
 	endif()
 	find_package(Vtune)
-
-	# Use bundled ffmpeg v4.x.x headers if we can't locate it in the system.
-	# We'll try to load it dynamically at runtime.
-	find_package(FFMPEG COMPONENTS avcodec avformat avutil swresample swscale)
-	if(NOT FFMPEG_FOUND)
-		message(WARNING "FFmpeg not found, using bundled headers.")
-		set(FFMPEG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include")
-	endif()
 
 	## Use CheckLib package to find module
 	include(CheckLib)
 
 	if(UNIX AND NOT APPLE)
-		find_package(Fontconfig REQUIRED)
+		# Android is UNIX AND NOT APPLE, but it is not a desktop: it has no
+		# fontconfig and no D-Bus session to inhibit a screensaver on, and the
+		# only thing built there is the libretro core, which asks for neither.
+		if(NOT ANDROID)
+			find_package(Fontconfig REQUIRED)
+		endif()
 		if(LINUX)
 			check_lib(LIBUDEV libudev libudev.h)
 		endif()
@@ -127,8 +197,10 @@ elseif(NOT HORIZON)
 			find_package(Libbacktrace REQUIRED)
 		endif()
 
-		find_package(PkgConfig REQUIRED)
-		pkg_check_modules(DBUS REQUIRED dbus-1)
+		if(NOT ANDROID)
+			find_package(PkgConfig REQUIRED)
+			pkg_check_modules(DBUS REQUIRED dbus-1)
+		endif()
 	endif()
 endif()
 
@@ -169,7 +241,7 @@ disable_compiler_warnings_for_target(speex)
 
 # Find the Qt components that we need.
 if(ENABLE_QT_UI)
-	find_package(Qt6 6.10.1 COMPONENTS CoreTools Core GuiTools Gui WidgetsTools Widgets LinguistTools REQUIRED)
+	find_package(Qt6 6.10 COMPONENTS CoreTools Core GuiTools Gui WidgetsTools Widgets LinguistTools REQUIRED)
 
 	if(NOT WIN32 AND NOT APPLE)
 		if (Qt6_VERSION VERSION_GREATER_EQUAL 6.10.0)
@@ -183,7 +255,7 @@ if(ENABLE_QT_UI)
 	endif()
 endif()
 
-if(WIN32)
+if(WIN32 AND ARCH_X86)
 	add_subdirectory(3rdparty/rainterface EXCLUDE_FROM_ALL)
 endif()
 

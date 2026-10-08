@@ -11,6 +11,7 @@
 #include "common/Assertions.h"
 #include "common/SettingsInterface.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -63,6 +64,7 @@ namespace
 		{"UserHacks_CPUSpriteRenderLevel", GSHWFixId::CPUSpriteRenderLevel, GSUserHackOverride::CPUSpriteRenderLevel},
 		{"UserHacks_CPUCLUTRender", GSHWFixId::CPUCLUTRender, GSUserHackOverride::CPUCLUTRender},
 		{"UserHacks_GPUTargetCLUTMode", GSHWFixId::GPUTargetCLUT, GSUserHackOverride::GPUTargetCLUT},
+		{"UserHacks_RewriteLargeST", GSHWFixId::RewriteLargeSTCoords, GSUserHackOverride::RewriteLargeST},
 
 		// Settings the database contends that were never part of the user-hack
 		// vocabulary. They have no hack bit because MaskUserHacks() does not strip
@@ -79,11 +81,12 @@ namespace
 		{"deinterlace_mode", GSHWFixId::Deinterlace, GSUserHackOverride::MaxCount},
 		{"HWDownloadMode", GSHWFixId::HWDownloadMode, GSUserHackOverride::MaxCount},
 
-		// One control, two database fixes: the database clamps the blend level from
-		// both ends, so claiming the setting has to silence both clamps or the player
-		// still gets moved.
+		// One control, three database fixes: the database clamps the blend level from
+		// both ends and caps it again on the render-target-copy road, so claiming the
+		// setting has to silence all three clamps or the player still gets moved.
 		{"accurate_blending_unit", GSHWFixId::MinimumBlendingLevel, GSUserHackOverride::MaxCount},
 		{"accurate_blending_unit", GSHWFixId::MaximumBlendingLevel, GSUserHackOverride::MaxCount},
+		{"accurate_blending_unit", GSHWFixId::CopyRoadMaximumBlendingLevel, GSUserHackOverride::MaxCount},
 	};
 
 	// ⚠️ These are the settings keys, NOT GamefixOptions::GetGameFixName(), which
@@ -137,9 +140,9 @@ PerGameOverrideKeys::CoreKnobKeys PerGameOverrideKeys::ForCoreKnob(CoreGameDBKno
 		case CoreGameDBKnob::EEClampMode:
 			return {"EmuCore/CPU/Recompiler", {"fpuOverflow", "fpuExtraOverflow", "fpuFullMode", "fpuExactMode"}, 4};
 		case CoreGameDBKnob::VU0ClampMode:
-			return {"EmuCore/CPU/Recompiler", {"vu0Overflow", "vu0ExtraOverflow", "vu0SignOverflow"}, 3};
+			return {"EmuCore/CPU/Recompiler", {"vu0Overflow", "vu0ExtraOverflow", "vu0SignOverflow", "vu0ExactMode"}, 4};
 		case CoreGameDBKnob::VU1ClampMode:
-			return {"EmuCore/CPU/Recompiler", {"vu1Overflow", "vu1ExtraOverflow", "vu1SignOverflow"}, 3};
+			return {"EmuCore/CPU/Recompiler", {"vu1Overflow", "vu1ExtraOverflow", "vu1SignOverflow", "vu1ExactMode"}, 4};
 		default:
 			return {nullptr, {}, 0};
 	}
@@ -223,6 +226,33 @@ bool PerGameOverrideKeys::ClaimsAGameDBSetting(const char* section, const char* 
 	}
 
 	return false;
+}
+
+std::vector<std::pair<const char*, const char*>> PerGameOverrideKeys::AllClaimingKeys()
+{
+	std::vector<std::pair<const char*, const char*>> keys;
+
+	for (const GSKeyRow& row : s_gs_keys)
+	{
+		// The blend level has a row per database clamp but is one key.
+		if (std::none_of(keys.begin(), keys.end(), [&row](const auto& k) { return std::strcmp(k.second, row.key) == 0; }))
+			keys.emplace_back("EmuCore/GS", row.key);
+	}
+
+	for (const char* gamefix : s_gamefix_keys)
+		keys.emplace_back("EmuCore/Gamefixes", gamefix);
+
+	for (const char* speedhack : s_speedhack_keys)
+		keys.emplace_back("EmuCore/Speedhacks", speedhack);
+
+	for (u32 i = 0; i < static_cast<u32>(CoreGameDBKnob::MaxCount); i++)
+	{
+		const CoreKnobKeys knob = ForCoreKnob(static_cast<CoreGameDBKnob>(i));
+		for (u32 k = 0; k < knob.count; k++)
+			keys.emplace_back(knob.section, knob.keys[k]);
+	}
+
+	return keys;
 }
 
 PerGameOverrides ComputePerGameOverrides(const SettingsInterface& game_layer)

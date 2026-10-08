@@ -155,8 +155,8 @@ struct DynamicThumbstickView: View {
             .gesture(dragGesture)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isLeft ? "Dynamic left thumbstick area" : "Dynamic right thumbstick area")
-        .accessibilityHint("Press and drag anywhere in this area")
+        .accessibilityLabel(isLeft ? Text("Dynamic left thumbstick area") : Text("Dynamic right thumbstick area"))
+        .accessibilityHint(Text("Press and drag anywhere in this area"))
         .onDisappear(perform: reset)
     }
 
@@ -372,8 +372,8 @@ struct VirtualPadCameraSwipeView: View {
             .gesture(swipeGesture)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Camera swipe area")
-        .accessibilityHint("Swipe to move the emulated right analog stick")
+        .accessibilityLabel(Text("Camera swipe area"))
+        .accessibilityHint(Text("Swipe to move the emulated right analog stick"))
         .onDisappear(perform: endInteractionIfNeeded)
     }
 
@@ -526,7 +526,10 @@ final class SwipeCameraInputDriver: NSObject {
     func start() {
         guard displayLink == nil else { return }
         let link = CADisplayLink(target: self, selector: #selector(update(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
+        UIFrameRateSettings.shared.configuration.apply(
+            to: link,
+            domain: .touchNavigation
+        )
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -667,10 +670,7 @@ final class VirtualPadGyroscopeController {
     }
 
     private var interfaceOrientation: UIInterfaceOrientation {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first(where: { $0.activationState == .foregroundActive })?
-            .interfaceOrientation ?? .landscapeRight
+        UIApplication.shared.appWindowScene?.interfaceOrientation ?? .landscapeRight
     }
 
     private static func screenRate(x: Double, y: Double, orientation: UIInterfaceOrientation) -> DynamicThumbstickVector {
@@ -1324,7 +1324,10 @@ private struct DynamicAimCrosshairView: View {
             runtime.isCameraSettling ||
             runtime.isShooting ||
             runtime.isRapidFiring
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isAnimating)) { timeline in
+        AdaptiveAnimationTimeline(
+            domain: .touchNavigation,
+            paused: !isAnimating
+        ) { timeline in
             Canvas(rendersAsynchronously: true) { context, canvasSize in
                 let metrics = animationMetrics(at: timeline.date.timeIntervalSinceReferenceDate)
                 var transformed = context
@@ -1899,16 +1902,6 @@ private struct DynamicAimCrosshairView: View {
                 foreground: foreground
             )
         }
-    }
-
-    private func radialLines(count: Int, innerRadius: CGFloat, outerRadius: CGFloat) -> Path {
-        var path = Path()
-        for index in 0..<count {
-            let angle = Double(index) * 2 * .pi / Double(count)
-            path.move(to: CGPoint(x: CGFloat(cos(angle)) * innerRadius, y: CGFloat(sin(angle)) * innerRadius))
-            path.addLine(to: CGPoint(x: CGFloat(cos(angle)) * outerRadius, y: CGFloat(sin(angle)) * outerRadius))
-        }
-        return path
     }
 
     private func cornerBrackets(radius: CGFloat) -> Path {

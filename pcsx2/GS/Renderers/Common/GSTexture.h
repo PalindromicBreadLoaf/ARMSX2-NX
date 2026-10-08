@@ -62,10 +62,37 @@ public:
 		BC2,          ///< BC2, aka DXT2/3 compressed texture for replacements
 		BC3,          ///< BC3, aka DXT4/5 compressed texture for replacements
 		BC7,          ///< BC7, aka BPTC compressed texture for replacements
-		Last = BC7,
+		ASTC4x4,      ///< ASTC LDR 4x4 block footprint for replacements
+		ASTC5x4,      ///< ASTC LDR 5x4 block footprint for replacements
+		ASTC5x5,      ///< ASTC LDR 5x5 block footprint for replacements
+		ASTC6x5,      ///< ASTC LDR 6x5 block footprint for replacements
+		ASTC6x6,      ///< ASTC LDR 6x6 block footprint for replacements
+		ASTC8x5,      ///< ASTC LDR 8x5 block footprint for replacements
+		ASTC8x6,      ///< ASTC LDR 8x6 block footprint for replacements
+		ASTC8x8,      ///< ASTC LDR 8x8 block footprint for replacements
+		ASTC10x5,     ///< ASTC LDR 10x5 block footprint for replacements
+		ASTC10x6,     ///< ASTC LDR 10x6 block footprint for replacements
+		ASTC10x8,     ///< ASTC LDR 10x8 block footprint for replacements
+		ASTC10x10,    ///< ASTC LDR 10x10 block footprint for replacements
+		ASTC12x10,    ///< ASTC LDR 12x10 block footprint for replacements
+		ASTC12x12,    ///< ASTC LDR 12x12 block footprint for replacements
+		Last = ASTC12x12,
 	};
 
 	static bool ValidateUsageAndFormat(Usage usage, Format format);
+
+	/// Compressed block descriptor. ASTC footprints are rectangular, so one scalar block
+	/// size cannot describe them: pitch, row count, and transfer geometry all need both
+	/// dimensions plus the bytes-per-block separately. Uncompressed formats report a
+	/// degenerate {1, 1, bytes_per_texel} block.
+	struct BlockInfo
+	{
+		u32 width;
+		u32 height;
+		u32 bytes;
+	};
+
+	static BlockInfo GetBlockInfo(Format format);
 
 	enum class State : u8
 	{
@@ -148,6 +175,7 @@ public:
 
 	static const char* GetFormatName(Format format);
 	static bool IsBlockCompressedFormat(Format format);
+	static bool IsASTCFormat(Format format);
 	static u32 GetCompressedBytesPerBlock(Format format);
 	static u32 GetCompressedBlockSize(Format format);
 	static u32 CalcUploadPitch(Format format, u32 width);
@@ -300,7 +328,10 @@ public:
 	u32 GetMemUsage() const { return m_size.x * m_size.y * (m_format == Format::UNorm8 ? 1 : 4); }
 
 	// Helper routines for formats/types
-	static bool IsCompressedFormat(Format format) { return (format >= Format::BC1 && format <= Format::BC7); }
+	static bool IsCompressedFormat(Format format)
+	{
+		return (format >= Format::BC1 && format <= Format::BC7) || IsASTCFormat(format);
+	}
 };
 
 class GSDownloadTexture
@@ -325,8 +356,26 @@ public:
 	/// Calculates the pitch of a transfer.
 	u32 GetTransferPitch(u32 width, u32 pitch_align) const;
 
-	/// Calculates the size of the data you should transfer.
-	void GetTransferSize(const GSVector4i& rc, u32* copy_offset, u32* copy_size, u32* copy_rows) const;
+	/// Calculates the layout of a transfer: the byte offset of its first row, the byte width of
+	/// ONE row, and the number of rows. Rows are GetMapPitch() apart, so the row width is not the
+	/// size of the region the transfer occupies -- GetTransferRegionSize is that.
+	void GetTransferSize(const GSVector4i& rc, u32* copy_offset, u32* copy_row_bytes, u32* copy_rows) const;
+
+	/// Bytes spanned by a pitched transfer, first byte of its first row to last byte of its last:
+	/// the rows before the last are `pitch` apart and the last is `row_bytes` wide, so the span is
+	/// (rows - 1) * pitch + row_bytes. Not rows * row_bytes, which ignores the padding between
+	/// rows, and not rows * pitch, which runs off the end of the last one.
+	///
+	/// This is the range a host-cache invalidate, or a TRANSFER_WRITE -> HOST_READ barrier, has to
+	/// cover before the map is read. Covering GetTransferSize's row width instead synchronises the
+	/// first row and leaves every later one to be read through a cache nothing invalidated: inert
+	/// on coherent readback memory, and cache-atom-granular corruption on memory that is genuinely
+	/// non-coherent (which is what the Mali r44p1 profile deliberately keeps, being ~12x faster
+	/// there than the coherent alternative).
+	static constexpr u32 GetTransferRegionSize(u32 pitch, u32 row_bytes, u32 rows)
+	{
+		return (rows == 0) ? 0 : ((rows - 1) * pitch + row_bytes);
+	}
 
 	/// Queues a copy from the specified texture to this buffer.
 	/// Does not complete immediately, you should flush before accessing the buffer.

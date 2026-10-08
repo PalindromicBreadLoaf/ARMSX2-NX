@@ -447,6 +447,79 @@ fun AppTab() {
             description = str("app.bootLogo.desc"),
             onChange = { BootLogoPreferences.set(it) },
         )
+        // Custom intro: a video the user picked from their own device, copied into app storage
+        // so it survives the source moving and plays even before an SD card mounts. Only shown
+        // while the boot animation is on, since it is what that toggle plays.
+        if (BootLogoPreferences.enabled.value) {
+            // Resolved here: str() is composable and the picker's result callback is not.
+            val introSetMsg = str("app.bootIntro.set")
+            val introTooLargeMsg = str("app.bootIntro.tooLarge")
+            val introUnreadableMsg = str("app.bootIntro.unreadable")
+            val introScope = rememberCoroutineScope()
+            var introBusy by remember { mutableStateOf(false) }
+            val introPicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri ->
+                if (uri != null && !introBusy) {
+                    introBusy = true
+                    // Off the main thread: a video can be up to BootIntro.MaxBytes, and copying
+                    // that on the UI thread would stall the app long enough to trip an ANR.
+                    introScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            val name = androidx.documentfile.provider.DocumentFile
+                                .fromSingleUri(appContext, uri)?.name ?: "Custom intro"
+                            com.armsx2.BootIntro.setCustom(appContext, uri, name)
+                        }
+                        introBusy = false
+                        val msg = when (result) {
+                            com.armsx2.BootIntro.SetResult.OK -> introSetMsg
+                            com.armsx2.BootIntro.SetResult.TOO_LARGE -> introTooLargeMsg
+                            com.armsx2.BootIntro.SetResult.UNREADABLE -> introUnreadableMsg
+                        }
+                        android.widget.Toast.makeText(appContext, msg, android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            val introName = com.armsx2.BootIntro.customName.value
+            Text(
+                when {
+                    introBusy -> str("app.bootIntro.importing")
+                    introName != null -> str("app.bootIntro.current").format(introName)
+                    else -> str("app.bootIntro.default")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+            )
+            // Wraps: three buttons do not fit across a phone held upright.
+            FlowRow(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val pick = { if (!introBusy) introPicker.launch(arrayOf("video/*")) }
+                OutlinedButton(
+                    onClick = pick,
+                    enabled = !introBusy,
+                    modifier = Modifier.controllerFocusable("app.bootIntro.choose", onConfirm = pick),
+                ) { Text(str("app.bootIntro.choose")) }
+                // Plays whichever intro is current, the user's or the bundled one. It otherwise
+                // only shows on a cold start.
+                val preview = { if (!introBusy) com.armsx2.BootIntro.preview(appContext) }
+                OutlinedButton(
+                    onClick = preview,
+                    enabled = !introBusy,
+                    modifier = Modifier.controllerFocusable("app.bootIntro.preview", onConfirm = preview),
+                ) { Text(str("app.bootIntro.preview")) }
+                if (introName != null) {
+                    val reset = { if (!introBusy) com.armsx2.BootIntro.clearCustom(appContext) }
+                    OutlinedButton(
+                        onClick = reset,
+                        enabled = !introBusy,
+                        modifier = Modifier.controllerFocusable("app.bootIntro.reset", onConfirm = reset),
+                    ) { Text(str("app.bootIntro.reset")) }
+                }
+            }
+        }
 
         BackupRestoreRows()
 
@@ -471,6 +544,90 @@ fun AppTab() {
                 description = str("secondScreen.moveOsd.desc"),
                 onChange = { com.armsx2.SecondScreen.setMoveOsd(it) },
             )
+
+            // The panel now takes its colours from whichever theme is selected, so this is only
+            // about the GROUND behind the tiles: the theme's own, the library's backdrop for
+            // continuity with the screen it sits beside, or black for an OLED second display.
+            if (com.armsx2.SecondScreen.ignoredDisplays.value.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    val clear = { com.armsx2.SecondScreen.clearIgnoredDisplays() }
+                    OutlinedButton(
+                        onClick = clear,
+                        modifier = Modifier.controllerFocusable("secondScreen.displays.reset", onConfirm = clear),
+                    ) {
+                        Text(
+                            str("secondScreen.displays.reset") +
+                                " (" + com.armsx2.SecondScreen.ignoredDisplays.value.size + ")",
+                        )
+                    }
+                }
+            }
+
+            ToggleRow(
+                label = str("secondScreen.topBar"),
+                value = com.armsx2.SecondScreen.topBar.value,
+                description = str("secondScreen.topBar.desc"),
+                onChange = { com.armsx2.SecondScreen.setTopBar(it) },
+            )
+
+            val panelBgPicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { picked -> picked?.let { com.armsx2.SecondScreen.setBackgroundImage(appContext, it) } }
+
+            SegmentedRow(
+                label = str("secondScreen.background"),
+                options = listOf(
+                    str("secondScreen.background.theme"),
+                    str("secondScreen.background.library"),
+                    str("secondScreen.background.black"),
+                    str("secondScreen.background.custom"),
+                ),
+                selectedIndex = com.armsx2.SecondScreen.background.value,
+                onChange = {
+                    // Picking "Custom" with nothing chosen yet opens the picker rather than
+                    // selecting a mode that would render as the theme ground and look broken.
+                    if (it == com.armsx2.SecondScreen.BG_CUSTOM &&
+                        com.armsx2.SecondScreen.backgroundUri.value == null
+                    ) {
+                        panelBgPicker.launch(arrayOf("image/*"))
+                    } else {
+                        com.armsx2.SecondScreen.setBackground(it)
+                    }
+                },
+            )
+            if (com.armsx2.SecondScreen.background.value == com.armsx2.SecondScreen.BG_CUSTOM) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    val pick = { panelBgPicker.launch(arrayOf("image/*")) }
+                    OutlinedButton(
+                        onClick = pick,
+                        modifier = Modifier.controllerFocusable("secondScreen.background.choose", onConfirm = pick),
+                    ) { Text(str("secondScreen.background.choose")) }
+                }
+            }
+
+            // Only worth showing once a thermal tile is actually on the panel — otherwise it is
+            // a control over something invisible.
+            if (com.armsx2.SecondScreenLayout.tiles().any {
+                    it == com.armsx2.SecondScreenTile.CPU_TEMP ||
+                        it == com.armsx2.SecondScreenTile.GPU_TEMP ||
+                        it == com.armsx2.SecondScreenTile.BATTERY_TEMP
+                }
+            ) {
+                val seconds = listOf(1, 2, 3, 5)
+                SegmentedRow(
+                    label = str("secondScreen.tempInterval"),
+                    options = seconds.map { "${it}s" },
+                    selectedIndex = seconds.indexOf(com.armsx2.SecondScreen.tempIntervalSec.value)
+                        .coerceAtLeast(0),
+                    onChange = { com.armsx2.SecondScreen.setTempInterval(seconds[it]) },
+                )
+            }
 
             // Panel layout editor. Chips for what is on the panel, arrows for the order, a column
             // count for the shape of the grid. Asked for as "a grid which can be filled with boxes
@@ -564,6 +721,18 @@ fun AppTab() {
                     com.armsx2.SecondScreen.rebuild()
                 },
             )
+            // Columns already decide width (tiles split the row equally), so this is the other
+            // axis. 0 keeps the old behaviour of being exactly as tall as the text.
+            IntSliderRow(
+                label = str("secondScreen.layout.tileHeight"),
+                value = com.armsx2.SecondScreenLayout.tileHeight(),
+                min = 0,
+                max = 160,
+                onChange = {
+                    com.armsx2.SecondScreenLayout.setTileHeight(it)
+                    com.armsx2.SecondScreen.rebuild()
+                },
+            )
             val resetLayout = {
                 com.armsx2.SecondScreenLayout.reset()
                 com.armsx2.SecondScreen.rebuild()
@@ -582,13 +751,20 @@ fun AppTab() {
 
         // Companion-app access to the recently-played list, over the RecentGamesContentProvider.
         // Off by default and deliberately so: the provider is exported without a permission (it
-        // has to be, for a third-party companion to reach it), so while this is on, any app on
-        // the device can read the list — including the file URIs, which carry your folder layout.
+        // has to be, for a third-party companion to reach it), so the list — including the file
+        // URIs, which carry your folder layout — is only readable once you say so.
+        //
+        // The switch reads "is anything being shared right now", not just the share-with-everything
+        // flag, because an app can also be allowed on its own from its consent prompt. Were it
+        // wired to the flag alone it would sit at off while a companion was actively reading, and
+        // there would be no control left to turn that off with.
         run {
             val shareKey = com.armsx2.data.library.RecentGamesContentProvider.KEY_SHARE_ENABLED
+            val prefs = com.armsx2.runtime.MainActivityRuntime.prefs
             val shareRecent = remember {
                 mutableStateOf(
-                    com.armsx2.runtime.MainActivityRuntime.prefs.getBoolean(shareKey, false),
+                    prefs.getBoolean(shareKey, false) ||
+                        com.armsx2.data.library.RecentGamesAccess.grantedPackages(prefs).isNotEmpty(),
                 )
             }
             ToggleRow(
@@ -600,9 +776,16 @@ fun AppTab() {
                 // commit(), not apply(): the reader is a DIFFERENT process that can be queried
                 // the moment this returns, and apply() only guarantees the in-memory value.
                 runCatching {
-                    com.armsx2.runtime.MainActivityRuntime.prefs.edit()
-                        .putBoolean(shareKey, on).commit()
+                    prefs.edit().putBoolean(shareKey, on).commit()
                 }
+                if (!on) {
+                    // Off has to mean off. Leaving the per-app grants behind would keep whoever
+                    // already asked reading the library from a switch the user just turned off.
+                    com.armsx2.data.library.RecentGamesAccess.revokeAll(prefs)
+                }
+                // Either direction is the user revisiting the decision, so earlier refusals stop
+                // counting: a companion that was told no once can ask again.
+                com.armsx2.data.library.RecentGamesAccess.clearDeclined(prefs)
             }
         }
 

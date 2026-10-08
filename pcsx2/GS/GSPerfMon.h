@@ -36,6 +36,45 @@ public:
 		HashCacheHit,
 		HashCacheMiss,
 
+		// Actual pipeline binds emitted to the device (post-dedupe), not requests. On
+		// tiler drivers a bind re-dirties far more than the pipeline, so this is the
+		// per-draw CPU proxy the mobile renderer work steers by.
+		PipelineSwitches,
+
+		// Host waits on GPU completion that the GS thread paid OUT OF TURN -- a readback's
+		// submit-and-wait, an explicit sync. The command-buffer ring's own recycle wait is NOT
+		// one: that is healthy backpressure, and counting it would hide the number this exists
+		// to expose.
+		//
+		// It exists because ONE of these per frame serializes the whole pipeline: a frame with
+		// any of them runs at cpu + gpu, a frame with none at max(cpu, gpu), and the count above
+		// one does not matter. So the acceptance metric for readback work is literally "is this
+		// zero in steady state", which no other counter can answer -- Readbacks counts copies
+		// that reach the device, and a copy is not the same thing as a wait.
+		GpuBlockingWaits,
+
+		// Summed renderArea of the frame's render passes, in pixels. On a tiler that is the frame's
+		// tile load-and-store bill: a pass pays for every pixel of its render area whether anything
+		// drew there or not, so the area is what a pass costs and the count is not. Exactly the
+		// population `RenderPasses` counts -- same two functions, both directions of the pair -- so
+		// the mean area per pass is a valid division and a title's pass structure is readable from
+		// stats.json without reconstructing it from a draw stream.
+		RenderPassAreaPixels,
+
+		// Draws that read their texture on the native pixel grid because a sprite minifies a
+		// GS-memory texture under a nearest sampler (GSNativeTexelGridPolicy.h). The road is
+		// narrow by design and the census is the question it exists to answer: how many draws a
+		// frame, in how many titles, actually take it. Always zero at native scale.
+		NativeTexelGridDraws,
+
+		// Draws whose snapped sprites sample no further than their last native pixel
+		// (PSSelector::sprite_edge_clamp). Always zero at native scale.
+		SpriteEdgeClampDraws,
+
+		// Draws on the CPU sprite road written by the palette block copy rather than the
+		// rasterizer (GSRendererHWMultiISA.cpp). Exists so a run can show the copy was reached.
+		SwPaletteBlockCopies,
+
 		CounterLast,
 
 		// Reused counters for HW.

@@ -22,6 +22,9 @@ data class InstalledBios(
     val file: File,
     val info: BiosInfo,
     val selected: Boolean,
+    /** A Namco arcade board's BIOS (COH-H), for arcade games only. Every one is in use: each arcade
+     *  game starts with one it runs on (Arcade.forgetArcadeBiosPick). */
+    val arcade: Boolean = false,
 )
 
 data class BiosManagerUiState(
@@ -64,11 +67,19 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
                     .listFiles()
                     .orEmpty()
                     .filter(File::isFile)
-                    .mapNotNull { file -> probe(file)?.let { InstalledBios(file, it, file.absolutePath == selectedPath) } }
-                    .sortedWith(compareByDescending<InstalledBios> { it.selected }.thenBy { it.file.name.lowercase() })
+                    .mapNotNull { file ->
+                        probe(file)?.let {
+                            InstalledBios(file, it, file.absolutePath == selectedPath, com.armsx2.arcade.Arcade.isArcadeBios(it))
+                        }
+                    }
+                    .sortedWith(
+                        compareByDescending<InstalledBios> { it.selected }
+                            .thenByDescending { it.arcade }
+                            .thenBy { it.file.name.lowercase() },
+                    )
             }
             val perGame = key?.let {
-                runCatching { ConfigStore.resolveForGame(it).biosFilename.takeIf { f -> f.isNotBlank() } }.getOrNull()
+                runCatching { ConfigStore.resolveForGame(it).system.biosFilename.takeIf { f -> f.isNotBlank() } }.getOrNull()
             }
             state.value = state.value.copy(items = result, busy = false, gameKey = key, perGameBios = perGame)
         }
@@ -81,7 +92,7 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
         val key = state.value.gameKey ?: return
         val resolved = ConfigStore.resolveForGame(key)
         val ok = runCatching {
-            ConfigStore.save(SettingsScope.Game, key, resolved.copy(biosFilename = item.file.name))
+            ConfigStore.save(SettingsScope.Game, key, resolved.copy(system = resolved.system.copy(biosFilename = item.file.name)))
         }.isSuccess
         if (!ok) state.value = state.value.copy(error = "Unable to set a per-game BIOS.")
         refresh()
@@ -91,7 +102,7 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
     fun clearGameBios() {
         val key = state.value.gameKey ?: return
         val resolved = ConfigStore.resolveForGame(key)
-        runCatching { ConfigStore.save(SettingsScope.Game, key, resolved.copy(biosFilename = "")) }
+        runCatching { ConfigStore.save(SettingsScope.Game, key, resolved.copy(system = resolved.system.copy(biosFilename = ""))) }
         refresh()
     }
 
@@ -99,7 +110,12 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
         scope.launch {
             state.value = state.value.copy(busy = true, error = null)
             val result = withContext(Dispatchers.IO) { importFile(uri) }
-            result.onSuccess { file -> select(file) }
+            // An arcade board's BIOS cannot run console games: it is in use for arcade games instead of
+            // taking over as the console BIOS.
+            result.onSuccess { file ->
+                val arcade = withContext(Dispatchers.IO) { probe(file)?.let(com.armsx2.arcade.Arcade::isArcadeBios) } == true
+                if (!arcade) select(file)
+            }
                 .onFailure { state.value = state.value.copy(error = it.message ?: "BIOS import failed.") }
             refresh()
         }

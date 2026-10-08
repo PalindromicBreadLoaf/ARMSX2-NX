@@ -9,6 +9,7 @@
 #include "VU.h"
 #include "arm64/iCore-arm64.h"
 
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -622,6 +623,9 @@ extern u32 maxrecmem;
 extern const void* g_fpuGuardMaskStub;
 #endif
 
+void cop2DynGenModelStubs();
+void fpuDynGenModelStubs();
+
 extern u32 pc;             // recompiler pc
 extern int g_branch;       // set for branch
 extern u32 target;         // branch target
@@ -703,6 +707,12 @@ void LoadBranchState();
 // emits the normal flush + event-check + linked-B tail.
 bool recSuperblockIsContSite(u32 branch_pc);
 vixl::aarch64::Label* recSuperblockAddSideExit(u32 branch_target, bool need_delay_slot);
+
+// B.cond to an island whose body is emitted in the cold arena at block end.
+void recEmitColdIslandBranch(vixl::aarch64::Condition cond, std::function<void()> body);
+#ifdef PCSX2_RECOMPILER_TESTS
+u32 recTestColdIslandBodiesEmitted();
+#endif
 
 void recompileNextInstruction(bool delayslot, bool swapped_delay_slot);
 
@@ -1001,6 +1011,17 @@ namespace EERecFallback
 	inline constexpr int kCop2VuIdCount = 256;
 	extern u64 g_cop2VuMask[kCop2VuIdCount / 64];
 
+	// Per-COP1-op filter, the next bisect axis once `fpu` is implicated. Ids are
+	// the S-format funct, plus one each for what the other rs values select.
+	// All bits set (the default) means "every op".
+	inline constexpr int kFpuIdCount = 128;
+	extern u64 g_fpuMask[kFpuIdCount / 64];
+
+	// Flat id for a COP1/LWC1/SWC1 encoding, or -1.
+	int FpuOpId(u32 code);
+	// Mnemonic for an id, or nullptr.
+	const char* FpuOpName(int id);
+
 	// Canonical id for a VU macro op, or -1 if `code` is not one.
 	int Cop2VuOpId(u32 code);
 	// Mnemonic for an id ("vmulaw"), or nullptr for an unassigned slot.
@@ -1021,11 +1042,21 @@ namespace EERecFallback
 	// Returns false and leaves the outputs untouched on a parse error.
 	// `reg_masks` must point at kCop2MoveOpCount entries, `cop2vu_mask` at
 	// kCop2VuIdCount/64.
-	bool ParseGroups(const std::string_view& list, u32* out, u32* reg_masks,
+	bool ParseGroups(const std::string_view& list, u32* out, u32* reg_masks, u64* fpu_mask,
 		u64* cop2vu_mask, std::string* error);
 
 	// Human-readable rendering of a mask, for run banners.
 	std::string DescribeGroups(u32 groups);
+
+	// One-shot env-var entry point, for hunts under the full frontend rather
+	// than pcsx2-eerunner's --rec-fallback: ARMSX2_REC_FALLBACK takes the same
+	// group list, ARMSX2_REC_FALLBACK_CENSUS=1 dumps the COP2 macro-op census.
+	// Unset means untouched globals and no output.
+	void InitFromEnvOnce();
+	// Census line for the console, when the env var asked for it. `end_of_run`
+	// is the shutdown dump and prints whatever it has, including nothing at
+	// all; the per-reset calls stay quiet until the counts have moved.
+	void MaybeLogCop2VuCensus(bool end_of_run);
 } // namespace EERecFallback
 
 #endif // PCSX2_RECOMPILER_TESTS

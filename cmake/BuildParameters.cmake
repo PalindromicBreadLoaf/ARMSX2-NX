@@ -37,10 +37,20 @@ option(LTO_PCSX2_CORE "Enable LTO/IPO/LTCG on the subset of pcsx2 that benefits 
 option(USE_VTUNE "Plug VTUNE to profile GS JIT.")
 option(USE_PERF_JITDUMP "Emit Linux perf jitdump (jit-<pid>.dump) for recompiled JIT blocks; use with perf record/inject." OFF)
 option(USE_PERF_MAP "Emit simple /tmp/perf-<pid>.map symbol table for recompiled JIT blocks." OFF)
+option(ENABLE_GS_DEBUG_LABELS "Compile the GS debug-label markers (GL_INS/GL_CACHE/GL_PUSH and friends) into Debug/Devel builds. Their arguments are assembled on every call whether or not a debugger is attached, which measured 1.6-6.1% of the GS thread by title (Sly 3 5.9%, Sly 1 6.1%, NASCAR 3.3%, CoD2 2.5%, Jak II 2.0%, Katamari 1.6%) and biases every Devel perf number against the Release build that ships. Default ON so ordinary Devel builds are unchanged; the perf suite configures a second build with this OFF to measure without that bias." ON)
 option(PACKAGE_MODE "Use this option to ease packaging of PCSX2 (developer/distribution option)")
 set(ARMSX2_VERSION "" CACHE STRING "Reported version for builds without a git checkout")
 option(BUNDLE_EMOJI_FONT "Bundles Noto Color Emoji for systems whose system emoji font isn't usable by freetype" ON)
 option(POSITION_INDEPENDENT_CODE "Generate position-independent code. It is recommended that you leave this on." ON)
+
+# iOS and tvOS are Apple but not macOS, and the difference decides a few things
+# here and in 3rdparty: no AppKit, no IOKit, no AudioHardware, no optical drive.
+# CMake tells them apart by system name - APPLE is true for all of them.
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	set(APPLE_EMBEDDED TRUE)
+else()
+	set(APPLE_EMBEDDED FALSE)
+endif()
 
 #-------------------------------------------------------------------------------
 # Graphical option
@@ -49,6 +59,12 @@ if(NOT APPLE AND NOT HORIZON)
 	option(USE_OPENGL "Enable OpenGL GS renderer" ON)
 endif()
 option(USE_VULKAN "Enable Vulkan GS renderer" ON)
+# What the GL renderer asks the host for. Android is GL ES whether this is set
+# or not; it exists for the other platforms that have only ES - webOS, and the
+# embedded frontends - where a desktop GL request is refused and the core then
+# has no context at all. Off by default, because a desktop asking for ES gets a
+# renderer with fewer features than it could have had.
+option(USE_GLES "Ask the host for an OpenGL ES context rather than desktop GL" OFF)
 
 #-------------------------------------------------------------------------------
 # Path and lib option
@@ -61,7 +77,6 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(UNIX)
-	option(USE_LINKED_FFMPEG "Links with ffmpeg instead of using dynamic loading" OFF)
 endif()
 
 if(APPLE)
@@ -156,8 +171,13 @@ elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR
 	endif()
 	set(ARCH_ARM64 TRUE)
 	if(APPLE)
-		# Min spec is an M1
-		add_compile_options("-march=armv8.4-a" "-mcpu=apple-m1")
+		# Min spec is an M1. +crypto because -march is the flag clang resolves
+		# the feature set from here, and armv8.4-a alone leaves the crypto
+		# extension off: 3rdparty/lzma's AesOpt.c then fails to compile its
+		# vaeseq_u8 intrinsics ("requires target feature 'aes'") even though
+		# every Apple Silicon part has them. Older clang (Xcode 15) trips on
+		# this; newer ones happen to take the feature set from -mcpu instead.
+		add_compile_options("-march=armv8.4-a+crypto" "-mcpu=apple-m1")
 	elseif(HORIZON)
 		set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 		add_compile_options("-march=armv8-a+crc" "-mtune=cortex-a57" -flax-vector-conversions)
@@ -188,6 +208,26 @@ elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_SYSTEM_PROCESSOR
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=${HOST_PAGE_SIZE})
 		detect_cache_line_size()
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=${HOST_CACHE_LINE_SIZE})
+	endif()
+
+	# Android is neither LINUX nor WIN32 to CMake, so without this branch it
+	# falls through to the ARM64 default in Pcsx2Defs.h — 16K pages — while
+	# every current Android device runs a 4K kernel. The ARM64 memory manager
+	# needs its compile-time page size to match the kernel's at runtime, and a
+	# mismatch is a hard failure on the device, not a build warning. Detection
+	# is not an option here (cross-compile), so it is a knob, defaulted to 4K
+	# and named the same as in the APK's own copy of this file.
+	if(ANDROID)
+		set(ARMSX2_ANDROID_HOST_PAGE_SIZE "0x1000" CACHE STRING "Compile-time Android host page size for the PCSX2 core")
+		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=${ARMSX2_ANDROID_HOST_PAGE_SIZE})
+		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
+		# 16K-page compatibility for the ELF itself: a 4K-internal-page build
+		# still has to load on a 16K kernel, which requires the segments be
+		# aligned to 16K. Independent of the page size above.
+		add_link_options(
+			"LINKER:-z,max-page-size=16384"
+			"LINKER:-z,common-page-size=16384"
+		)
 	endif()
 
 	# Windows page size matches x86-64 (4K).
@@ -349,6 +389,19 @@ endif()
 
 if(USE_OPENGL)
 	list(APPEND PCSX2_DEFS ENABLE_OPENGL)
+	if(USE_GLES)
+		list(APPEND PCSX2_DEFS USE_GLES)
+	endif()
+endif()
+
+if(NOT ENABLE_GS_DEBUG_LABELS)
+	list(APPEND PCSX2_DEFS PCSX2_GS_NO_DEBUG_LABELS)
+endif()
+
+if(ENABLE_LIBRETRO)
+	# Guards the pieces that only exist for the core - the frontend-owned GL
+	# context, for one - so a Qt or SDL build never compiles them.
+	list(APPEND PCSX2_DEFS ENABLE_LIBRETRO)
 endif()
 
 if(USE_VULKAN)
@@ -456,7 +509,16 @@ if(NOT CMAKE_GENERATOR MATCHES "Xcode")
 	# Assume Xcode builds aren't being used for distribution
 	# Helpful because Xcode builds don't build multiple metallibs for different macOS versions
 	# Also helpful because Xcode's interactive shader debugger requires apps be built for the latest macOS
-	set(CMAKE_OSX_DEPLOYMENT_TARGET 11.0)
+	#
+	# 11.0 is a macOS version number, and setting it on iOS or tvOS says
+	# "iOS 11", which is neither what the caller asked for nor what the
+	# dependencies were built against: everything then links with a deployment
+	# target older than the SDK calls it uses, which is a warning per object
+	# file and a real availability error on anything introduced since. So the
+	# embedded platforms keep whatever they were configured with.
+	if(NOT APPLE_EMBEDDED)
+		set(CMAKE_OSX_DEPLOYMENT_TARGET 11.0)
+	endif()
 endif()
 
 # CMake defaults the suffix for modules to .so on macOS but wx tells us that the

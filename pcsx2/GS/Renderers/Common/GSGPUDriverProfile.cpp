@@ -14,14 +14,14 @@ namespace GpuProfileDetail
 {
 namespace
 {
-// VkDriverId values. Duplicating the numeric ABI values keeps this portable file independent from
-// Vulkan headers and lets the same resolver serve OpenGL unit tests.
+// VkDriverId values, duplicated so this file needs no Vulkan headers and serves the GL tests.
 constexpr u32 DRIVER_ID_IMAGINATION_PROPRIETARY = 7;
 constexpr u32 DRIVER_ID_QUALCOMM_PROPRIETARY = 8;
 constexpr u32 DRIVER_ID_ARM_PROPRIETARY = 9;
 constexpr u32 DRIVER_ID_MESA_TURNIP = 18;
 constexpr u32 DRIVER_ID_MESA_PANVK = 20;
 constexpr u32 DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA = 25;
+constexpr u32 DRIVER_ID_MESA_HONEYKRISP = 26;
 
 constexpr u64 Bug(DriverBug bug)
 {
@@ -41,6 +41,20 @@ struct VersionBound
 	u32 build = 0;
 };
 
+/// Whether a row is skipped for malisx2, our own Vulkan driver for Mali. malisx2 reports Arm's
+/// vendorID, driverID and r44p1 revision on purpose, so rows written for Arm's blob match it; a
+/// row that describes a defect of that blob and not of our driver says so here.
+enum class Malisx2Exemption : u8
+{
+	/// The row applies to malisx2 like any other driver.
+	None,
+	/// Skipped for malisx2 whatever it advertises.
+	Always,
+	/// Skipped for malisx2 only when it advertises rasterization-order colour attachment access
+	/// (MobileDriverContext::roaa_color_access). Without it the row keeps applying.
+	WithRoaaColorAccess,
+};
+
 struct DriverRule
 {
 	const char* id;
@@ -58,7 +72,24 @@ struct DriverRule
 	bool match_unknown_version = false;
 	u64 bugs = 0;
 	u64 workarounds = 0;
+	/// Match only on a MediaTek SoC (Dimensity/Helio, or a bare mtNNNN part number).
+	bool mediatek_soc_only = false;
+	/// Lowercase substring that, when present in the hints (SoC and board identity), makes this
+	/// rule NOT match. Used to exempt one measured part from a family-wide rule. One-directional:
+	/// a device can narrow a rule but never widen it.
+	const char* hint_exclude = nullptr;
+	/// Lowercase substring that must be present in the hints for this rule to match. Only for a
+	/// preference about one measured part; a defect should use a version or model bound instead.
+	const char* hint_require = nullptr;
+	/// A matched row is recorded in MobileDriverProfile::matched_rules and exempted_rules, and its
+	/// bugs and workarounds are not applied.
+	Malisx2Exemption exempt_malisx2 = Malisx2Exemption::None;
 };
+
+/// The SoC hint for the Anbernic RG 477V in the spelling Android ("mt6897") and the Linux
+/// device tree ("mediatek,mt6897") share. Three rules key on it: the two destination-read
+/// exemptions and the Vulkan preference, which depends on them. One constant keeps them in step.
+constexpr const char* MEASURED_SOC_MT6897 = "mt6897";
 
 constexpr int CompareVersion(const MobileDriverVersion& lhs, VersionBound rhs)
 {
@@ -256,6 +287,46 @@ static MobileDriverVersion ParseVulkanDriverVersion(const MobileDriverContext& c
 	return version;
 }
 
+// Our own Turnip builds identify themselves in driverInfo. Mesa appends MESA_GIT_SHA1_OVERRIDE
+// to the version, so a build tagged `axfl1-005` reports "Mesa 26.1.2 (git-axfl1-005)". A tag
+// `axfl<G>-` means the build carries generation <G> (decimal, from 1) of the declared-feedback-loop
+// ordering fix. Older tags such as `armsx2-001` deliberately do not match; some lack the fix.
+//
+// A false positive would drop the barriers that keep other drivers correct, so the parse is
+// strict: token boundary before `git-`, at least one digit, nonzero value, trailing hyphen.
+// Release-tarball distro drivers carry no git sha and cannot match.
+static u32 ParseFixGeneration(std::string_view driver_info)
+{
+	constexpr std::string_view TAG_PREFIX = "git-axfl";
+	// Bounds the accumulator on strings that are not a tag.
+	constexpr size_t MAX_DIGITS = 4;
+
+	const std::string lowered = ToLowerASCII(driver_info);
+	for (size_t at = lowered.find(TAG_PREFIX); at != std::string::npos;
+		at = lowered.find(TAG_PREFIX, at + 1))
+	{
+		if (at > 0 && std::isalnum(static_cast<unsigned char>(lowered[at - 1])))
+			continue;
+
+		size_t pos = at + TAG_PREFIX.size();
+		u32 generation = 0;
+		size_t digits = 0;
+		while (pos < lowered.size() && digits < MAX_DIGITS &&
+			   std::isdigit(static_cast<unsigned char>(lowered[pos])))
+		{
+			generation = generation * 10 + static_cast<u32>(lowered[pos++] - '0');
+			digits++;
+		}
+
+		if (digits == 0 || generation == 0 || pos >= lowered.size() || lowered[pos] != '-')
+			continue;
+
+		return generation;
+	}
+
+	return 0;
+}
+
 static MobileGpuDriver DetectDriver(const GpuProfileSelection& selection,
 	const MobileDriverContext& context, std::string_view lowered_hints)
 {
@@ -297,8 +368,15 @@ static MobileGpuDriver DetectDriver(const GpuProfileSelection& selection,
 }
 
 static bool RuleMatches(const DriverRule& rule, const GpuProfileSelection& selection,
-	const MobileDriverContext& context, const MobileDriverProfile& profile)
+	const MobileDriverContext& context, const MobileDriverProfile& profile,
+	std::string_view lowered_hints)
 {
+	if (rule.hint_exclude != nullptr && lowered_hints.find(rule.hint_exclude) != std::string_view::npos)
+		return false;
+	if (rule.hint_require != nullptr && lowered_hints.find(rule.hint_require) == std::string_view::npos)
+		return false;
+	if (rule.mediatek_soc_only && !selection.is_mediatek_soc)
+		return false;
 	if (rule.api != MobileGpuApi::Unknown && rule.api != profile.api)
 		return false;
 	if (rule.vendor != RuntimeGpuProfile::Unknown && rule.vendor != selection.runtime_profile)
@@ -336,10 +414,22 @@ static bool RuleMatches(const DriverRule& rule, const GpuProfileSelection& selec
 	return true;
 }
 
-// Sources and exact upstream revisions are mirrored in docs/gpu-driver-database.json. A known
-// driver bug is not automatically an active workaround: expensive renderer fallbacks stay disabled
-// until their PCSX2 integration has a bounded, tested condition.
-static constexpr std::array<DriverRule, 27> s_driver_rules = {{
+// Whether a row that matched is skipped because the driver is malisx2. Runs after RuleMatches, so
+// the row is recorded as matched either way.
+static bool IsExemptForMaliSX2(const DriverRule& rule, const MobileDriverContext& context)
+{
+	if (rule.exempt_malisx2 == Malisx2Exemption::None ||
+		!GpuProfileDetector::IsMaliSX2Driver(context.driver_info))
+	{
+		return false;
+	}
+	return rule.exempt_malisx2 != Malisx2Exemption::WithRoaaColorAccess || context.roaa_color_access;
+}
+
+// Sources and upstream revisions are mirrored in docs/gpu-driver-database.json. A known bug is
+// not automatically an active workaround: expensive fallbacks stay off until they have a bounded,
+// tested condition.
+static constexpr std::array<DriverRule, 35> s_driver_rules = {{
 	{"gl-arm-buffer-stream", MobileGpuApi::OpenGL, RuntimeGpuProfile::Mali,
 		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
 		Bug(DriverBug::BrokenBufferStreaming) | Bug(DriverBug::BrokenUnsynchronizedMapping) |
@@ -348,27 +438,21 @@ static constexpr std::array<DriverRule, 27> s_driver_rules = {{
 	{"gl-arm-g57-fifo", MobileGpuApi::OpenGL, RuntimeGpuProfile::Mali,
 		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 57, 57, 0, {}, {}, 0, 0, false,
 		Bug(DriverBug::BrokenVSync), Workaround(DriverWorkaround::ForceFifoPresent)},
-	// r44p1 and the in-tile render-target self-read, on GL: there is deliberately NO rule here,
-	// and that is a product decision made on field evidence, not an oversight — read this before
-	// "completing the pair" with the Vulkan rule below.
+	// Deliberately NO GL rule for r44p1 in-tile render-target self-read. Do not "complete the
+	// pair" with the Vulkan rule below. On GLES, fetch and texture barrier are one capability, so
+	// gating it turns every self-referential draw into an RT copy plus a tile flush, which made
+	// games unplayable (Shadow of the Colossus 30 -> 7 fps on an RG 477V). The fetch path does
+	// corrupt some content on this driver (MGS3); users who need correct output use Vulkan, where
+	// the RT copy is an ordinary image copy. A rule re-added here also flips Auto to Vulkan via
+	// GSUtil::AndroidAutoPrefersVulkan, which reads this table.
 	//
-	// A gl-arm-r44p1-attachment-self-read rule shipped in 2.6.6.5 (mirroring a hand-rolled gate
-	// that had existed since 2.6.6.3). Through 2.6.6.4 that gate was INERT: the Mali profile
-	// block re-enabled the ARM fetch backend moments after the gate turned it off (the
-	// contradiction GSFramebufferFetchPolicy.h documents), so the entire r44p1 user base shipped
-	// on GL + GL_ARM_shader_framebuffer_fetch. 2.6.6.5 fixed the contradiction, the gate finally
-	// engaged, and on GLES — where fetch and the texture barrier are one capability — every
-	// self-referential draw became an RT copy plus a tile flush: Shadow of the Colossus went
-	// 30 -> 7 fps on an Anbernic RG 477V and users downgraded to 2.6.6.4 en masse.
-	//
-	// The fetch path DOES corrupt some content on this blob (MGS3 was the observed case; the
-	// likely mechanism is the driver granting the tile-read slot per attachment format and
-	// silently degrading denied reads to memory fetches inside a live feedback loop). But that
-	// is the exact trade 2.6.6.4 shipped, the field overwhelmingly chose it, and Vulkan — where
-	// the RT-copy path costs an ordinary image copy instead of a tile flush — remains the
-	// correct-rendering choice for the affected games. Restored 2026-08-12, this time on
-	// purpose. If a rule is ever re-added here, it also flips Auto back to Vulkan for these
-	// devices via GSUtil::AndroidAutoPrefersVulkan, which asks this table.
+	// MT6897 (Dimensity 8300, Mali-G615 MC6) keeps its working GL fetch path, but Auto is sent to
+	// Vulkan because its exemption from the destination-read denies below lets Vulkan read the
+	// target in tile memory, which measured faster. A preference, not a defect: no bug bit. Stated
+	// as a rule so it keys on the same SoC hint as the exemptions.
+	{"gl-mt6897-prefer-vulkan", MobileGpuApi::OpenGL, RuntimeGpuProfile::Mali,
+		MobileGpuDriver::Unknown, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
+		0, Workaround(DriverWorkaround::PreferVulkanRenderer), false, nullptr, MEASURED_SOC_MT6897},
 	{"gl-qualcomm-compiler", MobileGpuApi::OpenGL, RuntimeGpuProfile::Adreno,
 		MobileGpuDriver::QualcommProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
 		Bug(DriverBug::BrokenBufferStreaming) | Bug(DriverBug::BrokenNegatedBoolean) |
@@ -382,9 +466,8 @@ static constexpr std::array<DriverRule, 27> s_driver_rules = {{
 		{}, {1, 8, 0, 4693462}, 0, 0, true,
 		Bug(DriverBug::BrokenBitwiseOpNegation),
 		Workaround(DriverWorkaround::StoreBitwiseNegationInTemporary)},
-	// Upstream keys this on a PowerVRSeries5 architecture value we do not carry — our enum has a
-	// single PowerVR entry. The 500-599 model range is what actually selects SGX 5xx here, so the
-	// rule stays exactly as narrow without splitting the architecture enum.
+	// Upstream keys this on a PowerVR Series5 architecture we do not carry; the 500-599 model
+	// range selects SGX 5xx just as narrowly.
 	{"gl-powervr-sgx-tall-mipmap", MobileGpuApi::OpenGL, RuntimeGpuProfile::PowerVR,
 		MobileGpuDriver::ImaginationProprietary, MobileGpuArchitecture::PowerVR, 500, 599, 0,
 		{}, {}, 0, 0, false, Bug(DriverBug::BrokenGenerateMipmapTallTexture),
@@ -398,12 +481,23 @@ static constexpr std::array<DriverRule, 27> s_driver_rules = {{
 	{"vk-arm-proprietary", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
 		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
 		Bug(DriverBug::BrokenPrimitiveRestart) | Bug(DriverBug::BrokenPushDescriptors) |
-			Bug(DriverBug::BrokenAttachmentFeedbackLoopLayout) |
-			Bug(DriverBug::SlowCachedReadbackMemory) | Bug(DriverBug::BrokenVectorBitwiseAnd),
+			Bug(DriverBug::BrokenAttachmentFeedbackLoopLayout) | Bug(DriverBug::BrokenVectorBitwiseAnd),
 		Workaround(DriverWorkaround::UseDescriptorSets) |
 			Workaround(DriverWorkaround::DisableAttachmentFeedbackLoopLayout) |
-			Workaround(DriverWorkaround::PreferCoherentReadback) |
 			Workaround(DriverWorkaround::ScalarizeVectorBitwiseAnd)},
+	// Slow cached readback (from Dolphin's BUG_SLOW_CACHED_READBACK_MEMORY) measured backwards on
+	// r44p1 / Mali-G615: a non-coherent cached type with explicit invalidates beat the coherent
+	// map about 12x per readback. That does not prove it wrong on older parts, so the preference
+	// is split around exactly [r44p1, r44p2), the measured revision; everything else keeps the
+	// coherent preference.
+	{"vk-arm-slow-cached-readback-before-r44p1", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
+		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {44, 1, 0},
+		0, 0, true, Bug(DriverBug::SlowCachedReadbackMemory),
+		Workaround(DriverWorkaround::PreferCoherentReadback)},
+	{"vk-arm-slow-cached-readback-after-r44p1", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
+		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {44, 2, 0}, {},
+		0, 0, false, Bug(DriverBug::SlowCachedReadbackMemory),
+		Workaround(DriverWorkaround::PreferCoherentReadback)},
 	{"vk-arm-empty-renderpass", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
 		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0xaa9c4b29u, {}, {}, 0, 0, false,
 		Bug(DriverBug::BrokenEmptyRenderPass), 0},
@@ -422,18 +516,47 @@ static constexpr std::array<DriverRule, 27> s_driver_rules = {{
 	{"vk-arm-dynamic-rendering-before-r52", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
 		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {52, 0, 0},
 		0, 0, true, Bug(DriverBug::BrokenDynamicRendering), 0},
-	// r44p1 on Vulkan loses the device outright under the in-tile self-read (VK_ERROR_DEVICE_LOST
-	// at vkWaitForFences — Rogue Galaxy and others), so this rule is a crash gate, not a perf
-	// trade, and it stays even though its former GL twin was deliberately lifted (see the account
-	// above the GL rules). Disabling the feedback-loop LAYOUT alone was tried first and proved
-	// nothing: r44p1 never advertises VK_EXT_attachment_feedback_loop_layout, so the disable was
-	// vacuous — the read that kills the device is the ROAA/barrier one, and nothing short of
-	// reading a separate copy survives.
+	// r44p1 on Vulkan loses the device (VK_ERROR_DEVICE_LOST at vkWaitForFences) under the
+	// in-tile self-read: a crash gate, not a perf trade. Disabling only the feedback-loop layout is
+	// not enough (r44p1 does not advertise VK_EXT_attachment_feedback_loop_layout); the fatal read
+	// is the ROAA/barrier one, and only reading a separate copy survives.
+	//
+	// MT6897 is exempt on measurement: its r44p1 runs the in-tile read with no device loss or stale
+	// content, where the founding report (Motorola Edge 60 Pro, also r44p1) crashed on nearly every
+	// game. No version bound separates the two blobs, so the exemption is per SoC.
+	//
+	// malisx2 reports r44p1 on purpose but is not Arm's blob, and the device loss is the blob's.
+	// It is exempt without condition: a malisx2 build that cannot do the in-tile read (no
+	// rasterization-order access) falls to the barrier road, which the driver supports.
+	//
+	// The other half of the r44p1 workaround, the Vulkan device not using the feedback-loop layout,
+	// is VulkanDeviceRules::avoid_feedback_loop_layout below.
 	{"vk-arm-r44p1-attachment-self-read", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
 		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {44, 1, 0}, {44, 2, 0},
 		0, 0, false,
 		Bug(DriverBug::BrokenSubpassFeedback) | Bug(DriverBug::BrokenAttachmentFeedbackLoopLayout),
-		Workaround(DriverWorkaround::UseRenderTargetCopyForFeedback)},
+		Workaround(DriverWorkaround::UseRenderTargetCopyForFeedback), false, MEASURED_SOC_MT6897, nullptr,
+		Malisx2Exemption::Always},
+	// ROAA destination-read deny list. These parts advertise rasterization-order attachment
+	// access and return zero or stale destination colour through it (black or missing textures,
+	// not a crash), so the renderer uses the per-primitive texture-barrier path instead.
+	//
+	// The MediaTek rule is a vendor-wide guess (from sashkinbro/EmuCoreX), not a per-driver fact,
+	// and it is costly where wrong: Mali reports dualSrcBlend=false, so every SRC1 draw is
+	// software-blended and needs a barrier per primitive. EmuCore/GS/ForceMaliFramebufferFetch lets
+	// a user on another MediaTek part lift it. MT6897 is exempt: measured, and the read is correct.
+	//
+	// Both ROAA rows describe Arm's blob. malisx2 is exempt from them once it advertises the access
+	// itself; a malisx2 pack that does not keeps the rows, so it gets the barrier road as before.
+	{"vk-mediatek-mali-roaa-destination-read", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
+		MobileGpuDriver::Unknown, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
+		Bug(DriverBug::BrokenRoaaDestinationRead), 0, true, MEASURED_SOC_MT6897, nullptr,
+		Malisx2Exemption::WithRoaaColorAccess},
+	// Mali-G57 across SoC vendors, so keyed on the model rather than the SoC.
+	{"vk-arm-g57-roaa-destination-read", MobileGpuApi::Vulkan, RuntimeGpuProfile::Mali,
+		MobileGpuDriver::Unknown, MobileGpuArchitecture::Unknown, 57, 57, 0, {}, {}, 0, 0, false,
+		Bug(DriverBug::BrokenRoaaDestinationRead), 0, false, nullptr, nullptr,
+		Malisx2Exemption::WithRoaaColorAccess},
 	{"vk-qualcomm-proprietary", MobileGpuApi::Vulkan, RuntimeGpuProfile::Adreno,
 		MobileGpuDriver::QualcommProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
 		Bug(DriverBug::BrokenPrimitiveRestart) | Bug(DriverBug::BrokenProvokingVertex) |
@@ -444,21 +567,59 @@ static constexpr std::array<DriverRule, 27> s_driver_rules = {{
 		Workaround(DriverWorkaround::DisableProvokingVertex) |
 			Workaround(DriverWorkaround::PreferCoherentReadback) |
 			Workaround(DriverWorkaround::UseRenderTargetCopyForFeedback)},
-	// Turnip shares none of the blob's other defects but inherits the same broken render-target
-	// self-read, so it needs its own rule rather than the vk-qualcomm-proprietary one (which is
-	// keyed on MobileGpuDriver::QualcommProprietary).
+	// Turnip's first HOST_COHERENT type is write-combined, so VKStreamBuffer's rings land there.
+	// On Adreno 610 taking the cached non-coherent type plus a clean per commit cut GS-thread time
+	// by 20-30% on streaming-heavy titles, output unchanged.
 	//
-	// ARMSX2 #442: with an HD texture pack, Tales of the Abyss loses its entire 2D text layer the
-	// moment the replacement's alpha range flips those draws to require_one_barrier and the RT
-	// self-read engages. Device A/B on Turnip/Mesa 26.1.2 + Adreno 650 established that BOTH
-	// in-pass forms drop the content — the subpassLoad input attachment AND the
-	// feedback-loop-layout texelFetch sampler — while reading a separate RT copy renders
-	// correctly. Hence both bug bits and the expensive workaround. The reporter sees the same
-	// failure on the proprietary blob.
+	// Measured on one part only, and must not be widened by memory-table shape: on Mali-G615
+	// (MT6897), which also lacks a cached coherent type, the same trade lost on every title. Whether
+	// the clean is cheaper than write-combined stores is a CPU/cache property, not visible in the
+	// memory table. Other low-tier Adreno 6xx are candidates to measure, not to include. Adreno 650
+	// offers a cached coherent type and lost on it too. Turnip only: the proprietary driver's memory
+	// table has not been examined.
+	{"vk-turnip-a610-cached-stream-rings", MobileGpuApi::Vulkan, RuntimeGpuProfile::Adreno,
+		MobileGpuDriver::MesaTurnip, MobileGpuArchitecture::Unknown, 610, 610, 0, {}, {}, 0, 0, false,
+		0, Workaround(DriverWorkaround::PreferCachedStreamRingMemory)},
+	// Turnip does not share the Qualcomm driver's other defects but has the same broken
+	// render-target self-read, so it needs its own rule (vk-qualcomm-proprietary keys on the
+	// proprietary driver). Issue #442: with an HD texture pack, Tales of the Abyss loses its 2D text
+	// once the RT self-read engages. On Turnip + Adreno 650 both in-pass forms (subpassLoad input
+	// attachment and feedback-loop-layout texelFetch) drop the content; a separate RT copy is
+	// correct. Hence both bug bits and the copy workaround.
+	//
+	// Model bounds are 0/0, so this covers every Adreno on Turnip, though the evidence is Adreno 650
+	// only; narrowing it would have no better evidence. Where a part has been measured on the
+	// declared feedback loop, orders_declared_feedback_loop / prefers_declared_loop_with_barriers
+	// outrank this rule in GSSelfReadRoadPolicy.h, because the copy road renders wrong there.
 	{"vk-turnip-attachment-self-read", MobileGpuApi::Vulkan, RuntimeGpuProfile::Adreno,
 		MobileGpuDriver::MesaTurnip, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
 		Bug(DriverBug::BrokenSubpassFeedback) | Bug(DriverBug::BrokenAttachmentFeedbackLoopLayout),
 		Workaround(DriverWorkaround::UseRenderTargetCopyForFeedback)},
+	// Turnip sometimes applies VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR as if the blend constant
+	// were zero, while ONE_MINUS_SRC1_COLOR in the same pass is correct. Visible as Katamari
+	// Damacy's ball saturating to white. The submitted state is correct (confirmed in a capture);
+	// re-emitting the constant before each draw changes nothing, and identical draw streams replay
+	// right or wrong depending on run history.
+	//
+	// No version bound either way: seen on Adreno 610, 650 and 740 across every Mesa tested up to
+	// 26.3-devel, while the Qualcomm driver on the same 740 is correct. Upstream has no fix to bound
+	// the top at.
+	{"vk-turnip-blend-constant-ignored", MobileGpuApi::Vulkan, RuntimeGpuProfile::Adreno,
+		MobileGpuDriver::MesaTurnip, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {}, 0, 0, false,
+		Bug(DriverBug::BrokenBlendConstant), 0},
+	// Turnip below Mesa 26.2 hangs the GPU on A6XX_EARLY_Z_LATE_Z + a D32_SFLOAT_S8_UINT
+	// depth-stencil attachment + a fragment shader that can discard. With a stencil buffer every
+	// depth target is D32S8, and GSDeviceVK::SetupDATE's stencil pre-pass is that draw, so the first
+	// DATE draw loses the device. Fixed upstream in 26.2 ("tu/a6xx: Work around D32S8 EARLY_Z_LATE_Z
+	// hang", MR !41858, demotes to LATE_Z); not in any 26.1.x.
+	//
+	// Turnip only: the proprietary driver was never tested for this. vk-adreno5xx-depth-stencil
+	// declares BrokenDepthStencilDiscard on its own evidence and deliberately does not take this
+	// workaround.
+	{"vk-turnip-d32s8-early-z-late-z-hang", MobileGpuApi::Vulkan, RuntimeGpuProfile::Adreno,
+		MobileGpuDriver::MesaTurnip, MobileGpuArchitecture::Unknown, 0, 0, 0, {}, {26, 2, 0},
+		0, 0, true, Bug(DriverBug::BrokenDepthStencilDiscard),
+		Workaround(DriverWorkaround::DisableStencilBuffer)},
 	{"vk-qualcomm-pre-adreno8-readback", MobileGpuApi::Vulkan, RuntimeGpuProfile::Adreno,
 		MobileGpuDriver::QualcommProprietary, MobileGpuArchitecture::Unknown, 200, 799, 0, {}, {}, 0, 0, false,
 		Bug(DriverBug::SlowOptimalImageToBufferCopy),
@@ -496,6 +657,8 @@ static constexpr std::array<DriverRule, 27> s_driver_rules = {{
 		MobileGpuDriver::ArmProprietary, MobileGpuArchitecture::Unknown, 0, 0, 0, {46, 0, 0}, {51, 0, 0},
 		0, 0, false, Bug(DriverBug::BrokenExtendedDynamicState), 0},
 }};
+// MobileDriverProfile::matched_rules is one bit per row.
+static_assert(s_driver_rules.size() <= 64);
 } // namespace
 
 MobileDriverProfile ResolveDriverProfile(const GpuProfileSelection& selection,
@@ -518,8 +681,41 @@ MobileDriverProfile ResolveDriverProfile(const GpuProfileSelection& selection,
 	if (profile.version.known)
 		profile.confidence = DriverProfileConfidence::DriverVersion;
 
-	for (const DriverRule& rule : s_driver_rules)
+	// Two driver facts that do not come from the rule table. Both default false, so an
+	// unmeasured driver keeps its current road.
+	//
+	// Ordering: Turnip with a fix-generation tag. Generation 1 changes emission for A6XX only, so it
+	// is trusted on Adreno 6xx at 650 and up; on Adreno 610 the declared road renders inconsistently
+	// run to run while the copy road is stable, so parts below 650 keep their barriers and copy
+	// road. Generation 2 adds the A7XX half (the per-overlap prim mode and the per-draw flush for a
+	// declared loop), measured on the Adreno 740; it is trusted on Adreno 730 and up, the range the
+	// a7xx road preference below already covers. A Qualcomm driver cannot carry a Mesa git tag.
+	profile.declared_loop_fix_generation = ParseFixGeneration(context.driver_info);
+	const bool tagged_turnip_vk = (context.api == MobileGpuApi::Vulkan) && (profile.driver == MobileGpuDriver::MesaTurnip);
+	const bool a6xx_fix = (profile.declared_loop_fix_generation >= 1) &&
+		                  (selection.gpu.architecture == MobileGpuArchitecture::Adreno6xx) &&
+		                  (selection.gpu.model_number >= 650);
+	const bool a7xx_fix = (profile.declared_loop_fix_generation >= 2) &&
+		                  (selection.gpu.architecture == MobileGpuArchitecture::Adreno7xx) &&
+		                  (selection.gpu.model_number >= 730);
+	profile.orders_declared_feedback_loop = tagged_turnip_vk && (a6xx_fix || a7xx_fix);
+	// The a7xx half orders a draw against earlier draws; within a draw it orders overlapping
+	// primitives only for a pipeline that requests rasterization-order access.
+	profile.declared_loop_orders_overlap_on_request = tagged_turnip_vk && a7xx_fix && !a6xx_fix;
+
+	// The a7xx preference is about the part, not the build, so it needs no tag: on Adreno 740 the
+	// declared loop with our barriers is correct and stable where the copy road renders wrong.
+	// Limited to 730-750: the 740 was measured, the 730 and 750 are the neighbouring a7xx
+	// generations in Mesa's freedreno table. 702-725 were never run (Mesa treats the 702 as a6xx
+	// family), so they keep the copy road.
+	profile.prefers_declared_loop_with_barriers = (context.api == MobileGpuApi::Vulkan) &&
+		                                          (profile.driver == MobileGpuDriver::MesaTurnip) &&
+		                                          (selection.gpu.architecture == MobileGpuArchitecture::Adreno7xx) &&
+		                                          (selection.gpu.model_number >= 730);
+
+	for (size_t row = 0; row < s_driver_rules.size(); row++)
 	{
+		const DriverRule& rule = s_driver_rules[row];
 		if (std::string_view(rule.id) == "vk-powervr-old-swapchain-width" &&
 			(profile.version.raw == 0 || profile.version.raw >= 0x00582558u))
 		{
@@ -544,16 +740,95 @@ MobileDriverProfile ResolveDriverProfile(const GpuProfileSelection& selection,
 		{
 			continue;
 		}
-		if (!RuleMatches(rule, selection, context, profile))
+		if (!RuleMatches(rule, selection, context, profile, lowered_hints))
 			continue;
 
+		profile.matched_rules |= u64{1} << row;
+		if (IsExemptForMaliSX2(rule, context))
+		{
+			profile.exempted_rules |= u64{1} << row;
+			continue;
+		}
 		profile.bugs |= rule.bugs;
 		profile.workarounds |= rule.workarounds;
 		profile.matched_rule_count++;
 	}
+
+	// Applied last so no rule filter drops it, and outside matched_rule_count, which counts
+	// database matches only.
+	profile.bugs |= GpuProfileDetector::GetForcedBugs();
 
 	profile.conservative_fallback =
 		(selection.runtime_profile == RuntimeGpuProfile::Unknown || profile.driver == MobileGpuDriver::Unknown);
 	return profile;
 }
 } // namespace GpuProfileDetail
+
+namespace
+{
+u64 s_forced_driver_bugs = 0;
+}
+
+void GpuProfileDetector::SetForcedBugs(u64 mask)
+{
+	s_forced_driver_bugs = mask;
+}
+
+u64 GpuProfileDetector::GetForcedBugs()
+{
+	return s_forced_driver_bugs;
+}
+
+u32 GpuProfileDetector::DriverRuleCount()
+{
+	return static_cast<u32>(GpuProfileDetail::s_driver_rules.size());
+}
+
+const char* GpuProfileDetector::DriverRuleId(u32 row)
+{
+	return (row < GpuProfileDetail::s_driver_rules.size()) ? GpuProfileDetail::s_driver_rules[row].id : nullptr;
+}
+
+u32 GpuProfileDetector::ParseDeclaredLoopFixGeneration(std::string_view driver_info)
+{
+	return GpuProfileDetail::ParseFixGeneration(driver_info);
+}
+
+VulkanDeviceRules GpuProfileDetector::ResolveVulkanDeviceRules(const GpuProfileSelection& selection,
+	const MobileDriverContext& context, std::string_view device_name)
+{
+	using namespace GpuProfileDetail;
+
+	const bool mali = (context.vendor_id == GpuVendorID::ARM);
+	const bool adreno = (context.vendor_id == GpuVendorID::Qualcomm);
+	const bool qualcomm_driver = (context.driver_id == DRIVER_ID_QUALCOMM_PROPRIETARY);
+	const bool turnip = (context.driver_id == DRIVER_ID_MESA_TURNIP);
+	const bool honeykrisp = (context.driver_id == DRIVER_ID_MESA_HONEYKRISP);
+	const auto name_has = [device_name](std::string_view part) {
+		return device_name.find(part) != std::string_view::npos;
+	};
+
+	VulkanDeviceRules rules;
+	rules.broken_timestamp_queries = mali && name_has("Mali-G615");
+	// Matched on the driverInfo string, not the parsed revision the rule table uses, and without the
+	// table's MT6897 exemption. MT6897's r44p1 does not advertise the layout extension, so the two
+	// agree on every r44p1 device seen.
+	rules.avoid_feedback_loop_layout =
+		mali && context.driver_info.find("r44p1") != std::string_view::npos;
+	// The Mali crash is in Arm's blob. malisx2 reports Arm's identity but is our own driver, and is
+	// trusted with push descriptors once it advertises as many as the backend binds; a build without
+	// the extension, or with fewer, keeps the avoid.
+	rules.exempt_malisx2_push_descriptors = mali && GpuProfileDetector::IsMaliSX2Driver(context.driver_info) &&
+	                                        context.max_push_descriptors >= VULKAN_PUSH_DESCRIPTORS_REQUIRED;
+	rules.avoid_push_descriptors =
+		(mali && !rules.exempt_malisx2_push_descriptors) || (adreno && !qualcomm_driver && !turnip);
+	rules.broken_provoking_vertex = adreno && qualcomm_driver;
+	rules.broken_colormask_with_depth =
+		adreno && !turnip && (context.device_id < 0x06000000u || context.driver_version < 0x801EA000u);
+	rules.broken_mad_deinterlace = mali && name_has("Mali-G57");
+	rules.adreno8xx_proprietary =
+		adreno && qualcomm_driver && selection.gpu.architecture == MobileGpuArchitecture::Adreno8xx;
+	rules.self_read_costs_measured = turnip || honeykrisp;
+	rules.barrier_road_measured = honeykrisp;
+	return rules;
+}

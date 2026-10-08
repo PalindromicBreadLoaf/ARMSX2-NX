@@ -206,7 +206,7 @@ class EmulationSurface(context: Context) :
         val settingsKey = MainActivityRuntime.currentGame.value?.settingsKey
             ?: NativeApp.getGameSerial().takeIf { it.isNotBlank() }
         ConfigStore.resolveForGame(settingsKey)
-            .vsyncQueueSize == 0
+            .hwFixes.vsyncQueueSize == 0
     }.getOrDefault(false)
 
     private fun preferredDisplayRefreshRate(nominalRate: Float): Float {
@@ -260,14 +260,23 @@ class EmulationSurface(context: Context) :
         val effective = runCatching {
             com.armsx2.config.ConfigStore.resolveForGame(MainActivityRuntime.currentGame.value?.settingsKey)
         }.getOrElse { com.armsx2.ui.InGameOverlay.settingsState.value }
-        val multiplier = effective.hwScaler
+        val multiplier = effective.output.hwScaler
 
         // Base output resolution: an explicit "WxH" override when set (fixes wrong panel detection,
         // e.g. a 1920x1080 panel mis-reported as 1920x1200 which squishes 16:9 games — issue #398),
-        // otherwise the SurfaceView's laid-out size.
-        val override = parseResOverride(effective.screenResOverride)
-        val baseW = override?.first ?: viewWidth
-        val baseH = override?.second ?: viewHeight
+        // otherwise the SurfaceView's laid-out size. The override is a landscape size: on a screen held
+        // upright its shape was stretched over the tall view, the game drawn the full height of the
+        // screen, squeezed, with bars at its sides (#790). There it sets only the resolution: the
+        // view's own shape, at the override's short side.
+        val override = parseResOverride(effective.output.screenResOverride)
+        val (baseW, baseH) = when {
+            override == null -> viewWidth to viewHeight
+            viewHeight <= viewWidth -> override
+            else -> {
+                val short = minOf(override.first, override.second)
+                short to (short.toLong() * viewHeight / viewWidth).toInt()
+            }
+        }
 
         // hwScaler (if > 0) downscales the short side to 448*multiplier for weak GPUs, applied to
         // whatever base we picked above.

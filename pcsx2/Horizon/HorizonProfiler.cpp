@@ -1026,7 +1026,7 @@ namespace
 						   "thread mode {}\n",
 			Pcsx2Config::GSOptions::GetRendererName(gs.Renderer), gs.UpscaleMultiplier,
 			static_cast<int>(gs.AccurateBlendingUnit), static_cast<int>(gs.TexturePreloading),
-			static_cast<int>(gs.HWDownloadMode), static_cast<int>(gs.BackThreadMode));
+			static_cast<int>(gs.HWDownloadMode), static_cast<int>(gs.BackThread));
 		out += fmt::format("cpu: MTVU {}, EE cycle rate {}, EE cycle skip {}, thread pinning {}, fastmem {} (area {}, {})\n",
 			OnOff(EmuConfig.Speedhacks.vuThread), EmuConfig.Speedhacks.EECycleRate, EmuConfig.Speedhacks.EECycleSkip,
 			OnOff(EmuConfig.EnableThreadPinning), OnOff(EmuConfig.Cpu.Recompiler.EnableFastmem),

@@ -16,4 +16,32 @@
 // is BELOW our 110 — taking their value would hand every user a stale blob for a source they no
 // longer have. Our counter has been ahead of theirs since 109 and cannot be resynced by adopting
 // their numbers; always bump past our own last value.
-static constexpr u32 SHADER_CACHE_VERSION = 111; // 108 was upstream PR 14688; their 109 = our 111
+// 112: PS_QUANTIZE_COLOR. Every TFX shader gains the define and the colour-clamp block's guard
+// gains a term, so the source text of every TFX permutation changed.
+// 113: PS_SUBSTITUTE_ALPHA. Every TFX shader gains the define, two constant-buffer pad words
+// become named fields, and the colour-clamp block's guard gains another term.
+// 114: PS_AF_IN_SRC1. The Vulkan TFX shader gains the define and a block that overrides
+// alpha_blend with the fixed AFIX value, so its source text changed after 113 was set.
+// 115: upstream PR 14897, the depth conversion shaders floor the bilinear result.
+// 116: upstream PR 14824, the PrimID DATE init shaders take PRIMID_MIN/MAX defines.
+// 117: upstream PR 14743, ps_fbmask reads the destination alpha in the RTA-scaled domain and
+// ROV channel masking goes through FBMASK.
+// 118-123: tfx.* tests scan-mask field parity on the native line, indexes the dither matrix by the
+// native pixel under a per-axis phase the CPU picks (the PS constant buffer's last pad is named for
+// it), and gains PS_NATIVE_TEXEL_GRID so a nearest sprite minifying a GS-memory texture reads its
+// native pixel's texel (one more PS constant-buffer vector). interlace.* still tests field parity
+// on the device row; its constant buffer's second vector carries the undrawn top band.
+// 124: the TFX dither index and scan-mask test divide by the render target's scale, carried in the
+// PS constant buffer's former pad after RcpScaleFactor, instead of the texture's.
+// 125: the weave and MAD buffering passes fill the undrawn field band where the display rect
+// starts, read from FieldPad.xy as a row range, instead of from row 0 down to a row count.
+// 126: the 2026-09 upstream sync: the AA1 triangle-expand vertex shaders, the tfx type-mismatch fixes,
+// the software-blend shuffle denormalize, and the GL gpu_shader5 removal change shader
+// source text. Upstream numbered their last of these 118.
+// 127: a sprite whose far edge the pixel-grid snap pushed out samples no further than its last
+// native pixel, so tfx.glsl (Vulkan) gains VS_SPRITE_EDGE_CLAMP and PS_SPRITE_EDGE_CLAMP.
+// 128: every backend's tfx shader gains PS_REPLACEMENT_ALPHA_SNAP (pack texture alpha near 0x80).
+// 129: the Vulkan expanded-line vertex shader pairs a line's two ends by index (top reads +1, bottom
+// reads -1) on every device and no longer gets a VS_PROVOKING_VERTEX_LAST define, so its source text
+// changed.
+static constexpr u32 SHADER_CACHE_VERSION = 129; // 108 was upstream PR 14688; their 109 = our 111, their 110 = our 115, their 112 = our 116, their 113 = our 117, their 118 = our 126

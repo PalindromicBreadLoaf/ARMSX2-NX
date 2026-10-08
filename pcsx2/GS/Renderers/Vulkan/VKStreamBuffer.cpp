@@ -4,30 +4,43 @@
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/VKBuilders.h"
 #include "GS/Renderers/Vulkan/VKStreamBuffer.h"
+#include "GS/Renderers/Common/GSStreamRingGrowth.h"
 
 #include "common/Assertions.h"
 #include "common/BitUtils.h"
 #include "common/Console.h"
 
+#include <algorithm>
+#include <cstring>
+#include <string>
+
 VKStreamBuffer::VKStreamBuffer() = default;
 
 VKStreamBuffer::VKStreamBuffer(VKStreamBuffer&& move)
 	: m_size(move.m_size)
+	, m_max_size(move.m_max_size)
 	, m_current_offset(move.m_current_offset)
 	, m_current_space(move.m_current_space)
 	, m_current_gpu_position(move.m_current_gpu_position)
+	, m_usage(move.m_usage)
+	, m_name(move.m_name)
 	, m_allocation(move.m_allocation)
 	, m_buffer(move.m_buffer)
 	, m_host_pointer(move.m_host_pointer)
 	, m_tracked_fences(std::move(move.m_tracked_fences))
+	, m_non_coherent(move.m_non_coherent)
+	, m_pending_flush(move.m_pending_flush)
 {
 	move.m_size = 0;
+	move.m_max_size = 0;
 	move.m_current_offset = 0;
 	move.m_current_space = 0;
 	move.m_current_gpu_position = 0;
 	move.m_allocation = VK_NULL_HANDLE;
 	move.m_buffer = VK_NULL_HANDLE;
 	move.m_host_pointer = nullptr;
+	move.m_non_coherent = false;
+	move.m_pending_flush.Reset();
 }
 
 VKStreamBuffer::~VKStreamBuffer()
@@ -42,17 +55,22 @@ VKStreamBuffer& VKStreamBuffer::operator=(VKStreamBuffer&& move)
 		Destroy(true);
 
 	std::swap(m_size, move.m_size);
+	std::swap(m_max_size, move.m_max_size);
+	std::swap(m_usage, move.m_usage);
+	std::swap(m_name, move.m_name);
 	std::swap(m_current_offset, move.m_current_offset);
 	std::swap(m_current_space, move.m_current_space);
 	std::swap(m_current_gpu_position, move.m_current_gpu_position);
 	std::swap(m_buffer, move.m_buffer);
 	std::swap(m_host_pointer, move.m_host_pointer);
 	std::swap(m_tracked_fences, move.m_tracked_fences);
+	std::swap(m_non_coherent, move.m_non_coherent);
+	std::swap(m_pending_flush, move.m_pending_flush);
 
 	return *this;
 }
 
-bool VKStreamBuffer::Create(VkBufferUsageFlags usage, u32 size)
+bool VKStreamBuffer::Create(VkBufferUsageFlags usage, u32 size, const char* name, u32 max_size)
 {
 	const VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, nullptr, 0, static_cast<VkDeviceSize>(size),
 		usage, VK_SHARING_MODE_EXCLUSIVE, 0, nullptr};
@@ -62,33 +80,106 @@ bool VKStreamBuffer::Create(VkBufferUsageFlags usage, u32 size)
 	aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
 	aci.preferredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
+	// A buffer that replaces a live one (Grow) may itself be outgrown and freed. As a sub-allocation
+	// that memory would stay resident inside its VMA block; a dedicated allocation hands it back to
+	// the driver. The first buffer is allocated exactly as before rings could grow, so a title that
+	// never grows its rings sees no change at all.
+	if (IsValid())
+		aci.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+
+	// Which memory the rings get was decided once, at device creation, from the driver database and
+	// this device's memory-type table (GSStreamRingMemoryPolicy.h). The write-combined road is the
+	// default and adds nothing, so an unnamed device gets literally the selection it had before the
+	// decision existed rather than a reconstruction of it; on the two cached roads it adds the bits
+	// the policy already proved some type carries.
+	const GSStreamRingMemoryDecision& memory = GSDeviceVK::GetInstance()->GetStreamRingMemory();
+	aci.requiredFlags |= static_cast<VkMemoryPropertyFlags>(memory.extra_required_flags);
+
 	VmaAllocationInfo ai = {};
 	VkBuffer new_buffer = VK_NULL_HANDLE;
 	VmaAllocation new_allocation = VK_NULL_HANDLE;
 	VkResult res =
 		vmaCreateBuffer(GSDeviceVK::GetInstance()->GetAllocator(), &bci, &aci, &new_buffer, &new_allocation, &ai);
+	if (res != VK_SUCCESS && aci.requiredFlags != 0)
+	{
+		// The policy read the device's memory types, not this buffer's. A driver may narrow which
+		// types a given buffer can live in, and if that leaves the cached road with nothing, the
+		// ring still has to be allocated -- a device that cannot create its vertex buffer does not
+		// start. Retry on the road every device took before this decision existed, and say so:
+		// a device quietly off the road its banner names is the one failure this rung cannot
+		// afford.
+		Console.Error("GS/Vulkan: stream ring %s could not be allocated from the chosen memory; "
+					  "falling back to the write-combined road for this ring.",
+			name);
+		aci.requiredFlags = 0;
+		res = vmaCreateBuffer(GSDeviceVK::GetInstance()->GetAllocator(), &bci, &aci, &new_buffer, &new_allocation, &ai);
+	}
 	if (res != VK_SUCCESS)
 	{
 		LOG_VULKAN_ERROR(res, "vkCreateBuffer failed: ");
 		return false;
 	}
 
+	// A ring on a memory type without HOST_COHERENT needs a real cache clean before the GPU
+	// reads it; CommitMemory's deferred flush is what pays for that.
+	VkMemoryPropertyFlags mem_flags = 0;
+	vmaGetMemoryTypeProperties(GSDeviceVK::GetInstance()->GetAllocator(), ai.memoryType, &mem_flags);
+
+	// Destroy flushes the old buffer's pending writes and clears the coherence flag, so it goes
+	// before either is set for the new buffer.
 	if (IsValid())
 		Destroy(true);
 
+	m_non_coherent = (mem_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0;
+	m_pending_flush.Reset();
+
 	// Replace with the new buffer
+	m_usage = usage;
+	m_name = name;
 	m_size = size;
+	m_max_size = std::max(size, max_size);
 	m_current_offset = 0;
 	m_current_gpu_position = 0;
 	m_tracked_fences.clear();
 	m_allocation = new_allocation;
 	m_buffer = new_buffer;
 	m_host_pointer = static_cast<u8*>(ai.pMappedData);
+
+	// Touch every page of the mapping once, here, at creation, so the first-touch fault cost is
+	// paid at startup instead of smeared across the ring's first lap. These are persistent
+	// mappings, created once and written a little at a time every frame for the life of the
+	// device -- on a device where every VkDeviceMemory allocation is a shmem GEM object faulted
+	// on first touch (Turnip/msm), a 16 MiB ring at roughly 1 MiB of writes a frame takes about
+	// 16 frames to be touched end to end, and each of those pages faults on its first write
+	// whenever that lap gets to it. One store per page over the whole mapped range up front pays
+	// that once, before anything is being timed.
+	//
+	// Not on a discrete GPU. There the host-visible ring lives behind the PCIe BAR rather than in
+	// system memory, so there is no page to fault in and the memset is 72 MiB of write-combined
+	// stores across the bus buying nothing -- paid again on every device recreation (renderer
+	// switch, fullscreen toggle). Integrated and mobile parts, which is where the fault cost was
+	// measured, keep it.
+	if (GSDeviceVK::GetInstance()->GetDeviceProperties().deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+	{
+		std::memset(ai.pMappedData, 0, ai.size);
+		if (m_non_coherent)
+		{
+			// Same cache clean CommitMemory would issue for this range, so the pre-touch doesn't
+			// leave dirty lines the GPU could read stale.
+			vmaFlushAllocation(GSDeviceVK::GetInstance()->GetAllocator(), new_allocation, 0, ai.size);
+		}
+	}
+
 	return true;
 }
 
 void VKStreamBuffer::Destroy(bool defer)
 {
+	// A deferred destruction hands the buffer to the GPU's retirement queue, so anything committed
+	// and not yet submitted still has to be cleaned. Empty on every ordinary shutdown -- the
+	// device drains its command buffers first -- and the buffer is still alive here either way.
+	FlushPendingWrites();
+
 	if (m_buffer != VK_NULL_HANDLE)
 	{
 		if (defer)
@@ -98,21 +189,28 @@ void VKStreamBuffer::Destroy(bool defer)
 	}
 
 	m_size = 0;
+	m_max_size = 0;
 	m_current_offset = 0;
 	m_current_gpu_position = 0;
 	m_tracked_fences.clear();
 	m_buffer = VK_NULL_HANDLE;
 	m_allocation = VK_NULL_HANDLE;
 	m_host_pointer = nullptr;
+	m_non_coherent = false;
+	m_pending_flush.Reset();
 }
 
 bool VKStreamBuffer::ReserveMemory(u32 num_bytes, u32 alignment)
 {
 	const u32 required_bytes = num_bytes + alignment;
 
-	// Check for sane allocations
+	// Check for sane allocations. A ring with headroom grows to hold a request larger than itself.
 	if (required_bytes > m_size)
 	{
+		const u32 grown_size = GSStreamRingGrowth::SizeInsteadOfWait(m_size, m_max_size, required_bytes);
+		if (grown_size != 0 && Grow(grown_size))
+			return true;
+
 		Console.Error("Attempting to allocate %u bytes from a %u byte stream buffer", static_cast<u32>(num_bytes),
 			static_cast<u32>(m_size));
 		pxFailRel("Stream buffer overflow");
@@ -160,9 +258,27 @@ bool VKStreamBuffer::ReserveMemory(u32 num_bytes, u32 alignment)
 		}
 	}
 
-	// Can we find a fence to wait on that will give us enough memory?
-	if (WaitForClearSpace(required_bytes))
+	// Out of free space. Every way on from here waits for the GPU, unless the ring grows. The
+	// completed counter is only as fresh as the last poll, so before deciding to grow, find out
+	// whether the GPU has already freed the space.
+	if (m_max_size > m_size)
 	{
+		const u64 completed = GSDeviceVK::GetInstance()->GetCompletedFenceCounter();
+		GSDeviceVK::GetInstance()->ScanForCommandBufferCompletion();
+		if (GSDeviceVK::GetInstance()->GetCompletedFenceCounter() != completed)
+			return ReserveMemory(num_bytes, alignment);
+	}
+
+	const u32 grown_size = GSStreamRingGrowth::SizeInsteadOfWait(m_size, m_max_size, required_bytes);
+	if (grown_size != 0 && Grow(grown_size))
+		return true;
+
+	// Can we find a submitted fence to wait on that will give us enough memory?
+	ClearSpace space;
+	if (FindClearSpace(required_bytes, &space) &&
+		m_tracked_fences[space.fence_index].first != GSDeviceVK::GetInstance()->GetCurrentFenceCounter())
+	{
+		WaitForClearSpace(space);
 		const u32 align_diff = Common::AlignUp(m_current_offset, alignment) - m_current_offset;
 		m_current_offset += align_diff;
 		m_current_space -= align_diff;
@@ -180,12 +296,43 @@ void VKStreamBuffer::CommitMemory(u32 final_num_bytes)
 	pxAssert((m_current_offset + final_num_bytes) <= m_size);
 	pxAssert(final_num_bytes <= m_current_space);
 
-	// For non-coherent mappings, flush the memory range
-	vmaFlushAllocation(GSDeviceVK::GetInstance()->GetAllocator(), m_allocation, m_current_offset, final_num_bytes);
+	// A non-coherent ring's writes have to be cleaned out of the CPU's caches before the GPU reads
+	// them, and the GPU cannot read any of this until the queue submission that consumes it. So
+	// the region is recorded rather than cleaned: FlushPendingWrites cleans the lot once, at the
+	// submit. Cache maintenance is priced per byte and the call is priced per call, and this pays
+	// the call price once per ring per submit instead of once per commit for the same bytes.
+	//
+	// A coherent ring records nothing and calls nothing. vmaFlushAllocation returned immediately
+	// on a coherent type anyway, so that is the same behaviour with the call taken out.
+	if (m_non_coherent && !m_pending_flush.Add(m_current_offset, final_num_bytes))
+	{
+		// Only reachable if the ring wrapped twice with the first wrap still unflushed, which
+		// needs a fence to have completed, which needs a submit, which would have flushed. Handled
+		// rather than asserted: falling back to a flush here is exactly the old behaviour.
+		FlushPendingWrites();
+		m_pending_flush.Add(m_current_offset, final_num_bytes);
+	}
 
 	m_current_offset += final_num_bytes;
 	m_current_space -= final_num_bytes;
 	UpdateCurrentFencePosition();
+}
+
+void VKStreamBuffer::FlushPendingWrites()
+{
+	if (m_pending_flush.IsEmpty())
+		return;
+
+	const VmaAllocator allocator = GSDeviceVK::GetInstance()->GetAllocator();
+	for (u32 i = 0; i < m_pending_flush.count; i++)
+	{
+		const GSStreamRingFlushRanges::Range& range = m_pending_flush.ranges[i];
+		// VMA rounds the range out to nonCoherentAtomSize before issuing the clean. Safe here: a
+		// clean writes back and never invalidates, and nothing but the CPU ever writes a ring.
+		vmaFlushAllocation(allocator, m_allocation, range.begin, range.size());
+	}
+
+	m_pending_flush.Reset();
 }
 
 void VKStreamBuffer::UpdateCurrentFencePosition()
@@ -228,7 +375,7 @@ void VKStreamBuffer::UpdateGPUPosition()
 	}
 }
 
-bool VKStreamBuffer::WaitForClearSpace(u32 num_bytes)
+bool VKStreamBuffer::FindClearSpace(u32 num_bytes, ClearSpace* out) const
 {
 	u32 new_offset = 0;
 	u32 new_space = 0;
@@ -292,17 +439,48 @@ bool VKStreamBuffer::WaitForClearSpace(u32 num_bytes)
 		return false;
 	});
 
-	// Did any fences satisfy this condition?
-	// Has the command buffer been executed yet? If not, the caller should execute it.
-	if (iter == m_tracked_fences.end() || iter->first == GSDeviceVK::GetInstance()->GetCurrentFenceCounter())
+	if (iter == m_tracked_fences.end())
 		return false;
+
+	out->fence_index = static_cast<size_t>(iter - m_tracked_fences.begin());
+	out->offset = new_offset;
+	out->space = new_space;
+	out->gpu_position = new_gpu_position;
+	return true;
+}
+
+void VKStreamBuffer::WaitForClearSpace(const ClearSpace& space)
+{
+	const auto iter = m_tracked_fences.begin() + space.fence_index;
 
 	// Wait until this fence is signaled. This will fire the callback, updating the GPU position.
 	GSDeviceVK::GetInstance()->WaitForFenceCounter(iter->first);
 	m_tracked_fences.erase(
-		m_tracked_fences.begin(), m_current_offset == iter->second ? m_tracked_fences.end() : ++iter);
-	m_current_offset = new_offset;
-	m_current_space = new_space;
-	m_current_gpu_position = new_gpu_position;
+		m_tracked_fences.begin(), m_current_offset == iter->second ? m_tracked_fences.end() : iter + 1);
+	m_current_offset = space.offset;
+	m_current_space = space.space;
+	m_current_gpu_position = space.gpu_position;
+}
+
+bool VKStreamBuffer::Grow(u32 new_size)
+{
+	const u32 old_size = m_size;
+
+	// Create keeps the old buffer alive on failure, and a ring that cannot grow once is not asked
+	// again: from then on it waits, as it would have without growth.
+	if (!Create(m_usage, new_size, m_name, m_max_size))
+	{
+		Console.Error("GS/Vulkan: stream ring %s could not grow from %u to %u bytes; waiting on the GPU instead.",
+			m_name, old_size, new_size);
+		m_max_size = m_size;
+		return false;
+	}
+
+	Console.WriteLn("GS/Vulkan: stream ring %s grew from %u to %u KiB instead of waiting on the GPU.", m_name,
+		old_size >> 10, new_size >> 10);
+
+	// A fresh buffer, empty, with offset 0 aligned for any stride.
+	m_current_space = m_size;
+	GSDeviceVK::GetInstance()->OnStreamRingReplaced(*this);
 	return true;
 }

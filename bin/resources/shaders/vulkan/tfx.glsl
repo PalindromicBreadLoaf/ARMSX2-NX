@@ -90,6 +90,10 @@ void main()
 
 		// Float coords
 		vsOut.t.xy = st;
+		#if VS_SPRITE_EDGE_CLAMP
+			// An FST sprite's ST carries its far-edge sample limit, normalised like the UV.
+			vsOut.t.xy = st * TextureScale;
+		#endif
 		vsOut.t.w = a_q;
 	#else
 		vsOut.t = vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -146,7 +150,8 @@ uint load_index(uint _i)
 {
 	uint i = _i + BaseIndex;
 	// i is even => load lower 16 bits; i odd => load upper 16 bits.
-	uint shift = (i & 1u) << 4u;
+	// uint shift = (i & 1u) << 4u;
+	uint shift = (i & 1u) != 0u ? 16u : 0u;
 	return (index_buffer[i >> 1u] >> shift) & 0xFFFFu;
 }
 
@@ -183,6 +188,10 @@ ProcessedVertex load_vertex(uint index)
 		#endif
 
 		vtx.t.xy = st;
+		#if VS_SPRITE_EDGE_CLAMP
+			// An FST sprite's ST carries its far-edge sample limit, normalised like the UV.
+			vtx.t.xy = st * TextureScale;
+		#endif
 		vtx.t.w = a_q;
 	#else
 		vtx.t = vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -317,11 +326,9 @@ void main()
 
 	bool is_bottom = (vid & 2u) != 0u;
 	bool is_right = (vid & 1u) != 0u;
-#if VS_PROVOKING_VERTEX_LAST
+	// Lines reach here as index pairs (a, a + 1) whatever the provoking vertex is; a provoking-first
+	// device gets its flat colours fixed on the CPU, not its indices reordered.
 	uint vid_other = is_bottom ? vid_base - 1 : vid_base + 1;
-#else
-	uint vid_other = is_bottom ? vid_base + 1 : vid_base - 1;
-#endif
 
 	vtx = load_vertex(vid_base);
 	ProcessedVertex other = load_vertex(vid_other);
@@ -377,34 +384,34 @@ void main()
 	// - Vertices 27-32: Second corner cap (2 triangles).
 	// - Vertices 33-38: Third corner cap (2 triangles).
 
-	uint prim_id = vid / 39;
-	uint prim_offset = vid - 39 * prim_id; // range: 0-38
-	bool interior = prim_offset < 3;
-	bool edge = 3 <= prim_offset && prim_offset < 21;
+	uint prim_id = vid / 39u;
+	uint prim_offset = vid - 39u * prim_id; // range: 0-38
+	bool interior = prim_offset < 3u;
+	bool edge = 3u <= prim_offset && prim_offset < 21u;
 
 	if (interior)
 	{
-		vtx = load_vertex(load_index(3 * prim_id + prim_offset));
+		vtx = load_vertex(load_index(3u * prim_id + prim_offset));
 		vsOut.inv_cov = 0.0f; // Full coverage
-		vsOut.interior = 1;
+		vsOut.interior = 1u;
 	}
 	else if (edge)
 	{
 		// Vertex indices for this edge. We need all 3 for determining exterior/interior.
-		uint prim_offset_edges = prim_offset - 3; // range: 0-17
-		uint i0 = prim_offset_edges / 6;
-		uint i1 = (i0 >= 2) ? i0 - 2 : i0 + 1;
-		uint i2 = (i0 >= 1) ? i0 - 1 : i0 + 2;
-		uint edge_offset = prim_offset_edges - 6 * i0; // range: 0-5
+		uint prim_offset_edges = prim_offset - 3u; // range: 0-17
+		uint i0 = prim_offset_edges / 6u;
+		uint i1 = (i0 >= 2u) ? i0 - 2u : i0 + 1u;
+		uint i2 = (i0 >= 1u) ? i0 - 1u : i0 + 2u;
+		uint edge_offset = prim_offset_edges - 6u * i0; // range: 0-5
 
 		// Note: order of top/bottom, inside/outside is arbitrary,
 		// as long as it assembles into two triangles forming a quad.
-		bool is_bottom = (2 <= edge_offset) && (edge_offset <= 4);
-		bool is_outside = (edge_offset & 1) != 0;
+		bool is_bottom = (2u <= edge_offset) && (edge_offset <= 4u);
+		bool is_outside = (edge_offset & 1u) != 0u;
 
-		vtx = load_vertex(load_index(3 * prim_id + (is_bottom ? i1 : i0)));
-		ProcessedVertex other = load_vertex(load_index(3 * prim_id + (is_bottom ? i0 : i1)));
-		ProcessedVertex opposite = load_vertex(load_index(3 * prim_id + i2));
+		vtx = load_vertex(load_index(3u * prim_id + (is_bottom ? i1 : i0)));
+		ProcessedVertex other = load_vertex(load_index(3u * prim_id + (is_bottom ? i0 : i1)));
+		ProcessedVertex opposite = load_vertex(load_index(3u * prim_id + i2));
 
 		mat2 pos_deltas = get_xy_deltas_unscaled(vtx, other, opposite);
 
@@ -415,25 +422,25 @@ void main()
 
 		vsOut.inv_cov = is_outside ? 1.0f : 0.0f; // No coverage on outside, otherwise full.
 
-		vsOut.interior = 0;
+		vsOut.interior = 0u;
 	}
 	else // Corner cap
 	{
 		// Vertex indices for this cap. We need all 3 for determining exterior/interior.
-		uint prim_offset_cap = prim_offset - 21; // range: 0-8
-		uint i0 = prim_offset_cap / 6;
-		uint i1 = (i0 >= 2) ? i0 - 2 : i0 + 1;
-		uint i2 = (i0 >= 1) ? i0 - 1 : i0 + 2;
-		uint cap_offset = prim_offset_cap - 6 * i0; // range: 0-5
+		uint prim_offset_cap = prim_offset - 21u; // range: 0-8
+		uint i0 = prim_offset_cap / 6u;
+		uint i1 = (i0 >= 2u) ? i0 - 2u : i0 + 1u;
+		uint i2 = (i0 >= 1u) ? i0 - 1u : i0 + 2u;
+		uint cap_offset = prim_offset_cap - 6u * i0; // range: 0-5
 
-		bool is_near_corner = cap_offset == 0 || cap_offset == 3;
-		bool is_far_corner = cap_offset == 2 || cap_offset == 5;
-		bool is_first_tri = cap_offset < 3;
+		bool is_near_corner = cap_offset == 0u || cap_offset == 3u;
+		bool is_far_corner = cap_offset == 2u || cap_offset == 5u;
+		bool is_first_tri = cap_offset < 3u;
 
 		// First triangle is on the side of vertex i1 and second is on the side of vertex i2.
-		vtx = load_vertex(load_index(3 * prim_id + i0));
-		ProcessedVertex other = load_vertex(load_index(3 * prim_id + (is_first_tri ? i1 : i2)));
-		ProcessedVertex opposite = load_vertex(load_index(3 * prim_id + (is_first_tri ? i2 : i1)));
+		vtx = load_vertex(load_index(3u * prim_id + i0));
+		ProcessedVertex other = load_vertex(load_index(3u * prim_id + (is_first_tri ? i1 : i2)));
+		ProcessedVertex opposite = load_vertex(load_index(3u * prim_id + (is_first_tri ? i2 : i1)));
 
 		mat2 pos_deltas = get_xy_deltas_unscaled(vtx, other, opposite);
 
@@ -459,7 +466,7 @@ void main()
 
 		vsOut.inv_cov = is_near_corner ? 0.0f : 1.0f; // Full coverage at near corner, otherwise none.
 	
-		vsOut.interior = 0;
+		vsOut.interior = 0u;
 
 		#if !VS_IIP
 			// Get the provoking vertex color (last vertex in VK)
@@ -557,6 +564,8 @@ void main()
 #define PS_A_MASKED 0
 #define PS_FBA 0
 #define PS_FBMASK 0
+#define PS_QUANTIZE_COLOR 0
+#define PS_SUBSTITUTE_ALPHA 0
 #define PS_LTF 1
 #define PS_TCOFFSETHACK 0
 #define PS_SHUFFLE 0
@@ -594,6 +603,7 @@ void main()
 #define PS_TEX_IS_FB 0
 #define PS_ROV_COLOR 0
 #define PS_ROV_DEPTH 0
+#define PS_STENCIL_COUNTER 0
 #endif
 
 #define SW_BLEND (PS_BLEND_A || PS_BLEND_B || PS_BLEND_D)
@@ -636,12 +646,13 @@ layout(std140, set = 0, binding = 1) uniform cb1
 	mat4 DitherMatrix;
 	float ScaledScaleFactor;
 	float RcpScaleFactor;
-	float _pad0_cb1;
+	float RtScaleFactor; // the render target's scale; ScaledScaleFactor is the texture's
 	float _pad1_cb1;
 	float LineCovScale;
-	float _pad2_cb1;
-	float _pad3_cb1;
-	float _pad4_cb1;
+	uint SubstituteAlphaKeep;
+	uint SubstituteAlphaValue;
+	uint DitherPhase;
+	vec4 NativeTexelGrid;
 };
 
 layout(location = 0) in VSOutput
@@ -1340,7 +1351,13 @@ vec4 sample_color(vec2 st)
 #if PS_AEM_FMT == FMT_32 && PS_PAL_FMT == 0 && PS_RTA_SRC_CORRECTION
 	t.a = t.a * (128.5f / 255.0f);
 #endif
-	return trunc(t * 255.0f + 0.05f);
+	t = trunc(t * 255.0f + 0.05f);
+#if PS_REPLACEMENT_ALPHA_SNAP
+	// A pack texture's opaque alpha, which ASTC moves off 0x80 (GSReplacementAlphaSnap.h).
+	if (abs(t.a - 128.0f) <= 8.0f)
+		t.a = 128.0f;
+#endif
+	return t;
 }
 
 #endif // NEEDS_TEX
@@ -1422,6 +1439,34 @@ vec4 ps_color()
 	vec2 st_int = vsIn.ti.zw;
 #endif
 
+#if PS_NATIVE_TEXEL_GRID
+	// A sprite that MINIFIES a GS-memory texture under a nearest sampler reads the texel its NATIVE
+	// pixel read, not the one this device pixel's own sample point lands on. The console samples a
+	// sprite once per pixel, so at two source texels per native pixel it never displays the texels
+	// in between, and at 2x those unreachable texels land on every second device column. See
+	// GSNativeTexelGridPolicy.h for the whole rule.
+	//
+	// NativeTexelGrid.xy is the source step per NATIVE pixel in these same coordinates -- zero on
+	// an axis that does not minify, which makes that axis' term vanish -- and .z is the scale. The
+	// convention is the integer pixel index, not the fragment centre: a device pixel samples where
+	// native coordinate pixel/scale samples, and its owner native pixel sampled at the floor of
+	// that. Hence floor the coordinate first, and divide rather than multiply by a reciprocal,
+	// which can land a hair under an integer where the divide is exact.
+	vec2 native_here = floor(gl_FragCoord.xy) / NativeTexelGrid.z;
+	st += NativeTexelGrid.xy * (floor(native_here) - native_here);
+#endif
+
+#if PS_SPRITE_EDGE_CLAMP
+	// No device pixel of a snapped sprite samples past what its last native pixel sampled
+	// (vsIn.t.xy, per sprite). The limit is on the far side, which is above the coordinate
+	// where it grows with the screen axis and below it where it shrinks.
+	{
+		vec2 limit = vsIn.t.xy;
+		st.x = (dFdx(vsIn.ti.x) >= 0.0f) ? min(st.x, limit.x) : max(st.x, limit.x);
+		st.y = (dFdy(vsIn.ti.y) >= 0.0f) ? min(st.y, limit.y) : max(st.y, limit.y);
+	}
+#endif
+
 #if !NEEDS_TEX
 	vec4 T = vec4(0.0f);
 #elif PS_CHANNEL_FETCH == 1
@@ -1466,15 +1511,36 @@ vec4 ps_color()
 	return C;
 }
 
+// The masked-write road turns the colour into integers before merging the destination in, and it
+// does that on all four channels, not only the masked ones. So a draw carrying an FBMSK writes a
+// truncated colour where the same draw without one leaves it fractional and lets the output stage
+// round to nearest. PS_QUANTIZE_COLOR runs the same step for a draw whose mask was dropped as a
+// no-op, so losing the mask does not also change the rounding. One definition, so the two roads
+// cannot drift apart.
+uvec4 quantize_color(vec4 C)
+{
+	return uvec4(C);
+}
+
+// PS_SUBSTITUTE_ALPHA: the alpha framebuffer mask this draw carried held back bits the render
+// target is known to hold at a fixed value on every pixel, so the merge's answer on those bits is
+// that value whatever the shader computed. Writing it directly is the same byte the masked road
+// would have produced, out of one AND and one OR against constants, with no destination read.
 void ps_fbmask(inout vec4 C)
 {
 	#if PS_FBMASK
-		#if PS_COLCLIP_HW == 1
-			vec4 RT = trunc(sample_from_rt() * 65535.0f);
-		#else
-			vec4 RT = trunc(sample_from_rt() * 255.0f + 0.1f);
+		float multi_rgb = PS_COLCLIP_HW != 0 ? 65535.0f : 255.0f;
+		float multi_a = PS_RTA_CORRECTION != 0 ? 128.0f : 255.0f;
+		vec4 RT = sample_from_rt();
+		RT.rgb = trunc(RT.rgb * multi_rgb + 0.1f);
+		RT.a = round(RT.a * multi_a);
+		C = vec4(gpu_bitwise_and(quantize_color(C), ~FbMask) | gpu_bitwise_and(uvec4(RT), FbMask));
+	#elif PS_QUANTIZE_COLOR || PS_SUBSTITUTE_ALPHA
+		uvec4 Cq = quantize_color(C);
+		#if PS_SUBSTITUTE_ALPHA
+			Cq.a = (Cq.a & SubstituteAlphaKeep) | SubstituteAlphaValue;
 		#endif
-		C = vec4(gpu_bitwise_and(uvec4(C), ~FbMask) | gpu_bitwise_and(uvec4(RT), FbMask));
+		C = vec4(Cq);
 	#endif
 }
 
@@ -1486,7 +1552,19 @@ void ps_dither(inout vec3 C, float As)
 		#if PS_DITHER == 2
 			fpos = ivec2(gl_FragCoord.xy);
 		#else
-			fpos = ivec2(gl_FragCoord.xy * RcpScaleFactor);
+			// The dither matrix indexes by NATIVE pixel, so reduce the device pixel to the one
+			// that owns it on both axes -- same fix and same reasoning as the SCANMSK test below:
+			// floor before dividing, because gl_FragCoord is coord + 0.5, and a true divide by S
+			// (the RENDER TARGET's scale: the texture's, in ScaledScaleFactor, is 1 for a texture read
+			// from GS memory) rather than a reciprocal multiply, which can land a hair under an integer
+			// where the divide is exact.
+			// DitherPhase then rotates the matrix under that index. At a fractional S some native
+			// pixels own one more device pixel than their neighbours, so their matrix entry covers
+			// more of the screen than the others; the phase decides which entries those are, and
+			// the CPU picks the quietest. It is zero at every whole S, where no cell is wider.
+			const float dither_scale = RtScaleFactor;
+			fpos = ivec2(floor(gl_FragCoord.xy) / dither_scale)
+			     + ivec2(DitherPhase & 3u, (DitherPhase >> 2) & 3u);
 		#endif
 
 		float value = gpu_matrix_element(DitherMatrix, fpos.y & 3, fpos.x & 3);
@@ -1515,7 +1593,7 @@ void ps_color_clamp_wrap(inout vec3 C)
 {
 	// When dithering the bottom 3 bits become meaningless and cause lines in the picture
 	// so we need to limit the color depth on dithered items
-#if SW_BLEND || (PS_DITHER > 0 && PS_DITHER < 3) || PS_FBMASK
+#if SW_BLEND || (PS_DITHER > 0 && PS_DITHER < 3) || PS_FBMASK || PS_QUANTIZE_COLOR || PS_SUBSTITUTE_ALPHA
 
 #if PS_DST_FMT == FMT_16 && PS_BLEND_MIX == 0 && PS_ROUND_INV
 	C += 7.0f; // Need to round up, not down since the shader will invert
@@ -1564,20 +1642,26 @@ void ps_blend(inout vec4 Color, inout vec4 As_rgba)
 			As_rgba.rgb = vec3(1.0f);
 		#endif
 
-		#if PS_FEEDBACK_LOOP_IS_NEEDED_RT
+		#if SW_BLEND_NEEDS_RT
 			vec4 RT = sample_from_rt();
+			#if PS_COLCLIP_HW
+				float color_multi = 65535.0f;
+			#else
+				float color_multi = 255.0f;
+			#endif
+			#if PS_RTA_CORRECTION
+				float alpha_multi = 128.0f;
+			#else
+				float alpha_multi = 255.0f;
+			#endif
+			RT.rgb = trunc(RT.rgb * color_multi + 0.1f);
+			RT.a = trunc(RT.a * alpha_multi + 0.1f);
 		#else
 			// Not used, but we define it to make the selection below simpler.
 			vec4 RT = vec4(0.0f);
 		#endif
 
-		#if PS_RTA_CORRECTION
-			float Ad = trunc(RT.a * 128.0f + 0.1f) / 128.0f;
-		#else
-			float Ad = trunc(RT.a * 255.0f + 0.1f) / 128.0f;
-		#endif
-
-		#if PS_SHUFFLE && PS_FEEDBACK_LOOP_IS_NEEDED_RT
+		#if PS_SHUFFLE && SW_BLEND_NEEDS_RT
 			uvec4 denorm_rt = uvec4(RT);
 			#if (PS_PROCESS_BA & SHUFFLE_WRITE)
 				RT.r = float((denorm_rt.b << 3) & 0xF8u);
@@ -1592,13 +1676,9 @@ void ps_blend(inout vec4 Color, inout vec4 As_rgba)
 			#endif
 		#endif
 
-			// Let the compiler do its jobs !
-			#if PS_COLCLIP_HW == 1
-			vec3 Cd = trunc(RT.rgb * 65535.0f);
-			#else
-			vec3 Cd = trunc(RT.rgb * 255.0f + 0.1f);
-			#endif
-			vec3 Cs = Color.rgb;
+		float Ad = RT.a / 128.0f;
+		vec3 Cd = RT.rgb;
+		vec3 Cs = Color.rgb;
 
 		#if PS_BLEND_A == 0
 			vec3 A = Cs;
@@ -1780,8 +1860,15 @@ void main()
 #endif
 
 #if PS_SCANMSK & 2
-	// fail depth test on prohibited lines
-	if ((int(gl_FragCoord.y) & 1) == (PS_SCANMSK & 1))
+	// fail depth test on prohibited lines. SCANMSK masks NATIVE scanlines, so reduce the device row
+	// to the line that owns it -- floor(row / S) -- before the parity test. Two traps, both silent:
+	// gl_FragCoord.y is row + 0.5, and at a fractional scale that half puts some rows in the line
+	// above their owner; and a multiply by RcpScaleFactor can land a hair under an integer where
+	// row / S is exactly integral. S is RtScaleFactor, the render target's
+	// scale: ScaledScaleFactor is the texture's, which is 1 for a texture read from GS memory.
+	// (The dither path above uses the same floor-then-divide fix.)
+	const float scanmsk_scale = RtScaleFactor;
+	if ((int(floor(gl_FragCoord.y) / scanmsk_scale) & 1) == (PS_SCANMSK & 1))
 		DISCARD;
 #endif
 #if PS_DATE >= 5
@@ -1853,7 +1940,13 @@ void main()
 	}
 #endif
 
-#if SW_AD_TO_HW
+#if PS_AF_IN_SRC1
+	// This driver ignores the blend constant, so the fixed blend factor rides the second output
+	// instead. Af is AFIX/128, the same number vkCmdSetBlendConstants would have carried, and the
+	// blend unit multiplies by it the same way either road. Only set when nothing else claims the
+	// second output -- see GSBlendConstantPolicy.h.
+	vec4 alpha_blend = vec4(Af);
+#elif SW_AD_TO_HW
 	#if PS_RTA_CORRECTION
 		vec4 RT = trunc(sample_from_rt() * 128.0f + 0.1f);
 	#else
@@ -1962,6 +2055,16 @@ void main()
 			o_col1 = alpha_blend;
 		#endif
 
+		#if PS_STENCIL_COUNTER && !PS_NO_COLOR1
+			// Alpha stencil counter (GSFastStencilShadow.h): new A = (Ad * Av) >> 7 with a flat Av of
+			// 127 or 130. The blend unit computes Ad * o_col0.a + Ad * o_col1.a (source DST_ALPHA,
+			// destination SRC1_ALPHA). The factors are whole 8-bit values because a fixed-point blend
+			// unit keeps 8 bits: up is Ad * (1 + 3/255), down is Ad * 252/255, and 128 or 129 leave Ad
+			// alone. RGB is kept by its blend factors.
+			o_col0 = vec4(0.0f, 0.0f, 0.0f, (vsIn.c.a > 129.5f) ? (3.0f / 255.0f) : 0.0f);
+			o_col1 = vec4((vsIn.c.a < 127.5f) ? (252.0f / 255.0f) : 1.0f);
+		#endif
+
 		// Alpha test with feedback
 		#if PS_AFAIL == AFAIL_FB_ONLY
 			if (!atst_pass)
@@ -1991,8 +2094,6 @@ void main()
 	
 	// Writing back color (result already written to o_col0 for non-ROV)
 	#if PS_RETURN_COLOR_ROV
-		o_col0 = mix(o_col0, sample_from_rt(), equal(FbMask, uvec4(0xFFu))); // channel masking
-
 		if (!rov_discard_color)
 			imageStore(RtImageRov, ivec2(gl_FragCoord.xy), o_col0);
 	#endif

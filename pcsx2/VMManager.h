@@ -17,6 +17,11 @@
 
 enum class CDVD_SourceType : uint8_t;
 
+namespace Threading
+{
+	class ThreadHandle;
+}
+
 enum class VMState
 {
 	Shutdown,
@@ -32,6 +37,7 @@ struct VMBootParameters
 	std::string filename;
 	std::string elf_override;
 	std::string save_state;
+	std::string game_config;
 	std::optional<s32> state_index;
 	std::optional<CDVD_SourceType> source_type;
 
@@ -40,6 +46,13 @@ struct VMBootParameters
 	std::optional<bool> start_turbo;
 	std::optional<bool> start_unlimited;
 	bool disable_achievements_hardcore_mode = false;
+
+	/// An arcade game (.acgame, Namco System 246/256) on a host whose game folders are not plain paths
+	/// (Android's documents): where the host found the boot ELF, the media image and the SRAM file the
+	/// .acgame names. An empty one is looked for next to the .acgame.
+	std::string arcade_elf;
+	std::string arcade_media;
+	std::string arcade_sram;
 };
 
 enum class VMBootResult
@@ -158,6 +171,12 @@ namespace VMManager
 	/// Reloads game specific settings, and applys any changes present.
 	bool ReloadGameSettings();
 
+	/// Re-reads this game's settings file into the game settings layer and applies nothing,
+	/// for a frontend that has just rewritten the file and is about to apply settings itself.
+	/// The layer is otherwise only read at boot, so until then it keeps answering with what
+	/// the file said then, both for values and for which settings the database may overwrite.
+	bool ReloadGameSettingsLayer();
+
 	/// Reloads game patches.
 	void ReloadPatches(bool reload_files, bool reload_enabled_list, bool verbose, bool verbose_if_changed);
 
@@ -257,6 +276,9 @@ namespace VMManager
 	/// Returns true if the specified path is an ELF.
 	bool IsElfFileName(const std::string_view path);
 
+	/// Returns true if the specified path is an arcade game (.acgame, Namco System 246/256).
+	bool IsArcadeGameFileName(const std::string_view path);
+
 	/// Returns true if the specified path is a blockdump.
 	bool IsBlockDumpFileName(const std::string_view path);
 
@@ -339,11 +361,6 @@ namespace VMManager
 		/// can pin onto the same cluster. Returns 0 when pinning is off / unresolved.
 		u64 GetPerformanceClusterAffinityMask();
 
-		/// Android: affinity mask of the performance ("big") CPU cluster hosting the
-		/// EE/VU/GS threads, so adjacent helper threads (e.g. the Oboe audio callback)
-		/// can pin onto the same cluster. Returns 0 when pinning is off / unresolved.
-		u64 GetPerformanceClusterAffinityMask();
-
 		/// Resets any state for hotkey-related VMs, called on VM startup.
 		void ResetVMHotkeyState();
 
@@ -355,6 +372,9 @@ namespace VMManager
 
 		/// Returns true if fast booting is active (requested but ELF not started).
 		bool IsFastBootInProgress();
+
+		// Returns the current disc/BIOS region, if set.
+		std::string GetCurrentRegion();
 
 		/// Disables fast boot if it was requested, and found to be incompatible.
 		void DisableFastBoot();
@@ -369,10 +389,23 @@ namespace VMManager
 		void FrameRateChanged();
 
 		/// Throttles execution, or limits the frame rate.
-		void Throttle();
+		void Throttle(bool vsync_start);
 
 		/// Resets/clears all execution/code caches.
 		void ClearCPUExecutionCaches();
+
+		/// Called by the GS back thread (GS multi-threading) on itself when it starts, and with
+		/// nullptr just before it exits. Applies the placement SetEmuThreadAffinities chose for it,
+		/// and lets later placement changes reach it. Returns the mask applied; 0 = any processor.
+		u64 RegisterGSBackThread(const Threading::ThreadHandle* handle);
+
+		/// Overrides the GS back thread's placement until affinities are next applied; 0 = any
+		/// processor. For measurement tools.
+		void SetGSBackThreadAffinity(u64 mask);
+
+		/// Re-derives the GS back thread's placement from where the MTGS thread is allowed to run
+		/// now, for tools that move the MTGS thread themselves. Returns the mask applied.
+		u64 PlaceGSBackThreadNearGSThread();
 
 		/// Returns a list of processors in the system, suitable for pinning for the software renderer.
 		const std::vector<u32>& GetSoftwareRendererProcessorList();

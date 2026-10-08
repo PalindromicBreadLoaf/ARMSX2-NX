@@ -2,7 +2,26 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT_APK="${1:-$HOME/Downloads/ARMSX2-Refresh-UniversalPage-Test.apk}"
+OUTPUT_APK=""
+APPLICATION_ID="${ARMSX2_APPLICATION_ID:-}"
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--application-id)
+		APPLICATION_ID="$2"
+		shift 2
+		;;
+	*)
+		if [[ -z "$OUTPUT_APK" ]]; then
+			OUTPUT_APK="$1"
+		else
+			echo "error: unexpected argument '$1'" >&2
+			exit 1
+		fi
+		shift
+		;;
+	esac
+done
+OUTPUT_APK="${OUTPUT_APK:-$HOME/Downloads/ARMSX2-Refresh-UniversalPage-Test.apk}"
 WORK_DIR="$ROOT_DIR/app/build/universal-page-apk"
 BASE_APK="$WORK_DIR/base-4k.apk"
 APK_16K="$WORK_DIR/base-16k.apk"
@@ -48,10 +67,19 @@ build_core() {
 	# AAB uses bundlePlayRelease instead (the play flavor stays SAF-only).
 	local built_apk="$ROOT_DIR/app/build/outputs/apk/github/debug/app-github-debug.apk"
 
+	# Optional test-package override: building as com.armsx2.fbfetch (or any other
+	# application id) lets the test APK coexist with a stable installation instead
+	# of replacing it. Default (unset) keeps the manifest's own application id.
+	local id_args=()
+	if [[ -n "$APPLICATION_ID" ]]; then
+		id_args+=("-Parmsx2.applicationId=$APPLICATION_ID")
+	fi
+
 	"$ROOT_DIR/gradlew" -p "$ROOT_DIR" :app:cleanCxx
 	"$ROOT_DIR/gradlew" -p "$ROOT_DIR" :app:assembleGithubDebug \
 		-Parmsx2.hostPageSize="$page_size" \
-		-Parmsx2.nativeLibName="$lib_name"
+		-Parmsx2.nativeLibName="$lib_name" \
+		"${id_args[@]}"
 
 	if [[ ! -f "$built_apk" ]]; then
 		echo "error: Gradle did not produce $built_apk" >&2
@@ -82,7 +110,8 @@ cp -f "$BASE_APK" "$UNSIGNED_APK"
 zip -qd "$UNSIGNED_APK" "META-INF/*" >/dev/null 2>&1 || true
 zip -qd "$UNSIGNED_APK" "lib/arm64-v8a/libemucore_4k.so" "lib/arm64-v8a/libemucore_16k.so" >/dev/null 2>&1 || true
 
-(cd "$LIB_STAGE" && zip -qr -0 "$UNSIGNED_APK" lib)
+# Compressed, not stored: Android extracts every library at install anyway (see build-release-apk.sh).
+(cd "$LIB_STAGE" && zip -qr -9 "$UNSIGNED_APK" lib)
 
 "$ZIPALIGN" -f -P 16 4 "$UNSIGNED_APK" "$ALIGNED_APK"
 "$APKSIGNER" sign \

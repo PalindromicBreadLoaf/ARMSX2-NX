@@ -4,10 +4,11 @@
 #include "ImGui/FullscreenUI.h"
 #include "ImGui/ImGuiManager.h"
 #include "GS/Renderers/Common/GSRenderer.h"
+#include "GS/Renderers/Common/GSFieldShiftPolicy.h"
 #include "GS/Renderers/Common/GSInterlaceModePolicy.h"
 #include "GS/Renderers/Common/GSPresentationPolicy.h"
 #include "GS/Renderers/Common/GSSnapshotPolicy.h"
-#include "GS/GSCapture.h"
+#include "GS/DriverReport/GSDriverReport.h"
 #include "GS/GSDump.h"
 #include "GS/GSGL.h"
 #include "GS/GSPerfMon.h"
@@ -95,12 +96,17 @@ void GSRenderer::Reset(bool hardware_reset)
 	if (hardware_reset)
 		g_gs_device->ClearCurrent();
 
+	// Whatever the field-shift detector had in flight belonged to the old device state.
+	m_field_shift.Reset();
+
 	GSState::Reset(hardware_reset);
 }
 
 void GSRenderer::Destroy()
 {
-	GSCapture::EndCapture();
+	// The probe target and its readback buffer belong to the device, which is torn down right
+	// after this. Hand them back while it still exists.
+	m_field_shift.Reset();
 }
 
 void GSRenderer::UpdateRenderFixes()
@@ -115,12 +121,6 @@ bool GSRenderer::Merge(int field)
 	float tex_scale[3] = { 0.0f, 0.0f, 0.0f };
 	int y_offset[3] = { 0, 0, 0 };
 	const bool feedback_merge = m_regs->EXTWRITE.WRITE == 1;
-
-	if (!PCRTCDisplays.PCRTCDisplays[0].enabled && !PCRTCDisplays.PCRTCDisplays[1].enabled)
-	{
-		m_real_size = GSVector2i(0, 0);
-		return false;
-	}
 
 	// Need to do this here, if the user has Anti-Blur enabled, these offsets can get wiped out/changed.
 	const bool game_deinterlacing = (PCRTCDisplays.PCRTCDisplays[0].prevFramebufferOffsets.y != PCRTCDisplays.PCRTCDisplays[0].framebufferOffsets.y) !=
@@ -165,8 +165,6 @@ bool GSRenderer::Merge(int field)
 
 	if (!tex[0] && !tex[1])
 	{
-		m_real_size = GSVector2i(0, 0);
-
 		// Clear out the MAD buffer as some remnants of the previously shown frame came be left over, causing a flash for one frame.
 		if (GSConfig.InterlaceMode == GSInterlaceMode::Automatic || GSConfig.InterlaceMode >= GSInterlaceMode::AdaptiveTFF)
 		{
@@ -178,7 +176,13 @@ bool GSRenderer::Merge(int field)
 				mad_tex = nullptr;
 			}
 		}
-		return false;
+
+		// Both circuits off still outputs BGCOLOR on real hardware.
+		if (PCRTCDisplays.PCRTCDisplays[0].enabled || PCRTCDisplays.PCRTCDisplays[1].enabled)
+		{
+			m_real_size = GSVector2i(0, 0);
+			return false;
+		}
 	}
 
 	s_n++;
@@ -193,11 +197,35 @@ bool GSRenderer::Merge(int field)
 		return true;
 	}
 
-	GSVector4 src_gs_read[2];
-	GSVector4 dst[3];
+	GSVector4 src_gs_read[2] = {};
+	GSVector4 dst[3] = {};
+	// Filled in only for a circuit whose shifted read would fall above its own rect in the texture,
+	// where the sampler's clamp cannot supply the rect's first row (see below).
+	GSDevice::MergeTopBand top_band[2] = {};
+	// Device rows at the top of the merge target each circuit's picture was pushed past. The target
+	// is cleared, so for the field that moved down, nothing drew those rows.
+	GSFieldPadRows top_pad[2] = {};
 
 	// Use offset for bob deinterlacing always, extra offset added later for FFMD mode.
 	const bool scanmask_frame = m_scanmask_used && abs(PCRTCDisplays.PCRTCDisplays[0].displayRect.y - PCRTCDisplays.PCRTCDisplays[1].displayRect.y) != 1;
+
+	// At an integer upscale of 2 or more a field render has that many device rows per field line,
+	// and the s'th of them is the scene at display line 2j+f+s -- so the render already holds EVERY
+	// display line of the screen at that field's moment. A weave can only replace half of them with
+	// lines from a different moment. Present it as it stands instead, and let the FFMD offset be
+	// the only correction (see below). Requires every enabled circuit to actually be at that scale:
+	// a target that was downscaled back to native holds half the lines and still needs the weave.
+	const float upscale = GetUpscaleMultiplier();
+	const int upscale_rows = static_cast<int>(upscale);
+	bool field_render_is_whole_picture =
+		(upscale_rows >= 2) && (static_cast<float>(upscale_rows) == upscale) && !feedback_merge;
+	for (int i = 0; i < 2 && field_render_is_whole_picture; i++)
+	{
+		if (PCRTCDisplays.PCRTCDisplays[i].enabled && tex[i] && tex_scale[i] != upscale)
+			field_render_is_whole_picture = false;
+	}
+	field_render_is_whole_picture &= isReallyInterlaced() && !m_scanmask_used;
+
 	// FFMD (half frames) requires blend deinterlacing, so automatically use that. Same when SCANMSK is used but not blended in the merge circuit (Alpine Racer 3).
 	// Centralised in GSInterlaceModePolicy.h so the progressive pass-through case (shader_mode -1)
 	// is pinned by static_assert and unit tests rather than resting on the sign behaviour of a
@@ -207,10 +235,23 @@ bool GSRenderer::Merge(int field)
 		GSConfig.InterlaceMode == GSInterlaceMode::Automatic,
 		game_deinterlacing,
 		m_regs->SMODE2.FFMD,
-		scanmask_frame);
+		scanmask_frame,
+		field_render_is_whole_picture);
 	const int field2 = interlace_selection.field_offset;
+	const bool present_field_direct = interlace_selection.present_field_direct;
 	int mode = interlace_selection.shader_mode;
 	bool is_bob = GSConfig.InterlaceMode == GSInterlaceMode::BobTFF || GSConfig.InterlaceMode == GSInterlaceMode::BobBFF;
+
+	// Half the field-mode titles move their projection half a display line between fields, so their
+	// consecutive field renders are one native line apart and need the offset to line up; the rest
+	// draw the identical picture on both fields, and giving them the offset is what makes a still
+	// picture jitter a line every frame. The detector watches the frames and says, defaulting to
+	// shift until it has an answer.
+	bool apply_field_shift = false;
+	if (present_field_direct && !GSConfig.DisableInterlaceOffset)
+	{
+		apply_field_shift = m_field_shift.WantsShift();
+	}
 
 	// FastMAD (mode 3) stores four fields in a two-bank history target. Older Mali-G57 Vulkan drivers
 	// can expose stale/alternating banks during reconstruction; Bob isn't a safe fallback (its
@@ -232,12 +273,20 @@ bool GSRenderer::Merge(int field)
 
 		// dst is the final destination rect with offset on the screen.
 		dst[i] = scale * GSVector4(curCircuit.displayRect);
+		const float unshifted_top = dst[i].y;
 
 		// src_gs_read is the size which we're really reading from GS memory.
 		src_gs_read[i] = ((GSVector4(curCircuit.framebufferRect) + GSVector4(0, y_offset[i], 0, y_offset[i])) * scale) / GSVector4(tex[i]->GetSize()).xyxy();
 
 		float interlace_offset = 0.0f;
-		if (isReallyInterlaced() && m_regs->SMODE2.FFMD && !is_bob && !stable_mad_fallback && !GSConfig.DisableInterlaceOffset && GSConfig.InterlaceMode != GSInterlaceMode::Off)
+		if (present_field_direct)
+		{
+			// The offset is no longer a nudge before a deinterlace pass; it is the entire
+			// correction, so it is applied only to the games that move between fields.
+			if (apply_field_shift)
+				interlace_offset = (scale.y) * static_cast<float>(field ^ field2);
+		}
+		else if (isReallyInterlaced() && m_regs->SMODE2.FFMD && !is_bob && !stable_mad_fallback && !GSConfig.DisableInterlaceOffset && GSConfig.InterlaceMode != GSInterlaceMode::Off)
 		{
 			interlace_offset = (scale.y) * static_cast<float>(field ^ field2);
 		}
@@ -255,7 +304,59 @@ bool GSRenderer::Merge(int field)
 			}
 		}
 
-		dst[i] += GSVector4(0.0f, interlace_offset, 0.0f, interlace_offset);
+		if (present_field_direct)
+		{
+			// Move what is READ rather than where it is drawn. Screen row r gets the source content
+			// of row r - offset either way, so every drawn pixel is identical; the difference is at
+			// the top edge, where shifting the destination leaves rows the cleared merge target
+			// never drew (AC5's black row 1) and shifting the source asks the sampler for rows
+			// above the rect and gets the clamp -- the first drawn row, repeated, which is the fill
+			// the interlace shaders do by hand. Every backend's merge sampler clamps on both axes.
+			// The bottom is the same under both: the shifted field's last rows of source content
+			// fall off the screen, and no band appears.
+			const float dst_span = dst[i].w - dst[i].y;
+			if (interlace_offset != 0.0f && dst_span > 0.0f)
+			{
+				const float src_per_dst_row = (src_gs_read[i].w - src_gs_read[i].y) / dst_span;
+				const float src_shift = interlace_offset * src_per_dst_row;
+
+				// The clamp is at the TEXTURE's edge, which is the rect's own first row only when
+				// the rect starts at the texture top. When DISPFB.DBY (or a whole-page offset into
+				// the target) puts it lower, the clamp would hand back rows this circuit does not
+				// own, so the merge draws the band itself. Every field-mode title in the corpus
+				// that shifts has DBY = 0, so this costs them nothing and cannot move their pixels.
+				const GSFieldShiftTopBand band = GSComputeFieldShiftTopBand(
+					curCircuit.framebufferRect.y + y_offset[i], src_gs_read[i].y, dst[i].y,
+					interlace_offset, tex[i]->GetHeight());
+				if (band.enabled)
+				{
+					top_band[i].src = GSVector4(src_gs_read[i].x, band.src_v, src_gs_read[i].z, band.src_v);
+					top_band[i].dst = GSVector4(dst[i].x, band.dst_top, dst[i].z, band.dst_bottom);
+					top_band[i].enabled = true;
+				}
+
+				src_gs_read[i] -= GSVector4(0.0f, src_shift, 0.0f, src_shift);
+
+				// The band owns its rows, so the main draw starts below it.
+				const GSFieldShiftMainTop main_top =
+					GSFieldShiftMainDrawBelowBand(band, dst[i].y, src_gs_read[i].y, src_shift);
+				dst[i].y = main_top.dst_top;
+				src_gs_read[i].y = main_top.src_top_v;
+			}
+
+			// The shift here moves what is read, so no destination row is left undrawn above the
+			// picture and there is nothing for the deinterlacer to pad.
+			top_pad[i] = {};
+		}
+		else
+		{
+			dst[i] += GSVector4(0.0f, interlace_offset, 0.0f, interlace_offset);
+
+			// Whole rows, from where this circuit's rect starts: at a fractional scale the offset is
+			// not a whole number of rows, and a rect lower on the screen leaves its hole lower too.
+			// 2 rows at 2x, 1 at 1.5x.
+			top_pad[i] = GSComputeFieldPadRows(unshifted_top, dst[i].y);
+		}
 	}
 
 	if (feedback_merge && tex[2])
@@ -277,7 +378,7 @@ bool GSRenderer::Merge(int field)
 
 	m_real_size = GSVector2i(fs.x, fs.y);
 
-	if ((tex[0] == tex[1]) && (src_gs_read[0] == src_gs_read[1]).alltrue() && (dst[0] == dst[1]).alltrue() &&
+	if ((tex[0] || tex[1]) && (tex[0] == tex[1]) && (src_gs_read[0] == src_gs_read[1]).alltrue() && (dst[0] == dst[1]).alltrue() &&
 		(PCRTCDisplays.PCRTCDisplays[0].displayRect == PCRTCDisplays.PCRTCDisplays[1].displayRect).alltrue() &&
 		(PCRTCDisplays.PCRTCDisplays[0].framebufferRect == PCRTCDisplays.PCRTCDisplays[1].framebufferRect).alltrue() &&
 		!feedback_merge && !m_regs->PMODE.SLBG)
@@ -287,13 +388,27 @@ bool GSRenderer::Merge(int field)
 	}
 
 	const u32 c = (m_regs->BGCOLOR.U32[0] & 0x00FFFFFFu) | (m_regs->PMODE.ALP << 24);
-	g_gs_device->Merge(tex, src_gs_read, dst, fs, m_regs->PMODE, m_regs->EXTBUF, c);
+	g_gs_device->Merge(tex, src_gs_read, dst, top_band, fs, m_regs->PMODE, m_regs->EXTBUF, c);
 
-	if (isReallyInterlaced() && GSConfig.InterlaceMode != GSInterlaceMode::Off)
+	// Show the detector this field, offset and all. It is told which offset was applied so it can
+	// take it back out and measure what the GAME did between fields. Costs nothing once decided.
+	if (present_field_direct && (tex[0] || tex[1]) && !GSConfig.DisableInterlaceOffset)
+	{
+		m_field_shift.Update(g_gs_device->GetCurrent(), fs, upscale_rows,
+			apply_field_shift ? (upscale_rows * (field ^ field2)) : 0, field ^ field2);
+	}
+
+	if ((tex[0] || tex[1]) && isReallyInterlaced() && GSConfig.InterlaceMode != GSInterlaceMode::Off)
 	{
 		const float offset = is_bob ? (tex[1] ? tex_scale[1] : tex_scale[0]) : 0.0f;
 
-		g_gs_device->Interlace(fs, field ^ field2, mode, offset);
+		// Device rows at the top of the merge that nothing drew for this field. In FFMD mode the
+		// loop above pushed one field's picture down by a native line, and the merge target is
+		// cleared, so the weave and MAD passes would otherwise read a hole there. Read from the same
+		// circuit the bob offset is taken from.
+		const GSFieldPadRows field_pad = top_pad[tex[1] ? 1 : 0];
+
+		g_gs_device->Interlace(fs, field ^ field2, mode, offset, field_pad);
 	}
 
 	// Adaptive deinterlacing consumes prior fields. A skipped interlaced frame must update that
@@ -788,15 +903,17 @@ void GSRenderer::EndPresentFrame()
 
 void GSRenderer::SubmitVsync(u32 field, bool registers_written)
 {
-	DrainBackQueue();
-	GSBackQueue::VsyncRecord rec;
-	rec.field = field;
-	rec.registers_written = registers_written;
-	rec.idle_frame = IsIdleFrame();
-
 	// VSYNC is never queued: present runs on the MTGS thread behind a drain, so
 	// the back thread stays off the GSDevice on present paths entirely (which
 	// is also what keeps SW + GL-present devices legal in queued modes).
+	DrainBackQueue();
+
+	GSBackQueue::VsyncRecord rec;
+	rec.field = field;
+	rec.registers_written = registers_written;
+	// Compares this object's draw and transfer serials with the last frame's. The back thread
+	// advances them as it executes records, so this has to follow the drain.
+	rec.idle_frame = IsIdleFrame();
 	ExecVsyncRecord(rec);
 }
 
@@ -831,7 +948,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	const bool fb_sprite_frame = (fb_sprite_blits > 0);
 
 	bool skip_frame = false;
-	if (GSConfig.SkipDuplicateFrames && !GSCapture::IsCapturingVideo())
+	if (GSConfig.SkipDuplicateFrames)
 	{
 		bool is_unique_frame;
 		switch (PerformanceMetrics::GetInternalFPSMethod())
@@ -927,7 +1044,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		fps_cap_present_skip && GSGetPresentCapRenderSkip() &&
 		GSIsHardwareRenderer() &&
 		m_regs->EXTWRITE.WRITE == 0 &&
-		m_snapshot.empty() && !m_dump && m_dump_frames == 0 && !GSCapture::IsCapturingVideo() &&
+		m_snapshot.empty() && !m_dump && m_dump_frames == 0 &&
 		!GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()) && g_gs_device->GetCurrent() != nullptr;
 
 	bool merged_frame;
@@ -1077,6 +1194,30 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 			// present render pass is already open by the time DoBeginPresent runs.
 			// It is CAS's `if`, not a second branch beside it: FSR's second pass *is* RCAS, a
 			// contrast-adaptive sharpener, so letting CAS run afterward sharpens twice.
+			// SGSR sits in the same place and under the same rule as FSR1 below: a single
+			// compute pass before the present render pass opens, and inside CAS's `if` rather
+			// than beside it, because SGSR sharpens as part of upscaling and letting CAS run
+			// afterwards would sharpen twice.
+			if (GSConfig.Upscaler == GSUpscaler::SGSR || GSConfig.Upscaler == GSUpscaler::SGSREdge)
+			{
+				static bool sgsr_log_once = false;
+				if (g_gs_device->Features().sgsr)
+				{
+					const int draw_w = static_cast<int>(std::ceil(draw_rect.z - draw_rect.x));
+					const int draw_h = static_cast<int>(std::ceil(draw_rect.w - draw_rect.y));
+					if (current->GetWidth() < draw_w && current->GetHeight() < draw_h)
+						g_gs_device->SGSRUpscale(current, src_rect, src_uv, draw_rect,
+							GSConfig.Upscaler == GSUpscaler::SGSREdge);
+				}
+				else if (!sgsr_log_once)
+				{
+					Host::AddIconOSDMessage("SGSRUnsupported", ICON_FA_TRIANGLE_EXCLAMATION,
+						TRANSLATE_SV("GS", "SGSR upscaling is not available, your graphics driver does not support the required functionality."),
+						10.0f);
+					sgsr_log_once = true;
+				}
+			}
+
 			if (GSConfig.Upscaler == GSUpscaler::FSR1)
 			{
 				static bool fsr1_log_once = false;
@@ -1129,6 +1270,14 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				// path either has no output to draw or redraws the previous one. Frame generation
 				// reads it so it does not interpolate motion into frames the game never drew.
 				g_gs_device->NotePresentHasNewFrame();
+				// And how: the blit frame generation repeats for its generated frames when it runs on
+				// the game's own image, which needs the present to be only that blit. The upscalers and
+				// CAS above draw it themselves, a TV shader filters it, rotation turns it.
+				g_gs_device->NotePresentGeometry(src_rect, draw_rect, GSConfig.LinearPresent != GSPostBilinearMode::Off,
+					GSConfig.Upscaler == GSUpscaler::Off && GSConfig.CASMode == GSCASMode::Disabled &&
+						s_tv_shader_indices[GSConfig.TVShader] == PresentShader::COPY &&
+						GSConfig.LinearPresent != GSPostBilinearMode::BilinearSharp &&
+						GSConfig.Rotation == DisplayRotation::Rot0 && !g_gs_device->UsesLowerLeftOrigin());
 			}
 
 			EndPresentFrame();
@@ -1172,8 +1321,16 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		{
 			m_dump_frames = m_snapshot_dump_frames;
 
-			if (GSConfig.UserHacks_ReadTCOnClose)
-				ReadbackTextureCache();
+			// Always, not under UserHacks_ReadTCOnClose: a dump's local memory has to be what
+			// the game had, and the hardware renderer keeps drawn targets on the GPU -- only EE
+			// uploads, explicit readbacks and constant clears ever reach GS memory. Freeze the
+			// state without reading the targets back and every address the hardware drew to is
+			// stale residue in the dump, which the software renderer, a console replay (which
+			// uploads the dump's memory before it replays) and any memory-honouring hardware
+			// path all render faithfully. Sly 3 dumps captured that way held one constant word
+			// across a whole 512x224 buffer, and it looked like a scene to everything that read it.
+			// On the software renderer this is a no-op, so the call is unconditional here.
+			ReadbackTextureCache();
 
 			// The dump replays from this state forward, so it has to be the state a
 			// savestate would record here: parse registers from the front object under
@@ -1214,6 +1371,9 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 			}
 
 			delete[] fd.data;
+
+			// Which driver drew this, beside the dump. Never fails the dump.
+			GSDriverReport::WriteSidecarForDump(m_snapshot);
 
 			Host::AddKeyedOSDMessage("GSDump",
 				fmt::format(TRANSLATE_FS("GS", "Saving {0} GS dump {1} to '{2}'"),
@@ -1258,41 +1418,6 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		else if (!snapshot_action.dump_is_last)
 		{
 			m_dump_frames--;
-		}
-	}
-
-	// capture
-	if (GSCapture::IsCapturingVideo())
-	{
-		const GSVector2i size = GSCapture::GetSize();
-		if (GSTexture* current = g_gs_device->GetCurrent())
-		{
-			// TODO: Maybe avoid this copy in the future? We can use swscale to fix it up on the dumping thread..
-			if (current->GetSize() != size)
-			{
-				GSTexture* temp = g_gs_device->CreateRenderTarget(size.x, size.y, GSTexture::Format::Color, false);
-				if (temp)
-				{
-					g_gs_device->StretchRect(current, temp, GSVector4(0, 0, size.x, size.y), ShaderConvert::COPY, Biln);
-					GSCapture::DeliverVideoFrame(temp);
-					g_gs_device->Recycle(temp);
-				}
-			}
-			else
-			{
-				GSCapture::DeliverVideoFrame(current);
-			}
-		}
-		else
-		{
-			// Bit janky, but unless we want to make variable frame rate files, we need to deliver *a* frame to
-			// the video file, so just grab a blank RT.
-			GSTexture* temp = g_gs_device->CreateRenderTarget(size.x, size.y, GSTexture::Format::Color, true);
-			if (temp)
-			{
-				GSCapture::DeliverVideoFrame(temp);
-				g_gs_device->Recycle(temp);
-			}
 		}
 	}
 
@@ -1383,27 +1508,6 @@ std::string GSGetBaseSnapshotFilename()
 	return Path::Combine(EmuFolders::Snapshots, GSGetBaseFilename());
 }
 
-std::string GSGetBaseVideoFilename()
-{
-	// If organize by game is enabled, use or create a game-specific folder.
-	if (GSConfig.OrganizeVideoCaptureByGame)
-	{
-		const bool prefer_english = Host::GetBaseBoolSettingValue("UI", "PreferEnglishGameList", false);
-		std::string game_name = VMManager::GetTitle(prefer_english);
-		if (!game_name.empty())
-		{
-			Path::SanitizeFileName(&game_name);
-			const std::string game_dir = Path::Combine(EmuFolders::Videos, game_name);
-
-			// Make sure the per-game directory exists or that we can successfully create it.
-			if (FileSystem::DirectoryExists(game_dir.c_str()) || FileSystem::CreateDirectoryPath(game_dir.c_str(), false))
-				return Path::Combine(game_dir, GSGetBaseFilename());
-		}
-	}
-	// prepend video directory
-	return Path::Combine(EmuFolders::Videos, GSGetBaseFilename());
-}
-
 void GSRenderer::StopGSDump()
 {
 	m_snapshot = {};
@@ -1454,6 +1558,31 @@ void GSTranslateWindowToDisplayCoordinates(float window_x, float window_y, float
 	*display_y = rel_y / draw_height;
 }
 
+// The other way: where on the window a normalized display position is (an arcade light gun's stick aim,
+// for its crosshair).
+void GSTranslateDisplayToWindowCoordinates(float display_x, float display_y, float* window_x, float* window_y)
+{
+	*window_x = s_last_draw_rect.x + display_x * (s_last_draw_rect.z - s_last_draw_rect.x);
+	*window_y = s_last_draw_rect.y + display_y * (s_last_draw_rect.w - s_last_draw_rect.y);
+}
+
+// The same mapping without collapsing a position off the picture to (-1,-1): the caller gets graded
+// coordinates beyond [0,1] (an arcade lightgun's aim beside the screen, PCSX2x6).
+void GSTranslateWindowToDisplayCoordinatesUnclamped(float window_x, float window_y, float* display_x, float* display_y)
+{
+	const float draw_width = s_last_draw_rect.z - s_last_draw_rect.x;
+	const float draw_height = s_last_draw_rect.w - s_last_draw_rect.y;
+	if (draw_width <= 0.0f || draw_height <= 0.0f)
+	{
+		*display_x = -1.0f;
+		*display_y = -1.0f;
+		return;
+	}
+
+	*display_x = (window_x - s_last_draw_rect.x) / draw_width;
+	*display_y = (window_y - s_last_draw_rect.y) / draw_height;
+}
+
 void GSSetDisplayAlignment(GSDisplayAlignment alignment)
 {
 	s_display_alignment = alignment;
@@ -1472,28 +1601,6 @@ void GSSetPortraitRenderTopAlign(bool enabled)
 void GSSetLandscapeRenderTopAlign(bool enabled)
 {
 	s_landscape_render_top = enabled;
-}
-
-bool GSRenderer::BeginCapture(std::string filename, const GSVector2i& size)
-{
-	// GV7-2: capture start/stop can run mid-frame on the MTGS thread; teardown
-	// frees download textures on the device the back thread may be drawing on.
-	DrainBackQueue();
-	const GSVector2i capture_resolution = (size.x != 0 && size.y != 0) ?
-											  size :
-											  (GSConfig.VideoCaptureAutoResolution ?
-													  GetInternalResolution() :
-													  GSVector2i(GSConfig.VideoCaptureWidth, GSConfig.VideoCaptureHeight));
-
-	return GSCapture::BeginCapture(GetTvRefreshRate(), capture_resolution,
-		GetCurrentAspectRatioFloat(GetVideoMode() == GSVideoMode::SDTV_480P),
-		std::move(filename));
-}
-
-void GSRenderer::EndCapture()
-{
-	DrainBackQueue(); // see BeginCapture
-	GSCapture::EndCapture();
 }
 
 GSTexture* GSRenderer::LookupPaletteSource(u32 CBP, u32 CPSM, u32 CBW, GSVector2i& offset, float* scale, const GSVector2i& size)

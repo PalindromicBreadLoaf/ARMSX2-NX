@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -152,9 +155,10 @@ static constexpr s32 kExecuteBlockSafetyCap = 1 << 20;
 bool g_eeRecLastBlockFF = false;
 #endif
 
-// Self-modifying code detection
-static u16 manual_page[Ps2MemSize::MainRam / 4096] = {};
-static u8 manual_counter[Ps2MemSize::MainRam / 4096] = {};
+// Self-modifying code detection. Sized for the 128 MB map (Ps2MemSize::TotalRam), as on x86; a 32 MB
+// machine only ever touches the first quarter.
+static u16 manual_page[Ps2MemSize::TotalRam / 4096] = {};
+static u8 manual_counter[Ps2MemSize::TotalRam / 4096] = {};
 
 // Forward declarations
 static void recRecompile(const u32 startpc);
@@ -188,6 +192,49 @@ static const void* EnterRecompiledCode = nullptr;
 static const void* DispatchBlockDiscard = nullptr;
 static const void* DispatchPageReset = nullptr;
 static const void* UnmappedRecLUTPage = nullptr;
+
+// B.cond and CBZ reach ±1MB. The dispatchers are generated at the base of a
+// code cache tens of megabytes deep, so past its first megabyte the event
+// check at every block exit and the delay-slot exception bracket both fell
+// back to an inverted condition branching over a B: an instruction more, and
+// a taken branch on the path the condition does not take. A veneer pair in
+// front of a block restores the short form for the megabyte that follows it,
+// and starts out as the dispatchers themselves. Both emit sites re-measure
+// the distance, so a block wider than the reach left over, and the cold arena
+// above the hot one, still get the long form.
+static const u8* s_condVeneerEvent = nullptr;
+static const u8* s_condVeneerReg = nullptr;
+
+#ifdef PCSX2_RECOMPILER_TESTS
+// A test cache never grows past the first megabyte, so a test reaches the
+// veneers by forcing them: every block then emits a pair and every event
+// check and bracket hops through one whatever the distance. A forced run
+// that counts no hops tested the direct form twice.
+static bool s_condVeneerForced = false;
+static u32 s_condVeneerHops = 0;
+void recEeForceCondVeneers(bool on)
+{
+	s_condVeneerForced = on;
+}
+u32 recEeCondVeneerHops()
+{
+	return s_condVeneerHops;
+}
+// The dispatchers, so a test can follow a block's conditional exits into the
+// veneer and read what it branches to. Nothing the harness observes separates
+// the two: DispatcherEvent falls through into DispatcherReg, and the parking
+// lot leaves through an unconditional jump to DispatcherEvent whatever a
+// block's own event check did.
+void recEeDispatcherAddrs(const void** dispatcher_event, const void** dispatcher_reg)
+{
+	*dispatcher_event = DispatcherEvent;
+	*dispatcher_reg = DispatcherReg;
+}
+#define COUNT_VENEER_HOP() (void)(s_condVeneerHops++)
+#else
+static constexpr bool s_condVeneerForced = false;
+#define COUNT_VENEER_HOP() ((void)0)
+#endif
 
 #if FPU_GUARD_MASK_STUB
 // Shared FPU add/sub guard-bit masking stub. Emitted once per dispatcher
@@ -451,6 +498,8 @@ static void _DynGen_Dispatchers()
 	g_fpuGuardMaskStub = _DynGen_FpuGuardMaskStub();
 #endif
 	cop2DynGenSyncStubs();
+	cop2DynGenModelStubs();
+	fpuDynGenModelStubs();
 
 	JITCompile = _DynGen_JITCompile();
 	EnterRecompiledCode = _DynGen_EnterRecompiledCode();
@@ -1004,8 +1053,8 @@ void armAssertRawGPRPtrCoherent(const void* field)
 // call site's BL, so a matching guest JR-$ra can RET to it and the hardware
 // return-address stack — pushed by that BL — predicts the transfer.
 //
-// Ring instead of FEX's guard-page stack: eeCallRetOff wraps via a masked
-// And, so over/underflow simply cycles the ring — no bounds checks, no
+// Ring instead of FEX's guard-page stack: eeCallRetOff is 16 bits wide and
+// the ring is 64KB, so over/underflow simply cycles it — no bounds checks, no
 // SIGSEGV recentering (our PageFaultHandler interface exposes no ucontext),
 // and net push/pop imbalance (interpreter-path calls, exceptions, thread
 // switches) degrades to compare-misses that re-sync within one call depth.
@@ -1019,8 +1068,9 @@ void armAssertRawGPRPtrCoherent(const void* field)
 namespace
 {
 	constexpr u32 kEECallRetRingBytes = 0x10000; // 4096 x 16-byte frames
-	constexpr u64 kEECallRetOffMask = kEECallRetRingBytes - 16;
 	constexpr u64 kEECallRetSentinelRA = 1;
+	static_assert(kEECallRetRingBytes == (1u << 16),
+		"the emitted push and pop wrap the offset in its own 16 bits");
 
 	alignas(16) u8 s_eeCallRetRing[kEECallRetRingBytes];
 
@@ -1051,14 +1101,91 @@ namespace
 		armAsm->Mov(RXSCRATCH, return_pc);
 		armAsm->Adr(RSCRATCHADDR, landing);
 		armAsm->Ldr(a64::x9, armCpuRegMem(&_cpuRegistersPack.eeCallRetBase));
-		armAsm->Ldr(a64::x10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
-		armAsm->Sub(a64::x10, a64::x10, 16);
-		armAsm->And(a64::x10, a64::x10, kEECallRetOffMask);
-		armAsm->Str(a64::x10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
-		armAsm->Add(a64::x9, a64::x9, a64::x10);
+		armAsm->Ldrh(a64::w10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
+		armAsm->Sub(a64::w10, a64::w10, 16);
+		armAsm->Strh(a64::w10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
+		armAsm->Add(a64::x9, a64::x9, a64::Operand(a64::w10, a64::UXTH));
 		armAsm->Stp(RXSCRATCH, RSCRATCHADDR, a64::MemOperand(a64::x9));
 	}
 } // namespace
+
+// Reach a veneer keeps in hand for the block emitted after it: B.cond's ±1MB
+// less twice the 64KB of overhang armSetAsmPtr grants a compile.
+static constexpr s64 kCondVeneerReach = (1 << 20) - 2 * _64kb;
+
+static bool condBranchReaches(const void* target)
+{
+	const s64 d = static_cast<s64>(reinterpret_cast<intptr_t>(target) -
+								   reinterpret_cast<intptr_t>(armGetCurrentCodePointer()));
+	return a64::Instruction::IsValidImmPCOffset(a64::CondBranchType, d >> 2);
+}
+
+static s64 condBranchOffset(const void* target)
+{
+	return static_cast<s64>(reinterpret_cast<intptr_t>(target) -
+							reinterpret_cast<intptr_t>(armGetCurrentCodePointer())) >> 2;
+}
+
+// A dispatcher exit taken on a condition, hopping through `veneer` when the
+// dispatcher is out of imm19 reach and it is not.
+static void emitDispatcherCondBranch(a64::Condition cond, const void* target, const u8* veneer)
+{
+	if ((s_condVeneerForced || !condBranchReaches(target)) && veneer && condBranchReaches(veneer))
+	{
+		target = veneer;
+		COUNT_VENEER_HOP();
+	}
+	if (condBranchReaches(target))
+	{
+		a64::SingleEmissionCheckScope guard(armAsm);
+		armAsm->b(condBranchOffset(target), cond);
+		return;
+	}
+	armEmitCondBranch(cond, target);
+}
+
+// The CBZ form. armEmitCbnz tests the other way, so its fallback is the shape
+// this replaces rather than one to call.
+static void emitDispatcherCbz(const a64::Register& reg, const void* target, const u8* veneer)
+{
+	if ((s_condVeneerForced || !condBranchReaches(target)) && veneer && condBranchReaches(veneer))
+	{
+		target = veneer;
+		COUNT_VENEER_HOP();
+	}
+	if (condBranchReaches(target))
+	{
+		a64::SingleEmissionCheckScope guard(armAsm);
+		armAsm->cbz(reg, condBranchOffset(target));
+		return;
+	}
+	a64::Label taken;
+	armAsm->Cbnz(reg, &taken);
+	armEmitJmp(target);
+	armAsm->Bind(&taken);
+}
+
+// Emitted in front of a block, where nothing can fall into it: the entry
+// pointer the block manager links against is taken after this returns.
+static void emitCondVeneers()
+{
+	const u8* here = armGetCurrentCodePointer();
+	if (!s_condVeneerForced && s_condVeneerEvent && (here - s_condVeneerEvent) < kCondVeneerReach)
+		return;
+
+	s_condVeneerEvent = here;
+	armEmitJmp(DispatcherEvent);
+	s_condVeneerReg = armGetCurrentCodePointer();
+	armEmitJmp(DispatcherReg);
+
+	// armStartBlock aligned the entry to 16 bytes and the veneers displace it;
+	// pad the alignment back rather than leave block entries straddling.
+	while ((reinterpret_cast<uintptr_t>(armGetCurrentCodePointer()) & 15) != 0)
+	{
+		a64::SingleEmissionCheckScope guard(armAsm);
+		armAsm->nop();
+	}
+}
 
 // Block-tail cycle update + event check under the delta representation:
 // fold the pending block cycles into RECCYCLE with a flag-setting add, then
@@ -1074,7 +1201,7 @@ static void emitCycleUpdateAndEventCheck()
 		armAsm->Adds(RECCYCLE, RECCYCLE, cycles);
 	else
 		armAsm->Cmp(RECCYCLE, 0);
-	armEmitCondBranch(a64::ge, DispatcherEvent);
+	emitDispatcherCondBranch(a64::ge, DispatcherEvent, s_condVeneerEvent);
 }
 
 void SetBranchReg(EEBranchRegMode mode, u32 call_return_pc, int wbreg)
@@ -1153,12 +1280,13 @@ void SetBranchReg(EEBranchRegMode mode, u32 call_return_pc, int wbreg)
 		// dispatcher) leaves the ring balanced. Frame regs survive the event
 		// check below: it is flags-only (Adds/Cmp + b.ge).
 		armAsm->Ldr(a64::x9, armCpuRegMem(&_cpuRegistersPack.eeCallRetBase));
-		armAsm->Ldr(a64::x10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
+		// The Ldrh zero-extends, so this reads the frame at the offset as it
+		// stands; only the incremented value below has to be narrowed again.
+		armAsm->Ldrh(a64::w10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
 		armAsm->Add(a64::x9, a64::x9, a64::x10);
 		armAsm->Ldp(RXSCRATCH, RSCRATCHADDR, a64::MemOperand(a64::x9));
-		armAsm->Add(a64::x10, a64::x10, 16);
-		armAsm->And(a64::x10, a64::x10, kEECallRetOffMask);
-		armAsm->Str(a64::x10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
+		armAsm->Add(a64::w10, a64::w10, 16);
+		armAsm->Strh(a64::w10, armCpuRegMem(&_cpuRegistersPack.eeCallRetOff));
 
 		emitCycleUpdateAndEventCheck();
 
@@ -1607,6 +1735,37 @@ a64::Label* recSuperblockAddSideExit(u32 branch_target, bool need_delay_slot)
 // patched toward the outlined exit body once the cold session has emitted it.
 static u8* s_sideExitIslands[kMaxContSites];
 
+// A conditional call-out outlined like a side exit: B.cond to a one-word island
+// after the tail, body in the cold arena at block end, B back to the site. The
+// body is emitted after the block, so it must not touch allocator state.
+struct ColdIsland
+{
+	std::unique_ptr<a64::Label> label;
+	u8* island;
+	u8* resume;
+	u8* cold;
+	std::function<void()> body;
+};
+static std::vector<ColdIsland> s_coldIslands;
+
+#ifdef PCSX2_RECOMPILER_TESTS
+static u32 s_coldIslandBodiesEmitted = 0;
+u32 recTestColdIslandBodiesEmitted()
+{
+	return s_coldIslandBodiesEmitted;
+}
+#endif
+
+void recEmitColdIslandBranch(a64::Condition cond, std::function<void()> body)
+{
+	ColdIsland x;
+	x.label = std::make_unique<a64::Label>();
+	x.body = std::move(body);
+	armAsm->B(x.label.get(), cond);
+	x.resume = armGetCurrentCodePointer();
+	s_coldIslands.push_back(std::move(x));
+}
+
 // Emit the per-exit islands after the block tail (still inside the hot
 // emission session — they are part of the block and count in x86size).
 // The mainline pc/size/recRAMCopy bookkeeping ran before this — pc is dead.
@@ -1619,6 +1778,13 @@ static void recEmitSideExitIslands()
 		a64::SingleEmissionCheckScope guard(armAsm);
 		s_sideExitIslands[k] = armGetCurrentCodePointer();
 		armAsm->b(int64_t{0}); // placeholder; patched to the cold exit body
+	}
+	for (ColdIsland& x : s_coldIslands)
+	{
+		armAsm->Bind(x.label.get());
+		a64::SingleEmissionCheckScope guard(armAsm);
+		x.island = armGetCurrentCodePointer();
+		armAsm->b(int64_t{0}); // placeholder; patched to the cold body
 	}
 }
 
@@ -1674,7 +1840,7 @@ static void recEmitColdSideExits()
 {
 	const int n = s_numSideExits;
 	s_numSideExits = 0;
-	if (n == 0)
+	if (n == 0 && s_coldIslands.empty())
 		return;
 
 	const u8* coldStart[kMaxContSites];
@@ -1695,6 +1861,16 @@ static void recEmitColdSideExits()
 		recEmitSideExitTail(x.branchTo);
 		x.label.reset();
 	}
+	for (ColdIsland& x : s_coldIslands)
+	{
+		x.cold = armGetCurrentCodePointer();
+		x.body();
+		armEmitJmp(x.resume);
+		x.label.reset();
+#ifdef PCSX2_RECOMPILER_TESTS
+		++s_coldIslandBodiesEmitted;
+#endif
+	}
 	pxAssert(armGetCurrentCodePointer() < SysMemory::GetEERecEnd());
 	s_coldPtr = armEndBlock();
 
@@ -1703,6 +1879,9 @@ static void recEmitColdSideExits()
 	// MTVU emit window in Legacy mode on its way out.
 	for (int k = 0; k < n; k++)
 		recPatchIslandB(s_sideExitIslands[k], coldStart[k]);
+	for (const ColdIsland& x : s_coldIslands)
+		recPatchIslandB(x.island, x.cold);
+	s_coldIslands.clear();
 
 	g_branch = 1;
 }
@@ -1749,6 +1928,62 @@ namespace EERecFallback
 	u32 g_groups = 0;
 	u32 g_cop2RegMask[kCop2MoveOpCount] = {~0u, ~0u, ~0u, ~0u};
 	u64 g_cop2VuMask[kCop2VuIdCount / 64] = {~0ull, ~0ull, ~0ull, ~0ull};
+	u64 g_fpuMask[kFpuIdCount / 64] = {~0ull, ~0ull};
+
+	enum : int
+	{
+		kFpuCvtSW = 0x40, kFpuMfc1, kFpuCfc1, kFpuMtc1, kFpuCtc1, kFpuBc1,
+		kFpuLwc1, kFpuSwc1,
+	};
+
+	int FpuOpId(u32 code)
+	{
+		const u32 primary = code >> 26;
+		if (primary == 0x31)
+			return kFpuLwc1;
+		if (primary == 0x39)
+			return kFpuSwc1;
+		if (primary != 0x11)
+			return -1;
+		const u32 rs = (code >> 21) & 0x1F;
+		if (rs == 0x10)
+			return static_cast<int>(code & 0x3F);
+		if (rs == 0x14)
+			return ((code & 0x3F) == 0x20) ? kFpuCvtSW : -1;
+		switch (rs)
+		{
+			case 0x00: return kFpuMfc1;
+			case 0x02: return kFpuCfc1;
+			case 0x04: return kFpuMtc1;
+			case 0x06: return kFpuCtc1;
+			case 0x08: return kFpuBc1;
+			default:   return -1;
+		}
+	}
+
+	const char* FpuOpName(int id)
+	{
+		switch (id)
+		{
+			case 0x00: return "add";    case 0x01: return "sub";
+			case 0x02: return "mul";    case 0x03: return "div";
+			case 0x04: return "sqrt";   case 0x05: return "abs";
+			case 0x06: return "mov";    case 0x07: return "neg";
+			case 0x16: return "rsqrt";  case 0x18: return "adda";
+			case 0x19: return "suba";   case 0x1A: return "mula";
+			case 0x1C: return "madd";   case 0x1D: return "msub";
+			case 0x1E: return "madda";  case 0x1F: return "msuba";
+			case 0x24: return "cvtw";   case 0x28: return "max";
+			case 0x29: return "min";    case 0x30: return "cf";
+			case 0x32: return "ceq";    case 0x34: return "clt";
+			case 0x36: return "cle";
+			case kFpuCvtSW: return "cvts"; case kFpuMfc1: return "mfc1";
+			case kFpuCfc1:  return "cfc1"; case kFpuMtc1: return "mtc1";
+			case kFpuCtc1:  return "ctc1"; case kFpuBc1:  return "bc1";
+			case kFpuLwc1:  return "lwc1"; case kFpuSwc1: return "swc1";
+			default: return nullptr;
+		}
+	}
 
 	// Mnemonics parallel to recCOP2_BC2t / recCOP2SPECIAL1t / recCOP2SPECIAL2t
 	// (iR5900Misc-arm64.cpp). nullptr marks a hole in the encoding.
@@ -1808,12 +2043,17 @@ namespace EERecFallback
 	}
 
 	static u32 s_cop2VuCensus[kCop2VuIdCount];
+	static u32 s_cop2VuCensusTotal;
+	static u32 s_cop2VuCensusLogged;
 
 	void NoteCop2VuCompiled(u32 code)
 	{
 		const int id = Cop2VuOpId(code);
 		if (id >= 0)
+		{
 			s_cop2VuCensus[id]++;
+			s_cop2VuCensusTotal++;
+		}
 	}
 
 	std::string DescribeCop2VuCensus()
@@ -1833,6 +2073,63 @@ namespace EERecFallback
 		if (s.empty())
 			return "no VU macro ops compiled";
 		return fmt::format("{} (total {})", s, total);
+	}
+
+	void InitFromEnvOnce()
+	{
+		static bool s_done = false;
+		if (s_done)
+			return;
+		s_done = true;
+
+		const char* list = std::getenv("ARMSX2_REC_FALLBACK");
+		if (!list || !*list)
+			return;
+
+		u32 groups = 0;
+		u32 reg_masks[kCop2MoveOpCount] = {~0u, ~0u, ~0u, ~0u};
+		u64 fpu_mask[kFpuIdCount / 64] = {~0ull, ~0ull};
+		u64 vu_mask[kCop2VuIdCount / 64] = {~0ull, ~0ull, ~0ull, ~0ull};
+		std::string error;
+		if (!ParseGroups(list, &groups, reg_masks, fpu_mask, vu_mask, &error))
+		{
+			Console.Error("ARMSX2_REC_FALLBACK: %s", error.c_str());
+			return;
+		}
+
+		g_groups = groups;
+		std::memcpy(g_cop2RegMask, reg_masks, sizeof(g_cop2RegMask));
+		std::memcpy(g_fpuMask, fpu_mask, sizeof(g_fpuMask));
+		std::memcpy(g_cop2VuMask, vu_mask, sizeof(g_cop2VuMask));
+		std::string detail;
+		if ((g_groups & Fpu) && (fpu_mask[0] != ~0ull || fpu_mask[1] != ~0ull))
+		{
+			for (int i = 0; i < kFpuIdCount; i++)
+			{
+				if ((g_fpuMask[i >> 6] & (1ull << (i & 63))) == 0)
+					continue;
+				if (const char* n = FpuOpName(i))
+					detail += detail.empty() ? fmt::format(" (fpu {}", n) : fmt::format(":{}", n);
+			}
+			if (!detail.empty())
+				detail += ")";
+		}
+		Console.WriteLn(Color_Yellow, "EERecFallback: forcing %s to the interpreter%s",
+			DescribeGroups(g_groups).c_str(), detail.c_str());
+	}
+
+	void MaybeLogCop2VuCensus(bool end_of_run)
+	{
+		const char* want = std::getenv("ARMSX2_REC_FALLBACK_CENSUS");
+		if (!want || *want == '0')
+			return;
+		// A reset with nothing new to report is a boot artifact: the first
+		// resets fire before a block has reached the emitter, and an empty
+		// census there reads as "this game compiles no VU macro ops".
+		if (!end_of_run && s_cop2VuCensusTotal == s_cop2VuCensusLogged)
+			return;
+		s_cop2VuCensusLogged = s_cop2VuCensusTotal;
+		Console.WriteLn(Color_Yellow, "COP2VU CENSUS: %s", DescribeCop2VuCensus().c_str());
 	}
 
 	bool Selected(u32 code)
@@ -1912,6 +2209,15 @@ namespace EERecFallback
 				break;
 		}
 
+		// An unfiltered `fpu` stays every COP1 encoding: the S format's
+		// unassigned functs have ids but no mnemonic to filter by.
+		if (group == Fpu && (g_fpuMask[0] != ~0ull || g_fpuMask[1] != ~0ull))
+		{
+			const int id = FpuOpId(code);
+			if (id < 0 || (g_fpuMask[id >> 6] & (1ull << (id & 63))) == 0)
+				return false;
+		}
+
 		if (group == Cop2Vu)
 		{
 			// Per-op filter: an unnamed/unmapped encoding is never selected, so a
@@ -1945,11 +2251,13 @@ namespace EERecFallback
 		}
 	}
 
-	bool ParseGroups(const std::string_view& list, u32* out, u32* reg_masks,
+	bool ParseGroups(const std::string_view& list, u32* out, u32* reg_masks, u64* fpu_mask,
 		u64* cop2vu_mask, std::string* error)
 	{
 		u32 local_reg_masks[kCop2MoveOpCount] = {~0u, ~0u, ~0u, ~0u};
 		bool reg_filtered[kCop2MoveOpCount] = {false, false, false, false};
+		u64 local_fpu_mask[kFpuIdCount / 64] = {~0ull, ~0ull};
+		bool fpu_filtered = false;
 		u64 local_vu_mask[kCop2VuIdCount / 64] = {~0ull, ~0ull, ~0ull, ~0ull};
 		bool vu_filtered = false;
 		u32 mask = 0;
@@ -1993,7 +2301,47 @@ namespace EERecFallback
 						found = true;
 						mask |= g.bit;
 
-						if (!regs.empty() && g.bit == Cop2Vu)
+						if (!regs.empty() && g.bit == Fpu)
+						{
+							// "fpu:mul:madd" — narrow to named COP1 ops.
+							size_t rp = 0;
+							while (rp <= regs.size())
+							{
+								const size_t rc = regs.find(':', rp);
+								const size_t rend = (rc == std::string_view::npos) ? regs.size() : rc;
+								const std::string_view mnem = regs.substr(rp, rend - rp);
+								int id = -1;
+								for (int i = 0; i < kFpuIdCount; i++)
+								{
+									const char* n = FpuOpName(i);
+									if (n && mnem == n)
+									{
+										id = i;
+										break;
+									}
+								}
+								if (id < 0)
+								{
+									if (error)
+									{
+										*error = fmt::format("unknown COP1 op '{}' in EE rec fallback "
+											"filter '{}'", std::string(mnem), std::string(tok));
+									}
+									return false;
+								}
+								if (!fpu_filtered)
+								{
+									for (auto& w : local_fpu_mask)
+										w = 0;
+									fpu_filtered = true;
+								}
+								local_fpu_mask[id >> 6] |= (1ull << (id & 63));
+								if (rc == std::string_view::npos)
+									break;
+								rp = rc + 1;
+							}
+						}
+						else if (!regs.empty() && g.bit == Cop2Vu)
 						{
 							// "cop2vu:vmulaw:vmaddaz" — narrow to named macro ops.
 							size_t rp = 0;
@@ -2041,8 +2389,8 @@ namespace EERecFallback
 								if (error)
 								{
 									*error = fmt::format("EE rec fallback group '{}' does not take a register "
-										"filter (only qmfc2/cfc2/qmtc2/ctc2 take ':<reg>', cop2vu takes "
-										"':<mnemonic>')", std::string(name));
+										"filter (only qmfc2/cfc2/qmtc2/ctc2 take ':<reg>', fpu and cop2vu "
+										"take ':<mnemonic>')", std::string(name));
 								}
 								return false;
 							}
@@ -2100,6 +2448,8 @@ namespace EERecFallback
 		*out = mask;
 		for (int i = 0; i < kCop2MoveOpCount; i++)
 			reg_masks[i] = local_reg_masks[i];
+		for (int i = 0; i < kFpuIdCount / 64; i++)
+			fpu_mask[i] = local_fpu_mask[i];
 		for (int i = 0; i < kCop2VuIdCount / 64; i++)
 			cop2vu_mask[i] = local_vu_mask[i];
 		return true;
@@ -2333,11 +2683,8 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			// dispatcher on the vector PC before the enclosing branch's
 			// static dispatch can clobber it. Cycle undercount on this
 			// exceptional path is accepted. (AX-05)
-			a64::Label noException;
 			armAsm->Ldr(RWSCRATCH, armCpuRegMem(&cpuRegs.branch));
-			armAsm->Cbnz(RWSCRATCH, &noException);
-			armEmitJmp(DispatcherReg);
-			armAsm->Bind(&noException);
+			emitDispatcherCbz(RWSCRATCH, DispatcherReg, s_condVeneerReg);
 			armAsm->Str(a64::wzr, armCpuRegMem(&cpuRegs.branch));
 		}
 
@@ -2914,9 +3261,14 @@ static bool memory_protect_recompiled_code(u32 startpc, u32 size)
 //  Reserve / Reset / Shutdown / Execute
 // =====================================================================================================
 
+// Guest RAM the LUT, recRAM and recRAMCopy below were last sized for (Ps2MemSize::ExposedRam):
+// 32 MB, or 128 MB while a Namco System 246/256 arcade game runs (memSetExtraMemMode).
+static u32 s_reservedRam = 0;
+
 static void recReserveRAM()
 {
-	recLutEntries = (Ps2MemSize::MainRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2) / 4;
+	s_reservedRam = Ps2MemSize::ExposedRam;
+	recLutEntries = (Ps2MemSize::ExposedRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2) / 4;
 
 	if (recLutReserve_RAM.size() != recLutEntries)
 		recLutReserve_RAM.resize(recLutEntries);
@@ -2925,7 +3277,7 @@ static void recReserveRAM()
 
 	BASEBLOCK* curpos = recLutReserve_RAM.data();
 	recRAM = curpos;
-	curpos += (Ps2MemSize::MainRam / 4);
+	curpos += (Ps2MemSize::ExposedRam / 4);
 	recROM = curpos;
 	curpos += (Ps2MemSize::Rom / 4);
 	recROM1 = curpos;
@@ -2933,13 +3285,12 @@ static void recReserveRAM()
 	recROM2 = curpos;
 	curpos += (Ps2MemSize::Rom2 / 4);
 
-	// MainRam, deliberately — this whole rec is MainRam-only: recLutEntries and
-	// the recRAM advance above, the (MainRam / _64kb) alias mask in recResetRaw,
-	// and manual_page / manual_counter. Upstream x86 uses ExposedRam throughout
-	// instead (iR5900.cpp:564-577). Widening this buffer alone would desync the
-	// snapshots from a LUT that aliases high RAM back into the low 32 MB.
-	if (recRAMCopy.size() != Ps2MemSize::MainRam)
-		recRAMCopy.resize(Ps2MemSize::MainRam);
+	// ExposedRam, like everything else that covers guest RAM here: recLutEntries and the recRAM
+	// advance above, the alias mask and page loop in recResetRaw, and manual_page / manual_counter
+	// (x86 iR5900.cpp:564-577 does the same). They have to move together: a buffer wider than the
+	// LUT would hand two blocks aliased to one LUT entry two different snapshots.
+	if (recRAMCopy.size() != Ps2MemSize::ExposedRam)
+		recRAMCopy.resize(Ps2MemSize::ExposedRam);
 }
 
 static void recReserve()
@@ -2992,6 +3343,12 @@ static void recResetRaw()
 {
 	Console.WriteLn(Color_Green, "iR5900-ARM64 Recompiler reset.");
 
+	// The RAM map changed size since the last reset (an arcade session's 128 MB, or back to 32 MB
+	// after one). Mirrors x86 recResetRaw; everything that points into the old arrays is rebuilt
+	// below.
+	if (s_reservedRam != Ps2MemSize::ExposedRam)
+		recReserveRAM();
+
 	// The code-cache rewind below dangles every host landing pointer in the
 	// call-ret ring — sentinel-fill so no stale frame can match. (recClear
 	// needs nothing: dead block entries keep resolving via redirect stubs.)
@@ -3001,6 +3358,15 @@ static void recResetRaw()
 	s_loopResidentBlocks.clear();
 	s_blockContSites.clear();
 	s_curBlockContSites.clear();
+#endif
+
+#ifdef PCSX2_RECOMPILER_TESTS
+	// Before the first block compiles: a group forced to the interpreter here
+	// changes what every later block emits. The census runs to the same beat
+	// but reports the generation being thrown away, so a run long enough to
+	// exhaust the cache leaves a trail even if it never shuts down cleanly.
+	EERecFallback::InitFromEnvOnce();
+	EERecFallback::MaybeLogCop2VuCensus(false);
 #endif
 
 	// COP2 macro-mode emitters read their clamp/mask constants from the pack
@@ -3036,6 +3402,11 @@ static void recResetRaw()
 	armEmitCondBranch(a64::ge, DispatcherEvent);
 	armAsm->Ret();
 
+	// Until a block passes out of their reach, the dispatchers are their own
+	// veneers.
+	s_condVeneerEvent = static_cast<const u8*>(DispatcherEvent);
+	s_condVeneerReg = static_cast<const u8*>(DispatcherReg);
+
 	const u8* dispEnd = armGetCurrentCodePointer();
 	recPtr = armEndBlock();
 
@@ -3044,7 +3415,7 @@ static void recResetRaw()
 	Console.WriteLn(Color_Green, "EE ARM64: Dispatcher generated at %p (%zu bytes)", dispStart, (size_t)(dispEnd - dispStart));
 
 	iopClearRecLUT(recLutReserve_RAM.data(),
-		Ps2MemSize::MainRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2);
+		Ps2MemSize::ExposedRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2);
 
 	BASEBLOCK* unmapped = recLutUnmapped.data();
 
@@ -3054,10 +3425,10 @@ static void recResetRaw()
 	for (int i = 0; i < _64kb / 4; i++)
 		unmapped[i].SetFnptr((uptr)UnmappedRecLUTPage);
 
-	// Map EE RAM (32MB, mirrored)
-	for (int i = 0; i < 0x200; i++)
+	// Map EE RAM: 32 MB, or 128 MB with the extended map
+	for (int i = 0; i < static_cast<int>(Ps2MemSize::ExposedRam / _64kb); i++)
 	{
-		u32 mask = (Ps2MemSize::MainRam / _64kb) - 1;
+		u32 mask = (Ps2MemSize::ExposedRam / _64kb) - 1;
 		recLUT_SetPage(recLUT, hwLUT, recRAM, 0x0000, i, i & mask);
 		recLUT_SetPage(recLUT, hwLUT, recRAM, 0x2000, i, i & mask);
 		recLUT_SetPage(recLUT, hwLUT, recRAM, 0x3000, i, i & mask);
@@ -3121,6 +3492,12 @@ static void recResetRaw()
 
 static void recShutdown()
 {
+#ifdef PCSX2_RECOMPILER_TESTS
+	// The only dump a short run reaches: every reset it saw came before the
+	// first block compiled.
+	EERecFallback::MaybeLogCop2VuCensus(true);
+#endif
+
 	s_eeConstantPool.Destroy();
 	recRAMCopy.deallocate();
 	recLutReserve_RAM.deallocate();
@@ -3537,6 +3914,7 @@ static void recRecompile(const u32 startpc)
 
 	armSetAsmPtr(recPtr, recPtrEnd - recPtr + _64kb, &s_eeConstantPool);
 	armStartBlock();
+	emitCondVeneers();
 
 	s_pCurBlock = GETBLOCK(startpc);
 	pxAssert(s_pCurBlock->GetFnptr() == (uptr)JITCompile || s_pCurBlock->GetFnptr() == (uptr)UnmappedRecLUTPage);
@@ -4070,6 +4448,7 @@ StartRecomp:
 		// SL-03: sweep side-exit residue the same way (recEmitPendingSideExits
 		// drains the list on every completed compile).
 		s_numSideExits = 0;
+		s_coldIslands.clear();
 
 		// SL-1 candidacy: a resident self-loop is a block whose terminal branch
 		// targets its own startpc. Wait-loop-FF blocks keep the fast-forward
@@ -4159,7 +4538,7 @@ StartRecomp:
 	// mismatched and recompile-looped — which is why this was disabled; the
 	// old-block-region compare is the correct x86 semantics
 	// (OverlapWalkIgnoresUnmodifiedNeighbors pins the no-false-positive side).
-	if (HWADDR(pc) <= Ps2MemSize::MainRam)
+	if (HWADDR(pc) <= Ps2MemSize::ExposedRam)
 	{
 		BASEBLOCKEX* oldBlock;
 		int i = recBlocks.LastIndex(HWADDR(pc) - 4);
@@ -4189,7 +4568,7 @@ StartRecomp:
 			// the compare never matches — each then recClears the other
 			// forever. Clamp keeps a block straddling the top of RAM in bounds.
 			const u32 cmplen = std::min<u32>(oldBlock->size * 4,
-				Ps2MemSize::MainRam - oldBlock->startpc);
+				Ps2MemSize::ExposedRam - oldBlock->startpc);
 			if (memcmp(&recRAMCopy[oldBlock->startpc], PSM(oldBlock->startpc), cmplen))
 			{
 				recClear(startpc, (pc - startpc) / 4);

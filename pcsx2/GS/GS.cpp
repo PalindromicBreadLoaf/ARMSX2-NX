@@ -6,7 +6,7 @@
 #include "ImGui/FullscreenUI.h"
 #include "ImGui/ImGuiManager.h"
 #include "GS/GS.h"
-#include "GS/GSCapture.h"
+#include "GS/GSCacheFile.h"
 #include "GS/GSExtra.h"
 #include "GS/GSGL.h"
 #include "GS/GSLzma.h"
@@ -17,6 +17,8 @@
 #include "Input/InputManager.h"
 #include "MTGS.h"
 #include "pcsx2/GS.h"
+#include "GS/Renderers/Common/GSBackThreadPolicy.h"
+#include "GS/Renderers/Common/GSCopyRoadBlendingPolicy.h"
 #include "GS/Renderers/Null/GSDeviceNone.h"
 #include "GS/Renderers/Null/GSRendererNull.h"
 #include "GS/Renderers/HW/GSRendererHW.h"
@@ -73,6 +75,7 @@
 Pcsx2Config::GSOptions GSConfig;
 
 static GSRendererType GSCurrentRenderer;
+static bool GSCurrentPresenterOffsetsRead;
 
 GSRendererType GSGetCurrentRenderer()
 {
@@ -83,6 +86,14 @@ bool GSIsHardwareRenderer()
 {
 	// Null gets flagged as hw.
 	return (GSCurrentRenderer != GSRendererType::SW);
+}
+
+bool GSPresenterOffsetsFramebufferRead()
+{
+	// Resolved per renderer instance in OpenGSRenderer rather than derived from the renderer
+	// type here, because it is a property of the output path. Today it equals "is the software
+	// renderer".
+	return GSCurrentPresenterOffsetsRead;
 }
 
 std::string GetDefaultAdapter()
@@ -98,6 +109,10 @@ static RenderAPI GetAPIForRenderer(GSRendererType renderer)
 		// Null renderer pairs with the deviceless None host device — headless runs
 		// (eerunner A/B, CI) must not require a working Vulkan/GL context.
 		case GSRendererType::Null:
+		// Same deviceless host device, but paired with GSRendererHW below (OpenGSRenderer's
+		// `renderer != SW` branch already handles it, since NullHW is neither Null nor SW) --
+		// a per-title CPU-only cost measurement of the hardware renderer path.
+		case GSRendererType::NullHW:
 			return RenderAPI::None;
 
 		case GSRendererType::OGL:
@@ -240,34 +255,86 @@ static void GSClampUpscaleMultiplier(Pcsx2Config::GSOptions& config)
 	config.UpscaleMultiplier = static_cast<float>(max_upscale_multiplier);
 }
 
-#ifdef __ANDROID__
-// Some MediaTek Mali drivers render duplicated horizontal framebuffer regions in Tekken 5
-// when the GameDB's Native half-pixel-offset mode (value 4) is active. Force the offset Off
-// there — and ONLY there — preserving Native for every other GPU and game and respecting a
-// user's manual hacks. Ported from sashkinbro/EmuCoreX. Reachable only while the Tekken 5
-// GameDB entries keep halfPixelOffset: Native.
-static bool IsTekken5Serial(const std::string_view serial)
+// A title whose database entry caps its blending accuracy on a road that charges for the
+// destination read gets that cap applied here, where the device that decides whether the cap means
+// anything finally exists.
+//
+// Applied to GSConfig rather than to EmuConfig on purpose. The cap is a property of this device,
+// not of the player's settings: writing it back would make the settings screen show a level the
+// player never chose, raise the "blending accuracy is below Basic" unsafe-settings warning for a
+// database decision, and persist a device fact into an INI that may next be read on another GPU.
+// GSConfig is the renderer's own copy and is rebuilt from EmuConfig on every settings change, so
+// this runs again each time and nothing accumulates.
+//
+// Reasoning, measurements and the picture-quality judgement: GSCopyRoadBlendingPolicy.h.
+static void GSApplyCopyRoadBlendingCap(Pcsx2Config::GSOptions& config)
 {
-	static constexpr std::array<std::string_view, 11> k_tekken5_serials = {
-		"SCAJ-20125", "SCAJ-20126", "SCAJ-20199", "SCED-53538", "SCES-53202",
-		"SCKA-20049", "SCKA-20081", "SLPS-25510", "SLPS-73223", "SLUS-21059", "SLUS-21160"};
-	return std::find(k_tekken5_serials.begin(), k_tekken5_serials.end(), serial) != k_tekken5_serials.end();
+	// Blending accuracy is a hardware-renderer concept; the software renderer blends exactly and
+	// reads none of this, so leaving its level alone keeps the log and the OSD honest.
+	if (!GSIsHardwareRenderer() || config.CopyRoadMaximumBlendingLevel < 0)
+		return;
+
+	const GSDevice::FeatureSupport& f = g_gs_device->Features();
+
+	GSCopyRoadBlendingInputs in;
+	// The road, not the texture-barrier bit. A barrier road on a tiler charges for the destination
+	// read on every draw that takes one, the same as a copy road does -- which is what the bit
+	// cannot say, being equally true of the roads where the driver hands us the read for nothing.
+	// Which barrier roads charge is the backend's measured answer, not an inference: see
+	// barrier_read_costs_per_draw.
+	in.road = GSSelfReadRoadFromPublishedBits(
+		f.framebuffer_fetch, f.texture_barrier, f.declared_feedback_loop_orders_overlap);
+	in.multidraw_fb_copy = f.multidraw_fb_copy;
+	in.barrier_costs_per_draw = f.barrier_read_costs_per_draw;
+	in.ordered_costs_per_draw = f.ordered_read_costs_per_draw;
+	in.title_cap = config.CopyRoadMaximumBlendingLevel;
+	in.configured_level = static_cast<int>(config.AccurateBlendingUnit);
+
+	const int level = CopyRoadBlendingLevel(in);
+	if (level == in.configured_level)
+		return;
+
+	static constexpr const char* blend_level_names[] = {
+		"Minimum", "Basic", "Medium", "High", "Full", "Maximum"};
+
+	Console.WriteLn("GS: this device pays for each destination read (%s), so the game database's "
+					"copy-road blending cap applies: blending accuracy %s -> %s.",
+		in.road == GSSelfReadRoad::InPassBarrier ? "a barrier per draw" : "a copy of the target per draw",
+		blend_level_names[in.configured_level], blend_level_names[level]);
+	config.AccurateBlendingUnit = static_cast<AccBlendLevel>(level);
 }
 
-static void ApplyAndroidGameDBOverrides()
+// Resolves the GS multi-threading setting for the renderer about to open, into GSConfig only, for the same
+// reason as the blending cap above: it depends on the device and the download mode, so it is
+// re-derived every time a renderer opens and never written back into the player's settings. Must run before the renderer
+// is constructed, because the renderer's constructor starts the back thread.
+static GSBackThreadDecision GSDecideBackThreadFor(const Pcsx2Config::GSOptions& config, GSRendererType renderer)
 {
-	if (!g_gs_device || !g_gs_device->IsMaliGPUProfile() || !g_gs_device->IsMediaTekSoC() ||
-		GSConfig.ManualUserHacks || GSConfig.UserHacks_HalfPixelOffset != GSHalfPixelOffset::Native)
-		return;
-	if (!IsTekken5Serial(VMManager::GetDiscSerial()))
-		return;
-	GSConfig.UserHacks_HalfPixelOffset = GSHalfPixelOffset::Off;
-	Console.WriteLn("Android: Tekken 5 on MediaTek Mali — forcing HalfPixelOffset Off (duplicated-framebuffer fix).");
+	GSBackThreadInputs in;
+	in.requested = config.BackThread;
+	in.hardware_renderer = (renderer != GSRendererType::SW && renderer != GSRendererType::Null);
+	// deko3d records on one queue like Vulkan, so it can take the back thread's draws as well.
+	in.vulkan = g_gs_device && (g_gs_device->GetRenderAPI() == RenderAPI::Vulkan ||
+		g_gs_device->GetRenderAPI() == RenderAPI::DK3D);
+	in.download_mode = config.HWDownloadMode;
+	return GSDecideBackThread(in);
 }
-#endif
+
+static void GSResolveBackThreadMode(Pcsx2Config::GSOptions& config, GSRendererType renderer)
+{
+	const GSBackThreadDecision decision = GSDecideBackThreadFor(config, renderer);
+	config.BackThreadResolved = decision.on;
+
+	// A request for the split that does not get it is worth a warning. The "GS: back thread"
+	// wording is what measurement scripts grep for.
+	if (decision.on != config.BackThread)
+		Console.Warning("GS: back thread off, not pipelined (%s).", GSBackThreadReasonText(decision.reason));
+	else
+		Console.WriteLn("GS: back thread %s (%s).", decision.on ? "pipelined" : "off", GSBackThreadReasonText(decision.reason));
+}
 
 // GV7-1d-ii: the front parser object of the two-object split (GSState.h).
-// Non-null only when GSBackThreadMode::Pipelined engaged; all GIF-parse entry
+// Non-null only when GS multi-threading engaged; all GIF-parse entry
 // points below route to it, while draw/present/TC stay on g_gs_renderer.
 std::unique_ptr<GSFrontState> g_gs_front;
 
@@ -282,7 +349,14 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 	// Must be done first, initialization routines in GSState use GSIsHardwareRenderer().
 	GSCurrentRenderer = renderer;
 
+	// The software renderer's GetOutput() offsets the read itself; everything else reads the
+	// whole framebuffer and leaves the offset to the presenter. Set before any renderer is
+	// constructed, for the reason above.
+	GSCurrentPresenterOffsetsRead = (renderer == GSRendererType::SW);
+
 	GSVertexSW::InitStatic();
+
+	GSResolveBackThreadMode(GSConfig, renderer);
 
 	if (renderer == GSRendererType::Null)
 	{
@@ -290,7 +364,17 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 	}
 	else if (renderer != GSRendererType::SW)
 	{
+		// NullHW lands here too (paired with GSDeviceNone via GetAPIForRenderer above): it is
+		// neither Null nor SW, so it gets the real GSRendererHW object, just with no GPU behind
+		// the device it talks to.
+		// Verify-by-effect for measurement harnesses: a scorer should not trust the command
+		// line about which renderer a run used. It can read this line out of the emulog and
+		// refuse a run whose identity does not match what it asked for; without it a
+		// misconfigured run scores as whatever actually ran, under the name that was asked for.
+		Console.WriteLn("GS: Classic renderer active (renderer=%s)",
+			Pcsx2Config::GSOptions::GetRendererName(renderer));
 		GSClampUpscaleMultiplier(GSConfig);
+		GSApplyCopyRoadBlendingCap(GSConfig);
 		g_gs_renderer = std::make_unique<GSRendererHW>();
 	}
 	else
@@ -302,11 +386,22 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 	g_gs_renderer->ResetPCRTC();
 	g_gs_renderer->UpdateRenderFixes();
 
+	// Pipeline precompile is for the hardware renderer's draws only. An empty serial stops it, which
+	// a switch to the software renderer on the same device needs. The CPU thread does not hold the
+	// VM info lock while the GS opens.
+	if (g_gs_device)
+	{
+		if (GSIsHardwareRenderer())
+			g_gs_device->SetGameIdentity(VMManager::GetDiscSerial(), VMManager::GetDiscCRC());
+		else
+			g_gs_device->SetGameIdentity(std::string(), 0);
+	}
+
 	// GV7-1d-ii: instantiate the front parser only when the back thread really
-	// engaged (unsupported devices fall back to inline records).
-	// An EE thread read of live local memory forces single-object
-	// (lockstep) — see below for why that is not every EE-thread read.
-	if (GSConfig.BackThreadMode == GSBackThreadMode::Pipelined && g_gs_renderer->IsBackThreadRunning())
+	// engaged. GSResolveBackThreadMode has already turned a pipelined request into
+	// Off where it cannot pipeline (a non-Vulkan HW device, Unsynchronized
+	// downloads); the check below is what remains of the original refusal.
+	if (GSConfig.BackThreadResolved && g_gs_renderer->IsBackThreadRunning())
 	{
 		// Which thread performs the readback is the wrong question here; what it reads is the
 		// right one. Unsynchronized takes GS local memory directly, with no lock and no drain,
@@ -320,7 +415,9 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 		// The one exception is a shadow that never came up — ReadLocalMemoryUnsync then falls
 		// back to live local memory, which is exactly the Unsynchronized hazard, now against a
 		// concurrently drawing back thread. The renderer is already constructed at this point,
-		// so its shadow state is the thing to ask.
+		// so its shadow state is the thing to ask. (Its constructor allocates the shadow and
+		// marks it ready, so this is a guard, not a road: Unsynchronized itself never reaches
+		// here.)
 		const bool ee_thread_reads_live_memory =
 			GSConfig.HWDownloadMode == GSHardwareDownloadMode::Unsynchronized ||
 			(GSConfig.HWDownloadMode == GSHardwareDownloadMode::Asynchronous &&
@@ -328,7 +425,10 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 
 		if (ee_thread_reads_live_memory && GSConfig.UseHardwareRenderer())
 		{
-			Console.Warning("GS: pipelined mode is unsupported with EE-thread reads of live GS memory — running lockstep.");
+			// Without a front object nothing produces records, so the renderer parses and draws on
+			// this thread exactly as with multi-threading off.
+			g_gs_renderer->StopBackThread();
+			Console.Warning("GS: back thread off, not pipelined (EE-thread reads of live GS memory).");
 		}
 		else
 		{
@@ -345,11 +445,13 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 
 static void CloseGSRenderer()
 {
-	GSTextureReplacements::Shutdown();
-
 	// The front must go first: its destructor drains the shared channel, and
-	// the back object owns that channel and the pooled arrays.
+	// the back object owns that channel and the pooled arrays. It also has to
+	// precede the texture-replacement shutdown, which frees replacement textures
+	// and clears the maps the back's texture cache reads while it draws.
 	g_gs_front.reset();
+
+	GSTextureReplacements::Shutdown();
 
 	if (g_gs_renderer)
 	{
@@ -402,16 +504,6 @@ bool GSreopen(bool recreate_device, bool recreate_renderer, GSRendererType new_r
 	else if (GSConfig.UserHacks_ReadTCOnClose)
 	{
 		g_gs_renderer->ReadbackTextureCache();
-	}
-
-	std::string capture_filename;
-	GSVector2i capture_size;
-	if (GSCapture::IsCapturing())
-	{
-		capture_filename = GSCapture::GetNextCaptureFileName();
-		capture_size = GSCapture::GetSize();
-		Console.Warning(fmt::format("Restarting video capture to {}.", capture_filename));
-		g_gs_renderer->EndCapture();
 	}
 
 	u8* basemem = g_gs_renderer->GetRegsMem();
@@ -467,9 +559,6 @@ bool GSreopen(bool recreate_device, bool recreate_renderer, GSRendererType new_r
 
 	if (recreate_renderer)
 	{
-#ifdef __ANDROID__
-		ApplyAndroidGameDBOverrides();
-#endif
 		if (!OpenGSRenderer(new_renderer, basemem))
 		{
 			Console.Error("(GSreopen) Failed to create new renderer");
@@ -483,10 +572,34 @@ bool GSreopen(bool recreate_device, bool recreate_renderer, GSRendererType new_r
 		}
 	}
 
-	if (!capture_filename.empty())
-		g_gs_renderer->BeginCapture(std::move(capture_filename), capture_size);
-
 	return true;
+}
+
+u32 GSClearShaderCacheOnGSThread()
+{
+	// Stops the pipeline precompile and replaces the pipeline cache the back thread compiles
+	// against.
+	GSDrainBackQueue();
+
+	if (g_gs_device)
+		g_gs_device->PrepareShaderCacheClear();
+	const u32 removed = GSCacheFile::DeleteAll(EmuFolders::Cache);
+	INFO_LOG("GS: shader cache cleared ({} files)", removed);
+	return removed;
+}
+
+void GSClearShaderCache(std::function<void(u32)> done)
+{
+	auto work = [done = std::move(done)]() {
+		const u32 removed = GSClearShaderCacheOnGSThread();
+		if (done)
+			done(removed);
+	};
+
+	if (MTGS::IsOpen())
+		MTGS::RunOnGSThread(std::move(work));
+	else
+		work();
 }
 
 bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* basemem,
@@ -500,9 +613,6 @@ bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* b
 	bool res = OpenGSDevice(renderer, true, false, vsync_mode, allow_present_throttle);
 	if (res)
 	{
-#ifdef __ANDROID__
-		ApplyAndroidGameDBOverrides();
-#endif
 		res = OpenGSRenderer(renderer, basemem);
 		if (!res)
 			CloseGSDevice(true);
@@ -522,9 +632,6 @@ bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* b
 
 void GSclose()
 {
-	if (GSCapture::IsCapturing())
-		GSCapture::EndCapture();
-
 	CloseGSRenderer();
 	CloseGSDevice(true);
 	Host::ReleaseRenderWindow();
@@ -532,23 +639,16 @@ void GSclose()
 
 void GSreset(bool hardware_reset)
 {
-	// Front first: its Reset flushes pending buffered draws into records; the
-	// back's Reset then drains (executing them, like serial pre-reset draws)
-	// before resetting memory/TC.
+	// Front first: its Reset flushes pending buffered draws into records. They
+	// must finish before the back's Reset runs, because GSRendererHW::Reset
+	// reads back and removes every texture-cache entry and GSRenderer::Reset
+	// clears the current display texture before GSState::Reset drains.
 	if (g_gs_front)
-		g_gs_front->Reset(hardware_reset);
-	g_gs_renderer->Reset(hardware_reset);
-
-	// Restart video capture if it's been started.
-	// Otherwise we get a buildup of audio frames from the CPU thread.
-	if (hardware_reset && GSCapture::IsCapturing())
 	{
-		std::string next_filename = GSCapture::GetNextCaptureFileName();
-		const GSVector2i size = GSCapture::GetSize();
-		Console.Warning(fmt::format("Restarting video capture to {}.", next_filename));
-		g_gs_renderer->EndCapture();
-		g_gs_renderer->BeginCapture(std::move(next_filename), size);
+		g_gs_front->Reset(hardware_reset);
+		g_gs_renderer->DrainBackQueue();
 	}
+	g_gs_renderer->Reset(hardware_reset);
 }
 
 void GSgifSoftReset(u32 mask)
@@ -691,13 +791,10 @@ int GSfreeze(FreezeAction mode, freezeData* data)
 	{
 		// Since Defrost doesn't do a hardware reset (since it would be clearing
 		// local memory just before it's overwritten), we have to manually wipe
-		// out the current textures.
+		// out the current textures. Queued draws first: the back thread may be
+		// mid-draw on the device.
+		g_gs_renderer->DrainBackQueue();
 		g_gs_device->ClearCurrent();
-
-		// Dump audio frames in video capture if it's been started, otherwise we get
-		// a buildup of audio frames from the CPU thread.
-		if (GSCapture::IsCapturing())
-			GSCapture::Flush();
 
 		return GSParseTarget()->Defrost(data);
 	}
@@ -722,20 +819,6 @@ bool GSIsDumpRecording()
 bool GSHasFrontParser()
 {
 	return static_cast<bool>(g_gs_front);
-}
-
-bool GSBeginCapture(std::string filename)
-{
-	if (g_gs_renderer)
-		return g_gs_renderer->BeginCapture(std::move(filename));
-	else
-		return false;
-}
-
-void GSEndCapture()
-{
-	if (g_gs_renderer)
-		g_gs_renderer->EndCapture();
 }
 
 void GSPresentCurrentFrame()
@@ -766,16 +849,20 @@ void GSThrottlePresentation()
 	g_gs_device->ThrottlePresentation();
 }
 
-void GSGameChanged()
+void GSGameChanged(const std::string& serial, u32 crc)
 {
+	// Stops the pipeline precompile and closes the pipeline-key file the back thread records
+	// into, and resets hack state its draws use.
+	GSDrainBackQueue();
+
+	if (g_gs_device)
+		g_gs_device->SetGameIdentity(GSIsHardwareRenderer() ? serial : std::string(), crc);
+
 	if (GSIsHardwareRenderer())
 	{
 		GSHwHack::ResetState();
 		GSTextureReplacements::GameChanged();
 	}
-
-	if (!VMManager::HasValidVM() && GSCapture::IsCapturing())
-		GSCapture::EndCapture();
 }
 
 bool GSHasDisplayWindow()
@@ -1053,16 +1140,21 @@ void GSgetTitleStats(std::string& info)
 
 void GSUpdateConfig(const Pcsx2Config::GSOptions& new_config)
 {
+	// GV7-2: everything below mutates state the back thread may be reading
+	// mid-draw: GSConfig itself (read on every draw, and its strings are moved
+	// out just below), settings, ImGui font textures, TC purges. The front only
+	// parses on this (MTGS) thread, so a single drain up front quiesces the back
+	// thread for the whole apply.
+	if (g_gs_renderer)
+		g_gs_renderer->DrainBackQueue();
+
 	Pcsx2Config::GSOptions old_config(std::move(GSConfig));
 	GSConfig = new_config;
+	// The resolved back-thread setting belongs to the open renderer. A changed request reopens it
+	// below (BackThread is a restart option), which resolves again.
+	GSConfig.BackThreadResolved = old_config.BackThreadResolved;
 	if (!g_gs_renderer)
 		return;
-
-	// GV7-2: everything below mutates renderer/device state the back thread may
-	// be reading mid-draw (settings, ImGui font textures, TC purges). The front
-	// only parses on this (MTGS) thread, so a single drain up front quiesces the
-	// back thread for the whole apply.
-	g_gs_renderer->DrainBackQueue();
 
 	// Handle OSD scale changes by pushing a window resize through.
 	if (new_config.OsdScale != old_config.OsdScale)
@@ -1081,6 +1173,22 @@ void GSUpdateConfig(const Pcsx2Config::GSOptions& new_config)
 
 	// Ensure upscale multiplier is in range.
 	GSClampUpscaleMultiplier(GSConfig);
+
+	// GSConfig was just replaced wholesale, so the cap has to be re-derived; old_config carries
+	// the previous run's capped value and new_config carries none.
+	GSApplyCopyRoadBlendingCap(GSConfig);
+
+	// The download mode is an input to the back-thread decision, which only runs when a renderer
+	// opens. Reopen the renderer when a change would decide differently: Unsynchronized reads
+	// live GS memory from the EE thread, which a running back thread leaves behind.
+	if (GSConfig.HWDownloadMode != old_config.HWDownloadMode &&
+		GSDecideBackThreadFor(GSConfig, GSCurrentRenderer).on != GSConfig.BackThreadResolved)
+	{
+		if (!GSreopen(false, true, GSCurrentRenderer, &old_config))
+			pxFailRel("Failed to reopen GS renderer for a download mode change");
+
+		return;
+	}
 
 	// Options which aren't using the global struct yet, so we need to recreate all GS objects.
 	if (GSConfig.SWExtraThreads != old_config.SWExtraThreads ||
@@ -1153,8 +1261,10 @@ void GSUpdateConfig(const Pcsx2Config::GSOptions& new_config)
 
 	// clear the hash texture cache since we might have replacements now
 	// also clear it when dumping changes, since we want to dump everything being used
+	// and when upscaling changes, so textures revert to native or are upscaled with the new mode
 	if (GSConfig.LoadTextureReplacements != old_config.LoadTextureReplacements ||
-		GSConfig.DumpReplaceableTextures != old_config.DumpReplaceableTextures)
+		GSConfig.DumpReplaceableTextures != old_config.DumpReplaceableTextures ||
+		GSConfig.TextureUpscale != old_config.TextureUpscale)
 	{
 		g_gs_renderer->PurgeTextureCache(true, false, true);
 	}
@@ -1481,7 +1591,7 @@ static bool HasConfiguredOSD()
 		   EmuConfig.GS.OsdShowGPU || EmuConfig.GS.OsdShowGPUDebug || EmuConfig.GS.OsdShowIndicators ||
 		   EmuConfig.GS.OsdShowFrameTimes || EmuConfig.GS.OsdShowHardwareInfo || EmuConfig.GS.OsdShowVersion ||
 		   EmuConfig.GS.OsdShowSettings || EmuConfig.GS.OsdshowPatches || EmuConfig.GS.OsdShowInputs ||
-		   EmuConfig.GS.OsdShowInputRec || EmuConfig.GS.OsdShowVideoCapture || EmuConfig.GS.OsdShowTextureReplacements;
+		   EmuConfig.GS.OsdShowInputRec || EmuConfig.GS.OsdShowTextureReplacements;
 }
 
 static void SetForcedSimpleOSD(bool enabled)
@@ -1510,7 +1620,6 @@ static void HotkeyToggleOSD()
 	GSConfig.OsdshowPatches ^= EmuConfig.GS.OsdshowPatches;
 	GSConfig.OsdShowInputs ^= EmuConfig.GS.OsdShowInputs;
 	GSConfig.OsdShowInputRec ^= EmuConfig.GS.OsdShowInputRec;
-	GSConfig.OsdShowVideoCapture ^= EmuConfig.GS.OsdShowVideoCapture;
 	GSConfig.OsdShowTextureReplacements ^= EmuConfig.GS.OsdShowTextureReplacements;
 
 	GSConfig.OsdMessagesPos =
@@ -1527,26 +1636,6 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 			MTGS::RunOnGSThread([]() { GSQueueSnapshot(std::string(), 0); });
 		}
 	}},
-	{"ToggleVideoCapture", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Toggle Video Capture"),
-		[](s32 pressed) {
-			if (!pressed)
-			{
-				if (GSCapture::IsCapturing())
-				{
-					MTGS::RunOnGSThread([]() { g_gs_renderer->EndCapture(); });
-					MTGS::WaitGS(false, false, false);
-					return;
-				}
-
-				MTGS::RunOnGSThread([]() {
-					std::string filename(fmt::format("{}.{}", GSGetBaseVideoFilename(), GSConfig.CaptureContainer));
-					g_gs_renderer->BeginCapture(std::move(filename));
-				});
-
-				// Sync GS thread. We want to start adding audio at the same time as video.
-				MTGS::WaitGS(false, false, false);
-			}
-		}},
 	{"GSDumpSingleFrame", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Save Single Frame GS Dump"),
 		[](s32 pressed) {
 			if (!pressed)
@@ -1687,7 +1776,11 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 					Host::OSD_QUICK_DURATION);
 
 				EmuConfig.GS.AccurateBlendingUnit = new_blend_mode;
-				MTGS::RunOnGSThread([new_blend_mode]() { GSConfig.AccurateBlendingUnit = new_blend_mode; });
+				MTGS::RunOnGSThread([new_blend_mode]() {
+					// Read by every queued draw; switch between draws, not under them.
+					GSDrainBackQueue();
+					GSConfig.AccurateBlendingUnit = new_blend_mode;
+				});
 			}},
 	{"ToggleTextureDumping", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Toggle Texture Dumping"),
 		[](s32 pressed) {

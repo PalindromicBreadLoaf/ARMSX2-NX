@@ -176,6 +176,71 @@ void armGetMemOperandInRegister(const vixl::aarch64::Register& addr_reg,
 
 void armLoadConstant128(const vixl::aarch64::VRegister& reg, const void* ptr);
 
+// One-instruction whole-vector shuffles of a single source: entry `lane[i]` is
+// the source lane that lands in result lane i. `kind` picks the instruction
+// (copy, element broadcast, doubleword broadcast, rotate) and `arg` is the
+// lane, doubleword or rotate distance it takes.
+struct ArmLaneGatherBase
+{
+	u8 lane[4];
+	u8 kind;
+	u8 arg;
+};
+static constexpr ArmLaneGatherBase armLaneGatherBases[] = {
+	{{0, 1, 2, 3}, 0, 0},
+	{{0, 0, 0, 0}, 1, 0},
+	{{1, 1, 1, 1}, 1, 1},
+	{{2, 2, 2, 2}, 1, 2},
+	{{3, 3, 3, 3}, 1, 3},
+	{{0, 1, 0, 1}, 2, 0},
+	{{2, 3, 2, 3}, 2, 1},
+	{{1, 2, 3, 0}, 3, 1},
+	{{2, 3, 0, 1}, 3, 2},
+	{{3, 0, 1, 2}, 3, 3},
+};
+
+// dst = { src[lane[0]], src[lane[1]], src[lane[2]], src[lane[3]] }, four 32-bit
+// lanes gathered from one source. `src` is left untouched and must not be
+// `dst`. Returns the number of instructions emitted.
+//
+// Armv8 has no single-instruction arbitrary lane gather short of TBL, and TBL
+// wants its index vector in a register. It does have the shuffles above, any of
+// which can open the sequence; each lane one of them leaves wrong then costs an
+// element insert reading `src`, so the opening to take is the one that gets the
+// most lanes right. The plain copy is among them, which is the bound: this is
+// never longer than a copy plus an insert per lane that moves.
+__fi static int armEmitLaneGather32(const vixl::aarch64::VRegister& dst,
+	const vixl::aarch64::VRegister& src, const int lane[4])
+{
+	const ArmLaneGatherBase* base = nullptr;
+	int wrong = 5;
+	for (const ArmLaneGatherBase& b : armLaneGatherBases)
+	{
+		int n = 0;
+		for (int i = 0; i < 4; i++)
+			n += (b.lane[i] != lane[i]);
+		if (n < wrong)
+		{
+			base = &b;
+			wrong = n;
+		}
+	}
+
+	switch (base->kind)
+	{
+		case 0: armAsm->Mov(dst.V16B(), src.V16B()); break;
+		case 1: armAsm->Dup(dst.V4S(), src.V4S(), base->arg); break;
+		case 2: armAsm->Dup(dst.V2D(), src.V2D(), base->arg); break;
+		default: armAsm->Ext(dst.V16B(), src.V16B(), src.V16B(), 4 * base->arg); break;
+	}
+	for (int i = 0; i < 4; i++)
+	{
+		if (base->lane[i] != lane[i])
+			armAsm->Ins(dst.V4S(), i, src.V4S(), lane[i]);
+	}
+	return 1 + wrong;
+}
+
 // Per-lane weight for armEmitPackSignZeroBits' combined weight vector.
 //
 // Lane `lane` contributes its zero bit at result bit `bit` and its sign bit at
@@ -185,15 +250,20 @@ void armLoadConstant128(const vixl::aarch64::VRegister& reg, const void* ptr);
 // mask (x86's AND_XYZW) costs nothing; `shift` likewise absorbs x86's
 // single-scalar SHIFT_XYZW rotate. Both are emit-time constants.
 //
+// `withUnderflow` and `withOverflow` add the MAC U and O nibbles at bit + 8 and
+// bit + 12, for the callers that pass armEmitPackSignZeroBits a third or fourth
+// predicate.
+//
 // The caller must keep `bit + shift <= 3` so the zero half stays inside the
 // low nibble — see the SLI note in armEmitPackSignZeroBits.
-static constexpr u32 armPackLaneWeight(int lane, u32 keepMask, bool reverse, int shift)
+static constexpr u32 armPackLaneWeight(int lane, u32 keepMask, bool reverse, int shift,
+	bool withUnderflow = false, bool withOverflow = false)
 {
 	const int bit = reverse ? (3 - lane) : lane;
 	if (!(keepMask & (1u << bit)))
 		return 0;
 	const u32 w = 1u << (bit + shift);
-	return w | (w << 4);
+	return w | (w << 4) | (withUnderflow ? (w << 8) : 0) | (withOverflow ? (w << 12) : 0);
 }
 
 // Pack the sign and zero predicates of a 4-lane float vector into one GPR as
@@ -217,16 +287,34 @@ static constexpr u32 armPackLaneWeight(int lane, u32 keepMask, bool reverse, int
 // callers choose their cheapest route to it (a pinned-base Ldr in microVU, a
 // literal in the EE's COP2 macro path).
 //
-// Emits 6 insns + the weight load.
+// `vExactZero`, when given, is a third temporary holding all-ones per lane
+// where a zero result is an exact zero rather than a flushed underflow; it is
+// turned into the U predicate here and inserted at nibble 2. `vOverflow` is the
+// same for the O nibble, and is read rather than clobbered. Weights for either
+// must come from armPackLaneWeight with the matching flag set.
+//
+// Each SLI keeps the destination bits below its shift, so the three inserts run
+// in ascending order — 4, 8, 12 — and a skipped one leaves its nibble holding
+// whatever the previous insert shifted through. The weight vector clears that.
+//
+// Emits 6 insns + the weight load, 8 with vExactZero, 9 with vOverflow.
 template <typename LoadWeightsFn>
 __fi static void armEmitPackSignZeroBits(const vixl::aarch64::Register& dst,
 	const vixl::aarch64::VRegister& src, const vixl::aarch64::VRegister& vSign,
 	const vixl::aarch64::VRegister& vZero, const vixl::aarch64::VRegister& weights,
-	LoadWeightsFn&& load_weights)
+	LoadWeightsFn&& load_weights,
+	const vixl::aarch64::VRegister& vExactZero = vixl::aarch64::NoVReg,
+	const vixl::aarch64::VRegister& vOverflow = vixl::aarch64::NoVReg)
 {
 	armAsm->Cmlt(vSign.V4S(), src.V4S(), 0);    // all-1s where negative
 	armAsm->Fcmeq(vZero.V4S(), src.V4S(), 0.0); // all-1s where zero
+	if (vExactZero.IsValid())
+		armAsm->Bic(vExactZero.V16B(), vZero.V16B(), vExactZero.V16B()); // zero, not exactly
 	armAsm->Sli(vZero.V4S(), vSign.V4S(), 4);   // [31:4] = sign, [3:0] = zero
+	if (vExactZero.IsValid())
+		armAsm->Sli(vZero.V4S(), vExactZero.V4S(), 8); // [31:8] = underflow
+	if (vOverflow.IsValid())
+		armAsm->Sli(vZero.V4S(), vOverflow.V4S(), 12); // [31:12] = overflow
 	load_weights(weights);
 	armAsm->And(vZero.V16B(), vZero.V16B(), weights.V16B());
 	armAsm->Addv(vixl::aarch64::VRegister(vZero.GetCode(), 32), vZero.V4S());

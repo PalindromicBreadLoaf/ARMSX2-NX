@@ -39,7 +39,7 @@ namespace GameDatabaseSchema
 		Normal,
 		Extra,
 		Full,
-		Exact, // eeClampMode only; the VUs stop at Extra+Preserve Sign.
+		Exact,
 		Count
 	};
 
@@ -63,6 +63,7 @@ namespace GameDatabaseSchema
 		NativePaletteDraw,
 		EstimateTextureRegion,
 		DrawBuffering,
+		RewriteLargeSTCoords,
 		PCRTCOffsets,
 		PCRTCOverscan,
 		CoalesceRenderPasses,
@@ -83,6 +84,9 @@ namespace GameDatabaseSchema
 		GPUPaletteConversion,
 		MinimumBlendingLevel,
 		MaximumBlendingLevel,
+		// The blending-level ceiling that only applies while the device has to read the render
+		// target from a per-draw copy of it. See GS/Renderers/Common/GSCopyRoadBlendingPolicy.h.
+		CopyRoadMaximumBlendingLevel,
 		RecommendedBlendingLevel,
 		RecommendedAccurateAlphaTest,
 		RecommendedHWAA1,
@@ -125,6 +129,15 @@ namespace GameDatabaseSchema
 		std::unordered_map<u32, std::string> patches;
 		std::vector<Patch::DynamicPatch> dynaPatches;
 
+		// Arcade (Namco System 246/256) entries only: the boot program, the media type (CD, DVD or HDD)
+		// and the JVS input kind the game expects (PCSX2x6).
+		struct ArcadeInfo
+		{
+			std::string bootprog;
+			std::string media;
+			std::string input;
+		} arcade;
+
 		// Returns the list of memory card serials as a `/` delimited string
 		std::string memcardFiltersAsString() const;
 		const std::string* findPatch(u32 crc) const;
@@ -142,6 +155,25 @@ namespace GameDatabaseSchema
 
 		/// Returns true if the current config value for the specified hw fix id matches the value.
 		static bool configMatchesHWFix(const Pcsx2Config::GSOptions& config, GSHWFixId id, int value);
+
+		/// One setting this entry writes, in the terms a settings screen needs to show it and
+		/// to let a player take it back: the name the log uses, the value, and the per-game
+		/// keys whose presence makes applyGameFixes()/applyGSHardwareFixes() skip it.
+		struct ClaimableSetting
+		{
+			std::string name;
+			int value;
+			/// Skipped wholesale while automatic game fixes are off.
+			bool core;
+			/// Skipped wholesale while manual hardware fixes are on.
+			bool user_hack;
+			std::vector<std::pair<const char*, const char*>> keys; ///< section, key
+		};
+
+		/// Every setting this entry writes that a per-game key can claim, in the order the
+		/// apply functions visit them. Leaves out the renderer routine selectors, which no
+		/// setting can claim, and the recommendations, which only raise a warning.
+		std::vector<ClaimableSetting> claimableSettings() const;
 	};
 }; // namespace GameDatabaseSchema
 
@@ -149,6 +181,10 @@ namespace GameDatabase
 {
 	void ensureLoaded();
 	const GameDatabaseSchema::GameEntry* findGame(const std::string_view serial);
+
+	/// Every Namco System 246/256 arcade game on record, by game ID (NM and five digits, upper case),
+	/// in ID order. For frontends that offer them for import.
+	std::vector<std::pair<std::string, const GameDatabaseSchema::GameEntry*>> findArcadeGames();
 
 	struct TrackHash
 	{

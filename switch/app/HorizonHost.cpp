@@ -316,14 +316,6 @@ void Host::OnSaveStateSaved(const std::string_view filename)
 {
 }
 
-void Host::OnCaptureStarted(const std::string& filename)
-{
-}
-
-void Host::OnCaptureStopped()
-{
-}
-
 void Host::PumpMessagesOnCPUThread()
 {
 	for (;;)

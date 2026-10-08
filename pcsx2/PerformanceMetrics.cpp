@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #include "common/Console.h"
@@ -13,7 +14,6 @@
 #include "PerformanceMetrics.h"
 
 #include "GS.h"
-#include "GS/GSCapture.h"
 #include "MTGS.h"
 #include "MTVU.h"
 #include "VMManager.h"
@@ -31,6 +31,7 @@
 static const float UPDATE_INTERVAL = 0.5f;
 
 static float s_fps = 0.0f;
+static PerformanceMetrics::AverageFPS s_avg_vps;
 static float s_internal_fps = 0.0f;
 static float s_minimum_frame_time = 0.0f;
 static float s_minimum_frame_time_accumulator = 0.0f;
@@ -65,7 +66,6 @@ static u64 s_last_cpu_time = 0;
 static u64 s_last_gs_time = 0;
 static u64 s_last_gs_back_time = 0;
 static u64 s_last_vu_time = 0;
-static u64 s_last_capture_time = 0;
 static u64 s_last_ticks = 0;
 
 // The GS back thread registers itself from its own entry point and is cleared from the MTGS
@@ -132,7 +132,8 @@ static bool s_adpf_create_failed = false;
 static bool s_adpf_report_warned = false;
 static bool s_adpf_paused = false; // reporting suspended (unlimited/vsync/interrupted), edge-logged
 static int64_t s_adpf_target_ns = 0;
-static Common::Timer::Value s_adpf_work_start = 0; // start of the current active-work period (0 = none)
+static Common::Timer::Value s_adpf_work_start = 0; // start of the current active-work segment (0 = none)
+static int64_t s_adpf_work_accum_ns = 0; // this frame's segments closed so far; -1 = frame incomplete, skip it
 
 // The frame deadline in ns: emulated refresh scaled by the limiter's target speed, so turbo /
 // slow-motion move the deadline correctly. Returns 0 when there is no finite deadline (Unlimited,
@@ -193,8 +194,6 @@ static float s_gs_back_thread_usage = 0.0f;
 static float s_gs_back_thread_time = 0.0f;
 static float s_vu_thread_usage = 0.0f;
 static float s_vu_thread_time = 0.0f;
-static float s_capture_thread_usage = 0.0f;
-static float s_capture_thread_time = 0.0f;
 
 static PerformanceMetrics::FrameTimeHistory s_frame_time_history;
 static u32 s_frame_time_history_pos = 0;
@@ -223,6 +222,7 @@ void PerformanceMetrics::Clear()
 	Reset();
 
 	s_fps = 0.0f;
+	s_avg_vps.ClearStats();
 	s_internal_fps = 0.0f;
 	s_minimum_frame_time = 0.0f;
 	s_average_frame_time = 0.0f;
@@ -237,8 +237,6 @@ void PerformanceMetrics::Clear()
 	s_gs_back_thread_time = 0.0f;
 	s_vu_thread_usage = 0.0f;
 	s_vu_thread_time = 0.0f;
-	s_capture_thread_usage = 0.0f;
-	s_capture_thread_time = 0.0f;
 
 	s_average_gpu_time = 0.0f;
 	s_last_gpu_time = 0.0f;
@@ -285,7 +283,6 @@ void PerformanceMetrics::Reset()
 	SampleGSBackThreadCPUTime(); // rebases the running total; the delta is deliberately dropped
 	s_last_vu_time = THREAD_VU1 ? vu1Thread.GetThreadHandle().GetCPUTime() : 0;
 	s_last_ticks = GetCPUTicks();
-	s_last_capture_time = GSCapture::IsCapturing() ? GSCapture::GetEncoderThreadHandle().GetCPUTime() : 0;
 
 	for (GSSWThreadStats& stat : s_gs_sw_threads)
 		stat.last_cpu_time = stat.handle.GetCPUTime();
@@ -320,6 +317,7 @@ void PerformanceMetrics::Update(bool gs_register_write, bool fb_blit, bool is_sk
 	s_average_frame_time = std::exchange(s_average_frame_time_accumulator, 0.0f) / static_cast<float>(s_unskipped_frames_since_last_update);
 	s_maximum_frame_time = std::exchange(s_maximum_frame_time_accumulator, 0.0f);
 	s_fps = static_cast<float>(s_frames_since_last_update) / time;
+	s_avg_vps.UpdateAvgFPS(s_fps);
 	s_average_gpu_time = s_accumulated_gpu_time / static_cast<float>(s_unskipped_frames_since_last_update);
 	s_average_gpu_vs_invocations = static_cast<double>(s_accumulated_gpu_vs_invocations) / static_cast<double>(s_unskipped_frames_since_last_update);
 	s_average_gpu_ps_invocations = static_cast<double>(s_accumulated_gpu_ps_invocations) / static_cast<double>(s_unskipped_frames_since_last_update);
@@ -362,27 +360,22 @@ void PerformanceMetrics::Update(bool gs_register_write, bool fb_blit, bool is_sk
 	const u64 gs_time = MTGS::GetThreadHandle().GetCPUTime();
 	const u64 gs_back_delta = SampleGSBackThreadCPUTime();
 	const u64 vu_time = THREAD_VU1 ? vu1Thread.GetThreadHandle().GetCPUTime() : 0;
-	const u64 capture_time = GSCapture::IsCapturing() ? GSCapture::GetEncoderThreadHandle().GetCPUTime() : 0;
 
 	const u64 cpu_delta = cpu_time - s_last_cpu_time;
 	const u64 gs_delta = gs_time - s_last_gs_time;
 	const u64 vu_delta = vu_time - s_last_vu_time;
-	const u64 capture_delta = capture_time - s_last_capture_time;
 	s_last_cpu_time = cpu_time;
 	s_last_gs_time = gs_time;
 	s_last_vu_time = vu_time;
-	s_last_capture_time = capture_time;
 
 	s_cpu_thread_usage = static_cast<double>(cpu_delta) * pct_divider;
 	s_gs_thread_usage = static_cast<double>(gs_delta) * pct_divider;
 	s_gs_back_thread_usage = static_cast<double>(gs_back_delta) * pct_divider;
 	s_vu_thread_usage = static_cast<double>(vu_delta) * pct_divider;
-	s_capture_thread_usage = static_cast<double>(capture_delta) * pct_divider;
 	s_cpu_thread_time = static_cast<double>(cpu_delta) * time_divider;
 	s_gs_thread_time = static_cast<double>(gs_delta) * time_divider;
 	s_gs_back_thread_time = static_cast<double>(gs_back_delta) * time_divider;
 	s_vu_thread_time = static_cast<double>(vu_delta) * time_divider;
-	s_capture_thread_time = static_cast<double>(capture_delta) * time_divider;
 
 	for (GSSWThreadStats& thread : s_gs_sw_threads)
 	{
@@ -398,7 +391,7 @@ void PerformanceMetrics::Update(bool gs_register_write, bool fb_blit, bool is_sk
 	s_log_accum_frames += s_frames_since_last_update;
 	if (s_log_accum_time >= LOG_INTERVAL)
 	{
-		// The back thread only exists under GSBackThreadMode >= Lockstep, so the field is
+		// The back thread only exists with GS multi-threading on, so the field is
 		// omitted rather than logged as a permanent 0% in the default configuration.
 		char gs_back[32] = {};
 		if (HasGSBackThread())
@@ -485,10 +478,11 @@ void PerformanceMetrics::AdpfShutdown()
 	s_adpf_tids.clear();
 	s_adpf_create_failed = false;
 	s_adpf_work_start = 0;
+	s_adpf_work_accum_ns = 0;
 #endif
 }
 
-void PerformanceMetrics::AdpfOnFrameWorkComplete()
+void PerformanceMetrics::AdpfEndWorkSegment(bool frame_end)
 {
 #if defined(__ANDROID__)
 	// Sampled at Throttle() entry — the instant the frame's active CPU work finished, before the
@@ -502,14 +496,32 @@ void PerformanceMetrics::AdpfOnFrameWorkComplete()
 		return;
 	AdpfEnsureSession();
 	if (!s_adpf_session || s_adpf_work_start == 0)
+	{
+		// No open segment (first frame, or just resumed from a pause). If this is the frame's
+		// first wait, its second segment alone would under-report the frame, so skip it.
+		s_adpf_work_accum_ns = frame_end ? 0 : -1;
 		return;
+	}
+	const int64_t segment_ns = static_cast<int64_t>(Common::Timer::ConvertValueToSeconds(now - s_adpf_work_start) * 1.0e9);
+	if (!frame_end)
+	{
+		if (s_adpf_work_accum_ns >= 0)
+			s_adpf_work_accum_ns += segment_ns;
+		return;
+	}
+	if (s_adpf_work_accum_ns < 0)
+	{
+		s_adpf_work_accum_ns = 0;
+		return;
+	}
+	const int64_t work_ns = s_adpf_work_accum_ns + segment_ns;
+	s_adpf_work_accum_ns = 0;
 	const int64_t target = AdpfTargetNs();
 	if (target > 0 && target != s_adpf_target_ns)
 	{
 		s_adpf.updateTarget(s_adpf_session, target);
 		s_adpf_target_ns = target;
 	}
-	const int64_t work_ns = static_cast<int64_t>(Common::Timer::ConvertValueToSeconds(now - s_adpf_work_start) * 1.0e9);
 	// Drop absurd outliers (savestate load, renderer recreation, debugger stall): a period several
 	// times the deadline is not a real frame and would spam a spurious max-frequency demand.
 	if (work_ns <= 0 || (s_adpf_target_ns > 0 && work_ns > s_adpf_target_ns * 4))
@@ -552,6 +564,7 @@ void PerformanceMetrics::AdpfPauseFrameWork()
 		s_adpf_paused = true;
 	}
 	s_adpf_work_start = 0;
+	s_adpf_work_accum_ns = 0;
 #endif
 }
 
@@ -603,6 +616,11 @@ bool PerformanceMetrics::IsInternalFPSValid()
 float PerformanceMetrics::GetFPS()
 {
 	return s_fps;
+}
+
+float PerformanceMetrics::GetAvgVPS()
+{
+	return s_avg_vps.GetAvgFPS();
 }
 
 float PerformanceMetrics::GetInternalFPS()
@@ -674,16 +692,6 @@ float PerformanceMetrics::GetVUThreadUsage()
 float PerformanceMetrics::GetVUThreadAverageTime()
 {
 	return s_vu_thread_time;
-}
-
-float PerformanceMetrics::GetCaptureThreadUsage()
-{
-	return s_capture_thread_usage;
-}
-
-float PerformanceMetrics::GetCaptureThreadAverageTime()
-{
-	return s_capture_thread_time;
 }
 
 u32 PerformanceMetrics::GetGSSWThreadCount()

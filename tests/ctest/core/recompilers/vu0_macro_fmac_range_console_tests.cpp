@@ -35,6 +35,17 @@
 // writing both engines are wrong here in overlapping ways, so a differential
 // between them would report agreement on rows where they are agreeing about
 // the wrong number.
+//
+// The recompiler's column is scored at vuClampMode 4, the top of the ladder:
+// the adder's guard mask, which moves nothing here, the multiply's MAC U, which
+// moves eight columns across four rows, and MAC O for MUL, ADD and SUB, which
+// moves fourteen across seven. What the O model does not reach is MADD and
+// MSUB, whose accumulate reads a product the host has already saturated -- rows
+// 28-31 and 51-53 -- and the value column, where an exponent-255 operand is a
+// NaN to every host op the arithmetic runs through.
+//
+// All three sit at vuClampMode 4. NoModeBelowFourCarriesTheModels is the same
+// table at every mode under it.
 
 #include "harness/EeRecTestHarness.h"
 #include "harness/MipsEncode.h"
@@ -61,17 +72,17 @@ namespace {
 constexpr u32 kFs = 1, kFt = 2, kAcc = 3, kFd = 4, kZero = 7;
 constexpr u32 kMaskXyzw = 0xF;
 
-u32 Encode(const VuSatCase& c)
+u32 Encode(const VuSatCase& c, u32 fd = kFd)
 {
 	switch (c.op)
 	{
-		case VS_ADD:  return VADD_C2 (kMaskXyzw, kFd, kFs, kFt);
-		case VS_SUB:  return VSUB_C2 (kMaskXyzw, kFd, kFs, kFt);
-		case VS_MUL:  return VMUL_C2 (kMaskXyzw, kFd, kFs, kFt);
-		case VS_MADD: return VMADD_C2(kMaskXyzw, kFd, kFs, kFt);
-		case VS_MSUB: return VMSUB_C2(kMaskXyzw, kFd, kFs, kFt);
-		case VS_MAX:  return VMAX_C2 (kMaskXyzw, kFd, kFs, kFt);
-		case VS_MINI: return VMINI_C2(kMaskXyzw, kFd, kFs, kFt);
+		case VS_ADD:  return VADD_C2 (kMaskXyzw, fd, kFs, kFt);
+		case VS_SUB:  return VSUB_C2 (kMaskXyzw, fd, kFs, kFt);
+		case VS_MUL:  return VMUL_C2 (kMaskXyzw, fd, kFs, kFt);
+		case VS_MADD: return VMADD_C2(kMaskXyzw, fd, kFs, kFt);
+		case VS_MSUB: return VMSUB_C2(kMaskXyzw, fd, kFs, kFt);
+		case VS_MAX:  return VMAX_C2 (kMaskXyzw, fd, kFs, kFt);
+		case VS_MINI: return VMINI_C2(kMaskXyzw, fd, kFs, kFt);
 		default:      return 0;
 	}
 }
@@ -86,9 +97,10 @@ struct Observed
 // Runs one row's VADDA/op pair and reads back one engine's answer. The ACC is
 // seeded through VADDA rather than written directly because that is what the
 // capture measured -- the seed's own flags are part of the status column.
-Observed RunCase(const VuSatCase& c, u32 word, bool jit)
+Observed RunCase(const VuSatCase& c, u32 word, bool jit, int clamp_mode, u32 fd = kFd)
 {
 	EeRecTestHarness h;
+	h.SetVu0ClampMode(clamp_mode);
 	h.EnableVu0Capture();
 	// Both engines are read here and each is scored against the console on its
 	// own, so Run()'s JIT-vs-interp auto-diff would fail on the very rows this
@@ -104,7 +116,7 @@ Observed RunCase(const VuSatCase& c, u32 word, bool jit)
 	h.Run();
 
 	Observed o{};
-	o.out = jit ? h.GetVu0VfBitsJit(kFd, 'x') : h.GetVu0VfBitsInterp(kFd, 'x');
+	o.out = jit ? h.GetVu0VfBitsJit(fd, 'x') : h.GetVu0VfBitsInterp(fd, 'x');
 	o.mac = (jit ? h.GetVu0ViJit(REG_MAC_FLAG) : h.GetVu0ViInterp(REG_MAC_FLAG)) & 0xFFFFu;
 	o.stat = (jit ? h.GetVu0ViJit(REG_STATUS_FLAG) : h.GetVu0ViInterp(REG_STATUS_FLAG)) & 0xFFFFu;
 	return o;
@@ -125,6 +137,11 @@ constexpr u8 kColBit[] = {VSB_VALUE, VSB_MAC, VSB_STAT};
 
 int PopCount(u8 v) { return (v & 1) + ((v >> 1) & 1) + ((v >> 2) & 1); }
 
+// The mode the tables below are scored at, and what the recompiler's column
+// comes to under it, where no exact model is emitted.
+constexpr int kVuSatScoredMode = 4;
+constexpr int kVuSatUnmodelledBadJit = 76;
+
 } // namespace
 
 // Asserts the columns this emulator DOES reproduce, and asserts that the ones
@@ -143,7 +160,7 @@ TEST(Vu0MacroFmacRangeConsole, FmacRangeMatchesConsole)
 		for (int jit = 0; jit < 2; ++jit)
 		{
 			const u8 known = jit ? c.bad_jit : c.bad_interp;
-			const u8 got = Misses(c, RunCase(c, word, jit != 0));
+			const u8 got = Misses(c, RunCase(c, word, jit != 0, kVuSatScoredMode));
 			(jit ? bad_jit : bad_interp) += PopCount(known);
 
 			for (int col = 0; col < 3; ++col)
@@ -183,8 +200,8 @@ TEST(Vu0MacroFmacRangeConsole, ControlsSeparate)
 	EXPECT_NE(a.mac, b.mac);
 	for (int jit = 0; jit < 2; ++jit)
 	{
-		const Observed oa = RunCase(a, Encode(a), jit != 0);
-		const Observed ob = RunCase(b, Encode(b), jit != 0);
+		const Observed oa = RunCase(a, Encode(a), jit != 0, kVuSatScoredMode);
+		const Observed ob = RunCase(b, Encode(b), jit != 0, kVuSatScoredMode);
 		SCOPED_TRACE(jit ? "jit" : "interp");
 		EXPECT_EQ(oa.out, a.out);
 		EXPECT_EQ(ob.out, b.out);
@@ -193,6 +210,72 @@ TEST(Vu0MacroFmacRangeConsole, ControlsSeparate)
 		EXPECT_NE(oa.out, ob.out);
 		EXPECT_NE(oa.mac, ob.mac);
 	}
+}
+
+// The other side of the gate. Four MUL rows here flush a product to a signed
+// zero, and only the multiply's U bit tells that apart from a product one of
+// whose operands was already zero -- which row 22 is, and which must keep
+// scoring clean at every mode. Below 4 the recompiler carries none of it, so
+// those four rows lose both flag columns, the rows MAC O and the ceiling carry
+// lose theirs, and nothing else may move.
+TEST(Vu0MacroFmacRangeConsole, NoModeBelowFourCarriesTheModels)
+{
+	for (int mode = 1; mode <= 3; ++mode)
+	{
+		SCOPED_TRACE(::testing::Message() << "vuClampMode " << mode);
+		int bad = 0;
+		for (int i = 0; i < kVuSatCaseCount; ++i)
+		{
+			const VuSatCase& c = kVuSatCases[i];
+			const u32 word = Encode(c);
+			ASSERT_NE(word, 0u) << "case " << i << ": no encoder for op " << int(c.op);
+			bad += PopCount(Misses(c, RunCase(c, word, true, mode)));
+		}
+		std::printf("vuClampMode %d: %d column misses\n", mode, bad);
+		EXPECT_EQ(bad, kVuSatUnmodelledBadJit);
+	}
+	EXPECT_GT(kVuSatUnmodelledBadJit, kVuSatBadJit)
+		<< "mode 4 has stopped carrying the models these rows are here for";
+}
+
+// The same rows with the destination on top of the first operand.
+// cop2ResultReg hands fd its own cache register on a full mask, so
+// `vsub.xyzw vf1, vf1, vf2` computes over the very register the saturated
+// word's sign is read from -- which is why cop2EmitGuardedAddSub copies it
+// aside first, and dropping that copy moves no other test in the tree.
+//
+// Nothing here is a console claim: the capture only ever ran fd == vf4, and the
+// VU reads both operands before it writes, so what this asserts is that the two
+// forms agree. Both engines are scored, so a change that moved them together
+// would still be visible.
+TEST(Vu0MacroFmacRangeConsole, AliasingTheFirstOperandChangesNothing)
+{
+	int saturated_negative = 0;
+	for (int i = 0; i < kVuSatCaseCount; ++i)
+	{
+		const VuSatCase& c = kVuSatCases[i];
+		const u32 plain = Encode(c);
+		const u32 alias = Encode(c, kFs);
+		ASSERT_NE(plain, 0u);
+
+		if ((c.mac & 0xF000u) && (c.out & 0x80000000u) && c.bad_jit == 0)
+			++saturated_negative;
+
+		for (int jit = 0; jit < 2; ++jit)
+		{
+			SCOPED_TRACE(::testing::Message()
+				<< "case " << i << " [" << (jit ? "jit" : "interp") << "]: " << c.what);
+			const Observed a = RunCase(c, plain, jit != 0, kVuSatScoredMode);
+			const Observed b = RunCase(c, alias, jit != 0, kVuSatScoredMode, kFs);
+			EXPECT_EQ(a.out, b.out);
+			EXPECT_EQ(a.mac, b.mac);
+			EXPECT_EQ(a.stat, b.stat);
+		}
+	}
+	// Rows whose result saturates with the sign set and that the recompiler
+	// already reproduces: without one of those the comparison above cannot see
+	// a sign taken from the wrong register.
+	EXPECT_GT(saturated_negative, 0);
 }
 
 // What passing looks like once the FMAC range model is right, and the source
@@ -208,7 +291,7 @@ TEST(Vu0MacroFmacRangeConsole, DISABLED_DumpConsoleComparison)
 		for (int jit = 0; jit < 2; ++jit)
 		{
 			const char* engine = jit ? "jit" : "interp";
-			const Observed o = RunCase(c, word, jit != 0);
+			const Observed o = RunCase(c, word, jit != 0, kVuSatScoredMode);
 			const u8 got = Misses(c, o);
 			for (int col = 0; col < 3; ++col)
 			{

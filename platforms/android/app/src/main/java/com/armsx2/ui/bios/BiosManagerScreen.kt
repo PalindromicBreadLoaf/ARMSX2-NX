@@ -264,12 +264,25 @@ private fun BiosRow(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = if (item.selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, if (item.selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+        // Every arcade BIOS is in use (each game starts with one it runs on), as plainly as the console one.
+        color = if (item.selected || item.arcade) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            1.dp,
+            if (item.selected || item.arcade) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+        ),
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(item.info.regionFlag, fontSize = 30.sp)
+                // An arcade board's BIOS shows the arcade mark (the ARMSX2 logo in red) in the flag's place.
+                if (item.arcade) {
+                    com.armsx2.ui.common.GlyphSizedImage(
+                        item.info.regionFlag, 30.sp,
+                        androidx.compose.ui.res.painterResource(com.armsx2.R.drawable.ic_arcade),
+                    )
+                } else {
+                    Text(item.info.regionFlag, fontSize = 30.sp)
+                }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(item.file.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -286,10 +299,17 @@ private fun BiosRow(
                     Spacer(Modifier.width(6.dp))
                     StatusChip(str("bios.thisGame.active"), Success)
                 }
+                // A Namco arcade board's BIOS: for arcade games, and only those.
+                if (item.arcade) {
+                    Spacer(Modifier.width(6.dp))
+                    StatusChip(str("bios.arcade.badge"), MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(6.dp))
+                    StatusChip(str("backend.driver.active"), Success)
+                }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 // Per-game BIOS: pin this BIOS to the loaded game, or revert it to global.
-                if (showGameAssign) {
+                if (showGameAssign && !item.arcade) {
                     if (perGameActive) {
                         TextButton(
                             onClick = onClearGame,
@@ -304,7 +324,7 @@ private fun BiosRow(
                     }
                     Spacer(Modifier.width(8.dp))
                 }
-                if (!item.selected) OutlinedButton(
+                if (!item.selected && !item.arcade) OutlinedButton(
                     onClick = onSelect,
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.controllerFocusable(

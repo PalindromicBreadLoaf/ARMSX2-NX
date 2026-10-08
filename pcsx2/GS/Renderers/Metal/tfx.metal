@@ -14,6 +14,7 @@ constant uint SHUFFLE_READWRITE = 3;
 constant bool HAS_FBFETCH           [[function_constant(GSMTLConstantIndex_FRAMEBUFFER_FETCH)]];
 constant bool DEPTH_FEEDBACK        [[function_constant(GSMTLConstantIndex_DEPTH_FEEDBACK)]];
 constant bool ROV_NEEDS_R32         [[function_constant(GSMTLConstantIndex_ROV_NEEDS_R32)]];
+constant bool BROKEN_SHADER_DEPTH   [[function_constant(GSMTLConstantIndex_BROKEN_SHADER_DEPTH)]];
 constant bool FST                   [[function_constant(GSMTLConstantIndex_FST)]];
 constant bool IIP                   [[function_constant(GSMTLConstantIndex_IIP)]];
 constant bool VS_POINT_SIZE         [[function_constant(GSMTLConstantIndex_VS_POINT_SIZE)]];
@@ -44,6 +45,8 @@ constant bool PS_SHUFFLE_ACROSS     [[function_constant(GSMTLConstantIndex_PS_SH
 constant bool PS_READ16_SRC         [[function_constant(GSMTLConstantIndex_PS_READ16_SRC)]];
 constant bool PS_WRITE_RG           [[function_constant(GSMTLConstantIndex_PS_WRITE_RG)]];
 constant bool PS_FBMASK             [[function_constant(GSMTLConstantIndex_PS_FBMASK)]];
+constant bool PS_QUANTIZE_COLOR     [[function_constant(GSMTLConstantIndex_PS_QUANTIZE_COLOR)]];
+constant bool PS_SUBSTITUTE_ALPHA   [[function_constant(GSMTLConstantIndex_PS_SUBSTITUTE_ALPHA)]];
 constant uint PS_BLEND_A            [[function_constant(GSMTLConstantIndex_PS_BLEND_A)]];
 constant uint PS_BLEND_B            [[function_constant(GSMTLConstantIndex_PS_BLEND_B)]];
 constant uint PS_BLEND_C            [[function_constant(GSMTLConstantIndex_PS_BLEND_C)]];
@@ -53,6 +56,7 @@ constant bool PS_A_MASKED           [[function_constant(GSMTLConstantIndex_PS_A_
 constant bool PS_COLCLIP_HW         [[function_constant(GSMTLConstantIndex_PS_COLCLIP_HW)]];
 constant bool PS_RTA_CORRECTION     [[function_constant(GSMTLConstantIndex_PS_RTA_CORRECTION)]];
 constant bool PS_RTA_SRC_CORRECTION [[function_constant(GSMTLConstantIndex_PS_RTA_SRC_CORRECTION)]];
+constant bool PS_REPLACEMENT_ALPHA_SNAP [[function_constant(GSMTLConstantIndex_PS_REPLACEMENT_ALPHA_SNAP)]];
 constant bool PS_COLCLIP            [[function_constant(GSMTLConstantIndex_PS_COLCLIP)]];
 constant uint PS_BLEND_MIX          [[function_constant(GSMTLConstantIndex_PS_BLEND_MIX)]];
 constant bool PS_ROUND_INV          [[function_constant(GSMTLConstantIndex_PS_ROUND_INV)]];
@@ -72,6 +76,7 @@ constant bool PS_TEX_IS_FB          [[function_constant(GSMTLConstantIndex_PS_TE
 constant bool PS_AUTOMATIC_LOD      [[function_constant(GSMTLConstantIndex_PS_AUTOMATIC_LOD)]];
 constant bool PS_MANUAL_LOD         [[function_constant(GSMTLConstantIndex_PS_MANUAL_LOD)]];
 constant bool PS_REGION_RECT        [[function_constant(GSMTLConstantIndex_PS_REGION_RECT)]];
+constant bool PS_NATIVE_TEXEL_GRID  [[function_constant(GSMTLConstantIndex_PS_NATIVE_TEXEL_GRID)]];
 constant uint PS_SCANMSK            [[function_constant(GSMTLConstantIndex_PS_SCANMSK)]];
 constant uint PS_AA1_RAW            [[function_constant(GSMTLConstantIndex_PS_AA1)]];
 constant bool PS_ABE                [[function_constant(GSMTLConstantIndex_PS_ABE)]];
@@ -247,6 +252,14 @@ static MainVSOut vs_main_run(thread const MainVSIn& v, constant GSMTLMainVSUnifo
 
 	if (VS_POINT_SIZE)
 		out.point_size = cb.point_size.x;
+
+	// Apple GPUs use slightly different algorithms to calculate the Z they send to the shader vs the Z they use in hardware.
+	// This breaks a lot of things (the most common is conservative depth rejecting pixels that should have depth equal to current depth but now don't).
+	// Work around by always routing depth through the shader, and never using hardware depth values.
+	// To allow us to continue to use [[depth(less)]] optimizations, add a bit in the VS and subtract it off in the FS,
+	// so that "equal" depth doesn't ever fail a hardware depth test.
+	if (BROKEN_SHADER_DEPTH)
+		out.p.z += exp_min32;
 
 	return out;
 }
@@ -1103,7 +1116,7 @@ struct PSMain
 		{
 			uint4 rt = uint4(fetch_raw_color() * 255.5f);
 			uint green = (rt.g >> cb.channel_shuffle.green_shift) & cb.channel_shuffle.green_mask;
-			uint blue  = (rt.b >> cb.channel_shuffle.blue_shift)  & cb.channel_shuffle.blue_mask;
+			uint blue  = (rt.b << cb.channel_shuffle.blue_shift)  & cb.channel_shuffle.blue_mask;
 			return float4(green | blue);
 		}
 	}
@@ -1169,7 +1182,13 @@ struct PSMain
 		// I think the issue is related to the rounding of texture coodinate. The linear (from fixed unit)
 		// interpolation could be slightly below the correct one.
 		
-		return trunc(t * 255.f + 0.05f);
+		t = trunc(t * 255.f + 0.05f);
+
+		// A pack texture's opaque alpha, which ASTC moves off 0x80 (GSReplacementAlphaSnap.h).
+		if (PS_REPLACEMENT_ALPHA_SNAP && abs(t.a - 128.f) <= 8.f)
+			t.a = 128.f;
+
+		return t;
 	}
 
 	float4 tfx(float4 T, float4 C)
@@ -1245,6 +1264,25 @@ struct PSMain
 			st_int = in.ti.zw;
 		}
 
+		if (PS_NATIVE_TEXEL_GRID)
+		{
+			// A sprite that MINIFIES a GS-memory texture under a nearest sampler reads the texel
+			// its NATIVE pixel read, not the one this device pixel's own sample point lands on.
+			// The console samples a sprite once per pixel, so at two source texels per native
+			// pixel it never displays the texels in between, and at 2x those unreachable texels
+			// land on every second device column. See GSNativeTexelGridPolicy.h for the whole rule.
+			//
+			// native_texel_grid.xy is the source step per NATIVE pixel in these same coordinates
+			// -- zero on an axis that does not minify, which makes that axis' term vanish -- and
+			// .z is the scale. The convention is the integer pixel index, not the fragment centre:
+			// a device pixel samples where native coordinate pixel/scale samples, and its owner
+			// native pixel sampled at the floor of that. Hence floor the coordinate first, and
+			// divide rather than multiply by a reciprocal, which can land a hair under an integer
+			// where the divide is exact.
+			float2 native_here = floor(in.p.xy) / cb.native_texel_grid.z;
+			st += cb.native_texel_grid.xy * (floor(native_here) - native_here);
+		}
+
 		float4 T;
 		if (PS_CHANNEL == 1)
 			T = fetch_red();
@@ -1291,12 +1329,39 @@ struct PSMain
 		return C;
 	}
 
+	// The masked-write road turns the colour into integers before merging the destination in, and
+	// it does that on all four channels, not only the masked ones. So a draw carrying an FBMSK
+	// writes a truncated colour where the same draw without one leaves it fractional and lets the
+	// output stage round to nearest. PS_QUANTIZE_COLOR runs the same step for a draw whose mask was
+	// dropped as a no-op, so losing the mask does not also change the rounding. One definition, so
+	// the two roads cannot drift apart.
+	uint4 quantize_color(float4 C)
+	{
+		return uint4(int4(C));
+	}
+
+	// PS_SUBSTITUTE_ALPHA: the alpha framebuffer mask this draw carried held back bits the render
+	// target is known to hold at a fixed value on every pixel, so the merge's answer on those bits
+	// is that value whatever the shader computed. Writing it directly is the same byte the masked
+	// road would have produced, out of one AND and one OR against constants, with no destination
+	// read.
 	void ps_fbmask(thread float4& C)
 	{
 		if (PS_FBMASK)
 		{
-			float multi = PS_COLCLIP_HW ? 65535.0 : 255.5;
-			C = float4((uint4(int4(C)) & (cb.fbmask ^ 0xff)) | (uint4(current_color * float4(multi, multi, multi, 255)) & cb.fbmask));
+			float multi_rgb = PS_COLCLIP_HW ? 65535.0 : 255.5;
+			float multi_a = PS_RTA_CORRECTION ? 128.0 : 255.0;
+			float4 RT = current_color;
+			RT.rgb = RT.rgb * multi_rgb;
+			RT.a = round(RT.a * multi_a);
+			C = float4((quantize_color(C) & (cb.fbmask ^ 0xff)) | (uint4(RT) & cb.fbmask));
+		}
+		else if (PS_QUANTIZE_COLOR || PS_SUBSTITUTE_ALPHA)
+		{
+			uint4 Cq = quantize_color(C);
+			if (PS_SUBSTITUTE_ALPHA)
+				Cq.a = (Cq.a & cb.substitute_alpha_keep) | cb.substitute_alpha_value;
+			C = float4(Cq);
 		}
 	}
 
@@ -1308,7 +1373,21 @@ struct PSMain
 		if (PS_DITHER == 2)
 			fpos = ushort2(in.p.xy);
 		else
-			fpos = ushort2(in.p.xy * float2(cb.scale_factor.y));
+		{
+			// The dither matrix indexes by NATIVE pixel, so reduce the device pixel to the one
+			// that owns it on both axes -- same fix and same reasoning as the SCANMSK test below:
+			// floor before dividing, because in.p.xy is coord + 0.5, and a true divide by S
+			// (cb.scale_factor.z, the RENDER TARGET's scale: the texture's, in scale_factor.x, is 1
+			// for a texture read from GS memory) rather than a reciprocal multiply, which can land a hair under an integer
+			// where the divide is exact.
+			// dither_phase then rotates the matrix under that index. At a fractional S some native
+			// pixels own one more device pixel than their neighbours, so their matrix entry covers
+			// more of the screen than the others; the phase decides which entries those are, and
+			// the CPU picks the quietest. It is zero at every whole S, where no cell is wider.
+			float dither_scale = cb.scale_factor.z;
+			fpos = ushort2(floor(in.p.xy) / dither_scale)
+			     + ushort2(cb.dither_phase & 3u, (cb.dither_phase >> 2) & 3u);
+		}
 		float value = cb.dither_matrix[fpos.y & 3][fpos.x & 3];
 
 		// The idea here is we add on the dither amount adjusted by the alpha before it goes to the hw blend
@@ -1329,7 +1408,7 @@ struct PSMain
 	{
 		// When dithering the bottom 3 bits become meaningless and cause lines in the picture
 		// so we need to limit the color depth on dithered items
-		if (SW_BLEND || (PS_DITHER > 0 && PS_DITHER < 3) || PS_FBMASK)
+		if (SW_BLEND || (PS_DITHER > 0 && PS_DITHER < 3) || PS_FBMASK || PS_QUANTIZE_COLOR || PS_SUBSTITUTE_ALPHA)
 		{
 			if (PS_DST_FMT == FMT_16 && PS_BLEND_MIX == 0 && PS_ROUND_INV)
 				C.rgb += 7.f; // Need to round up, not down since the shader will invert
@@ -1380,28 +1459,37 @@ struct PSMain
 				As_rgba.rgb = float3(1.f);
 			}
 
-			float Ad = PS_RTA_CORRECTION ? trunc(current_color.a * 128.1f) / 128.f : trunc(current_color.a * 255.1f) / 128.f;
-
-			if (PS_SHUFFLE && NEEDS_RT)
+			float4 RT = float4(0.f);
+			if (NEEDS_RT_FOR_BLEND)
 			{
-				uint4 denorm_rt = uint4(current_color);
+				RT = current_color;
+				float color_multi = PS_COLCLIP_HW ? 65535.f : 255.f;
+				float alpha_multi = PS_RTA_CORRECTION ? 128.f : 255.f;
+				RT.rgb = trunc(RT.rgb * color_multi + 0.1f);
+				RT.a = trunc(RT.a * alpha_multi + 0.1f);
+			}
+
+			if (PS_SHUFFLE && NEEDS_RT_FOR_BLEND)
+			{
+				uint4 denorm_rt = uint4(RT);
 				if (PS_PROCESS_BA & SHUFFLE_WRITE)
 				{
-					current_color.r = float((denorm_rt.b << 3) & 0xF8);
-					current_color.g = float(((denorm_rt.b >> 2) & 0x38) | ((denorm_rt.a << 6) & 0xC0));
-					current_color.b = float((denorm_rt.a << 1) & 0xF8);
-					current_color.a = float(denorm_rt.a & 0x80);
+					RT.r = float((denorm_rt.b << 3) & 0xF8);
+					RT.g = float(((denorm_rt.b >> 2) & 0x38) | ((denorm_rt.a << 6) & 0xC0));
+					RT.b = float((denorm_rt.a << 1) & 0xF8);
+					RT.a = float(denorm_rt.a & 0x80);
 				}
 				else
 				{
-					current_color.r = float((denorm_rt.r << 3) & 0xF8);
-					current_color.g = float(((denorm_rt.r >> 2) & 0x38) | ((denorm_rt.g << 6) & 0xC0));
-					current_color.b = float((denorm_rt.g << 1) & 0xF8);
-					current_color.a = float(denorm_rt.g & 0x80);
+					RT.r = float((denorm_rt.r << 3) & 0xF8);
+					RT.g = float(((denorm_rt.r >> 2) & 0x38) | ((denorm_rt.g << 6) & 0xC0));
+					RT.b = float((denorm_rt.g << 1) & 0xF8);
+					RT.a = float(denorm_rt.g & 0x80);
 				}
 			}
-			float multi = PS_COLCLIP_HW ? 65535.0 : 255.5;
-			float3 Cd = trunc(current_color.rgb * multi);
+
+			float Ad = RT.a / 128.f;
+			float3 Cd = RT.rgb;
 			float3 Cs = Color.rgb;
 
 			float3 A = pick(PS_BLEND_A, Cs, Cd, float3(0.f));
@@ -1494,6 +1582,8 @@ struct PSMain
 	{
 		MainResult out = {};
 		float input_z = in.p.z;
+		if (BROKEN_SHADER_DEPTH)
+			input_z -= 0x1p-32;
 		if (PS_ZFLOOR)
 			input_z = floor(input_z * 0x1p32) * 0x1p-32;
 
@@ -1507,7 +1597,15 @@ struct PSMain
 
 		if (PS_SCANMSK & 2)
 		{
-			if ((uint(in.p.y) & 1) == (PS_SCANMSK & 1))
+			// SCANMSK masks NATIVE scanlines, so reduce the device row to the line that owns it --
+			// floor(row / S) -- before the parity test. Two traps, both silent: in.p.y is row + 0.5,
+			// and at a fractional scale that half puts some rows in the line above their owner; and
+			// a multiply by the reciprocal can land a hair under an integer where row / S is exactly
+			// integral. S is scale_factor.z, the render target's scale: scale_factor.x is the
+			// texture's, which is 1 for a texture read from GS memory.
+			// (The dither path above uses the same floor-then-divide fix.)
+			float scanmsk_scale = cb.scale_factor.z;
+			if ((uint(floor(in.p.y) / scanmsk_scale) & 1) == (PS_SCANMSK & 1))
 				discard();
 		}
 
@@ -1758,7 +1856,7 @@ fragment MainPSOut ps_main(
 			main.current_depth = ds_tex.read(coord).x;
 	}
 
-	if (NEEDS_RT || (PS_ROV_COLOR && any(cb.fbmask == 0xff)))
+	if (NEEDS_RT)
 	{
 		if (PS_ROV_COLOR)
 		{
@@ -1786,8 +1884,6 @@ fragment MainPSOut ps_main(
 		ds_rov.write(out.depth, coord);
 	if (PS_ROV_COLOR && !main.color_discarded)
 	{
-		if (!PS_FBMASK)
-			out.c0 = select(out.c0, main.current_color, cb.fbmask == 0xff);
 		if (ROV_NEEDS_R32)
 			rt_u32.write(pack_float_to_unorm4x8(out.c0), coord);
 		else

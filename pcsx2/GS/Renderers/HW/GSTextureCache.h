@@ -6,6 +6,7 @@
 #include "GS/Renderers/Common/GSRenderer.h"
 #include "GS/Renderers/Common/GSFastList.h"
 #include "GS/Renderers/Common/GSDirtyRect.h"
+#include "GS/Renderers/HW/GSAlphaKnownBits.h"
 
 #include <array>
 #include <deque>
@@ -135,9 +136,33 @@ public:
 		std::pair<u8, u8> alpha_minmax;
 		bool valid_alpha_minmax;
 		bool is_replacement;
+
+		/// The texture is an upscale the texture upscaler generated, not a texture pack's.
+		bool generated = false;
+
+		/// The guest's own texels, uploaded the first time a draw reads this texture as colours
+		/// (GetNativeTexture). Owned by the entry; null until then and for any other entry.
+		GSTexture* native = nullptr;
 	};
 
 	using HashCacheMap = std::unordered_map<HashCacheKey, HashCacheEntry, HashCacheKeyHash>;
+
+	/// What HashCacheKey::Create did with the memo of texture hashes of this cache.
+	struct HashMemoStats
+	{
+		u64 lookups = 0; ///< Texture hashes asked for of a texture large enough to be memoised.
+		u64 hits = 0; ///< Answered by the memo, without reading local memory.
+		u64 stale = 0; ///< Had a memo entry whose pages were written since.
+	};
+
+	/// What verify mode found. Totals over every cache of the process.
+	struct HashMemoVerifyReport
+	{
+		u64 hits = 0; ///< Memo hits whose hash was computed afresh and compared.
+		u64 mismatches = 0; ///< Of those, how many differed.
+		u64 sweeps = 0; ///< Frame boundaries at which the pages of local memory were hashed.
+		u64 missed_writers = 0; ///< Pages whose bytes changed between two sweeps with no mark in between.
+	};
 
 	class Surface : public GSAlignedClass<32>
 	{
@@ -240,6 +265,21 @@ public:
 		int m_alpha_min = 0;
 		bool m_alpha_range = false;
 
+		/// Which alpha bits every pixel in m_valid is known to hold, and what they hold. A strict
+		/// refinement of m_alpha_min/max, maintained beside it at the same sites: the range cannot
+		/// carry a bit through a partial alpha mask and this can. Nothing reads it but the exact
+		/// FBMSK-drop rule -- the range stays authoritative for DATE, alpha scaling and source
+		/// seeding. See GSAlphaKnownBits.h.
+		GSAlphaKnownBits::Known m_alpha_known;
+
+		/// Whether what m_alpha_known currently holds rests on a sprite-union cover
+		/// (GSState::m_primitive_union_covers_rect). Sticky: a write that narrows the pair keeps
+		/// the provenance, one that replaces or destroys it sets its own. The exact FBMSK-drop
+		/// rule reads it to decide whether the drop it is about to take is one this target could
+		/// answer for before the union test existed -- a drop that predates it has already been
+		/// byte-identity-tested against the dump corpus and is not re-litigated here.
+		bool m_alpha_known_via_union = false;
+
 		// Valid alpha means "we have rendered to the alpha channel of this target".
 		// A false value means that the alpha in local memory is still valid/up-to-date.
 		bool m_valid_alpha_low = false;
@@ -275,6 +315,10 @@ public:
 
 		void ScaleRTAlpha();
 		void UnscaleRTAlpha();
+
+		/// Devbuild tripwire for m_alpha_known drifting away from m_alpha_min/max. Cheap, and a
+		/// no-op outside devbuilds.
+		void AssertAlphaKnownAgreesWithRange(const char* site) const;
 
 		void Update(bool cannot_scale = false);
 
@@ -442,9 +486,44 @@ protected:
 	u64 m_hash_cache_memory_usage = 0;
 	u64 m_hash_cache_replacement_memory_usage = 0;
 
+	/// The last hash of each texture and the write sequence of local memory it was taken at, so that
+	/// HashCacheKey::Create can reuse it while no page the texture reads has been written since. Direct
+	/// mapped, a fixed array: a lookup is a few compares and no allocation. Lives and dies with the cache,
+	/// as the local memory its sequence belongs to does with the renderer.
+	static constexpr u32 HASH_MEMO_ENTRIES = 32;
+	static constexpr u32 HASH_MEMO_MAX_LEVELS = 8; // the base level and the six mipmaps below it
+	/// Smallest base level that is memoised, in blocks of 256 bytes: 128 KiB of local memory read per hash.
+	static constexpr int HASH_MEMO_MIN_BLOCKS = 512;
+	struct HashMemoEntry
+	{
+		u64 seq; ///< GSLocalMemory::WriteSeq() before the hash was computed.
+		HashType hash;
+		u64 texa; ///< The TEXA bits the hash reads.
+		u64 region; ///< SourceRegion::bits of the base level.
+		u64 tex0[HASH_MEMO_MAX_LEVELS]; ///< Per level, the TEX0 bits the hash reads.
+		u32 levels; ///< Number of levels hashed. 0 in an empty entry.
+	};
+	struct HashMemo
+	{
+		HashMemoEntry entries[HASH_MEMO_ENTRIES] = {};
+		HashMemoStats stats;
+	};
+	HashMemo m_hash_memo;
+
+	static inline bool s_hash_memo_verify = false;
+	struct HashMemoSweep;
+	std::unique_ptr<HashMemoSweep> m_hash_memo_sweep;
+
 	FastList<Target*> m_dst[2];
 	FastList<TargetHeightElem> m_target_heights;
 	u64 m_target_memory_usage = 0;
+
+	/// True from a renderer reset until a display lookup first finds a target to present. While
+	/// it holds, nothing the hardware renderer has drawn has reached the screen yet, so a display
+	/// that finds no target and no upload to build one from has to come from local memory.
+	/// Deliberately a display-path fact rather than a draw counter -- this costs nothing per draw.
+	/// Raised by NoteColdStart(), cleared by LookupDisplayTarget.
+	bool m_no_display_hit_since_purge = false;
 
 	int m_expected_src_bp = -1;
 	int m_remembered_src_bp = -1;
@@ -534,6 +613,31 @@ protected:
 		bool m_clear = true;
 	};
 public:
+	/// Converts one native coordinate to the device grid. Native pixel n owns device pixels
+	/// [ceil(n * scale), ceil((n + 1) * scale)), which is where the rasteriser puts it, so the
+	/// conversion ceils. This is the one place that rule lives; everything in the cache scales
+	/// through it rather than open-coding a multiply that truncates. Also the device size of a
+	/// texture whose native size is `native`, since that is a span starting at 0.
+	static int ScaleNativeToDevice(int native, float scale);
+
+	/// The device length of the native span [start, start + length): the difference of its two
+	/// edges' device positions. Not ScaleNativeToDevice(length), which is the length of a span
+	/// starting at native 0; at a fractional scale the two differ by up to a device pixel.
+	static int ScaleNativeSpanToDevice(int start, int length, float scale);
+
+	/// The device rectangles a native w x h move from (sx, sy) to (dx, dy) copies between. Each
+	/// starts at its native corner's first owned device pixel. Both have the same size, since a
+	/// copy cannot stretch, and that size is the smaller of the two owned spans per axis: at a
+	/// fractional scale the source and destination spans can differ by one device pixel, and
+	/// taking the larger would read a pixel the source does not own or write one the destination
+	/// does not own.
+	struct DeviceMove
+	{
+		GSVector4i src;
+		GSVector4i dst;
+	};
+	static DeviceMove ScaleMoveToDevice(int sx, int sy, int dx, int dy, int w, int h, float scale);
+
 	GSTextureCache();
 	~GSTextureCache();
 
@@ -542,6 +646,18 @@ public:
 	__fi u64 GetTotalHashCacheMemoryUsage() const { return (m_hash_cache_memory_usage + m_hash_cache_replacement_memory_usage); }
 	__fi u64 GetSourceMemoryUsage() const { return m_source_memory_usage; }
 	__fi u64 GetTargetMemoryUsage() const { return m_target_memory_usage; }
+	__fi const HashMemoStats& GetHashMemoStats() const { return m_hash_memo.stats; }
+
+	/// Verify mode for the hash memo and the write stamps (pcsx2-gsrunner -verify-hash-memo), off by default.
+	/// While it is on, every memo hit also hashes the texture afresh and compares, and VerifyWriteStamps()
+	/// finds stores into local memory that nothing marked. Neither changes what the renderer does.
+	static void SetHashMemoVerify(bool enable);
+	static bool IsHashMemoVerify() { return s_hash_memo_verify; }
+	static HashMemoVerifyReport GetHashMemoVerifyReport();
+	/// Hashes every page of `mem` and reports each page whose bytes changed since the previous call while
+	/// its stamp did not, which is a store that was not marked. Call at a frame boundary, on the thread that
+	/// writes `mem`, with no writer in flight.
+	void VerifyWriteStamps(const GSLocalMemory& mem);
 
 	void Read(Target* t, const GSVector4i& r, bool force_synchronous = false);
 	void Read(Source* t, const GSVector4i& r);
@@ -550,6 +666,14 @@ public:
 	/// Drops every queued asynchronous download (mode change, target flush, reset).
 	void DiscardPendingDownloads();
 	void RemoveAll(bool sources, bool targets, bool hash_cache);
+
+	/// Says the renderer has just been reset: the targets are gone and local memory may have been
+	/// replaced under them (savestate or GS-dump load), so until a display finds a target to
+	/// present, local memory holds the only copy of the picture. A mid-game purge -- a settings
+	/// change, a device loss -- does not get this: local memory is untouched there and under the
+	/// hardware renderer it is usually stale, so preloading a frame target from it would show a
+	/// stale frame instead of nothing.
+	void NoteColdStart() { m_no_display_hit_since_purge = true; }
 	void ReadbackAll();
 	static void AddDirtyRectTarget(Target* target, GSVector4i rect, u32 psm, u32 bw, RGBAMask rgba, bool req_linear = false);
 	void ResizeTarget(Target* t, GSVector4i rect, u32 tbp, u32 psm, u32 tbw);
@@ -650,7 +774,15 @@ public:
 	void InvalidateTemporaryZ();
 
 	/// Injects a texture into the hash cache, by using GSTexture::Swap(), transitively applying to all sources. Ownership of tex is transferred.
-	void InjectHashCacheTexture(const HashCacheKey& key, GSTexture* tex, const std::pair<u8, u8>& alpha_minmax);
+	/// generated says it is an upscale made by the texture upscaler rather than a pack texture.
+	void InjectHashCacheTexture(const HashCacheKey& key, GSTexture* tex, const std::pair<u8, u8>& alpha_minmax, bool generated);
+
+	/// The unscaled texture for a source whose hash cache texture is a generated upscale, for a draw
+	/// that reads texels as colours (GSTexelAddressedDraw.h). It is uploaded from guest memory on
+	/// the first call and kept with the hash cache entry. Returns null for any other source, and
+	/// when the upload fails. Not valid across a change to the guest's texture or palette: call it
+	/// from the draw that looked the source up.
+	GSTexture* GetNativeTexture(const Source* s);
 };
 
 extern std::unique_ptr<GSTextureCache> g_texture_cache;

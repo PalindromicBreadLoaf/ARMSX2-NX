@@ -25,6 +25,7 @@
 #include "Config.h"
 
 #include <gtest/gtest.h>
+#include <cstring>
 
 // EE-SRA 3 Arm C: VI-pool probe, defined in arm64/microVU-arm64.cpp
 // (PCSX2_RECOMPILER_TESTS builds only). Global scope — must be declared
@@ -871,13 +872,13 @@ TEST(EeVu0Cop2Macro, VlqiAcrossVu0Vu1AccessBoundaryLoadsVu1Vf)
 //  COP2 macro-mode VOPMSUB / VOPMULA — outer-product cross math
 // =========================================================================
 //
-// PS2 OPMSUB:  VF[fd].xyz = ACC.xyz - VF[fs].yzx * VF[ft].zxy   (W untouched)
-// PS2 OPMULA:  ACC.xyz    =           VF[fs].yzx * VF[ft].zxy   (ACC.w untouched)
+// PS2 OPMSUB:  VF[fd].<dest> = ACC - VF[fs].yzxw * VF[ft].zxy0
+// PS2 OPMULA:  ACC.<dest>    =       VF[fs].yzxw * VF[ft].zxy0
 //
-// Hardware always writes XYZ lanes only — the W lane of the destination is
-// preserved regardless of what the instruction's dest mask encodes. The
-// PS2 SDK disassembler hard-codes ".xyz" for these ops; the interpreter
-// (VUops.cpp _vuOPMSUB / _vuOPMULA) only writes XYZ.
+// The two tests here are at the dest field VU assembly emits, xyz, where the W
+// lane of the destination is untouched because the field says so. What the
+// field does at every other setting, and what lane w's product is, are
+// OpOpsAreFourLaneFmacs and OpOpsClearTheMacLanesOutsideTheDestField below.
 
 TEST(EeVu0Cop2Macro, VopmsubXyzCrossProductMatchesInterp)
 {
@@ -903,33 +904,6 @@ TEST(EeVu0Cop2Macro, VopmsubXyzCrossProductMatchesInterp)
 	EXPECT_FLOAT_EQ(h.GetVu0VfJit(3, 'x'), 86.0f);
 	EXPECT_FLOAT_EQ(h.GetVu0VfJit(3, 'y'), 185.0f);
 	EXPECT_FLOAT_EQ(h.GetVu0VfJit(3, 'z'), 294.0f);
-	EXPECT_EQ(h.GetVu0VfBitsJit(3, 'w'), 0xCAFEBABEu);
-	for (char l : {'x','y','z','w'})
-		EXPECT_EQ(h.GetVu0VfBitsJit(3, l), h.GetVu0VfBitsInterp(3, l));
-}
-
-TEST(EeVu0Cop2Macro, VopmsubDestXyzwStillPreservesW)
-{
-	// Some games / hand-written code emit VOPMSUB with dest=XYZW even though
-	// the assembler convention is XYZ. PS2 hardware ignores the W bit of the
-	// dest field for OPMSUB — only XYZ are ever written. The interpreter
-	// matches this (VUops.cpp:866-868 only writes i.x/i.y/i.z, never i.w).
-	// JIT must too.
-	EeRecTestHarness h;
-	h.EnableVu0Capture();
-	h.EnableCop1();
-	h.SeedVu0VfBits(3, 0x11111111u, 0x22222222u, 0x33333333u, 0xCAFEBABEu);
-	h.SeedVu0Vf(1, 1.0f, 2.0f, 3.0f, 4.0f);
-	h.SeedVu0Vf(2, 5.0f, 6.0f, 7.0f, 8.0f);
-	h.SeedVu0Acc(100.0f, 200.0f, 300.0f, 400.0f);
-
-	h.LoadProgram({VOPMSUB_C2(/*mask*/0xF, /*fd*/3, /*fs*/1, /*ft*/2)});
-	h.Run();
-
-	EXPECT_FLOAT_EQ(h.GetVu0VfJit(3, 'x'), 86.0f);
-	EXPECT_FLOAT_EQ(h.GetVu0VfJit(3, 'y'), 185.0f);
-	EXPECT_FLOAT_EQ(h.GetVu0VfJit(3, 'z'), 294.0f);
-	// W must be preserved even though mask said XYZW.
 	EXPECT_EQ(h.GetVu0VfBitsJit(3, 'w'), 0xCAFEBABEu);
 	for (char l : {'x','y','z','w'})
 		EXPECT_EQ(h.GetVu0VfBitsJit(3, l), h.GetVu0VfBitsInterp(3, l));
@@ -961,21 +935,121 @@ TEST(EeVu0Cop2Macro, VopmulaXyzWritesAccLeavesAccWUntouched)
 		EXPECT_EQ(h.GetVu0AccBitsJit(l), h.GetVu0AccBitsInterp(l));
 }
 
-TEST(EeVu0Cop2Macro, VopmulaDestXyzwStillPreservesAccW)
+// The OP ops are four-lane FMACs.
+//
+// Measured on an SCPH-90000, four runs. VOPMULA and VOPMSUB honour the dest
+// field for the value and for the MAC flag, they clear the lanes outside it
+// like every other FMAC, and their fourth lane is real:
+//
+//     fsRot = (fs.y, fs.z, fs.x, fs.w)
+//     ftRot = (ft.z, ft.x, ft.y, +0.0)
+//     VOPMULA:  ACC.<mask> = fsRot * ftRot
+//     VOPMSUB:  fd.<mask>  = ACC - fsRot * ftRot
+//
+// So lane w's product is fs.w * +0 -- a zero carrying fs.w's sign, and fs.w's
+// alone: moving ft.w's sign moves nothing, and both negative is still negative,
+// which is not an xor.
+//
+// The rows below are the console's.
+TEST(EeVu0Cop2Macro, OpOpsAreFourLaneFmacs)
 {
-	EeRecTestHarness h;
-	h.EnableVu0Capture();
-	h.EnableCop1();
-	h.SeedVu0Vf(1, 1.0f, 2.0f, 3.0f, 4.0f);
-	h.SeedVu0Vf(2, 5.0f, 6.0f, 7.0f, 8.0f);
-	h.SeedVu0AccBits(0x10000000u, 0x20000000u, 0x30000000u, 0xCAFEBABEu);
+	// fs = 2,3,5,7  ft = 11,13,17,19  ACC = 100,200,300,400  fd = sentinels.
+	constexpr u32 kFs[4]  = {0x40000000u, 0x40400000u, 0x40A00000u, 0x40E00000u};
+	constexpr u32 kFt[4]  = {0x41300000u, 0x41500000u, 0x41880000u, 0x41980000u};
+	constexpr u32 kAcc[4] = {0x42C80000u, 0x43480000u, 0x43960000u, 0x43C80000u};
+	constexpr u32 kFd[4]  = {0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u};
+	// 51 = 3*17, 55 = 5*11, 26 = 2*13; 49 = 100-51, 145 = 200-55, 274 = 300-26.
+	constexpr u32 k51 = 0x424C0000u, k55 = 0x425C0000u, k26 = 0x41D00000u;
+	constexpr u32 k49 = 0x42440000u, k145 = 0x43110000u, k274 = 0x43890000u;
 
-	h.LoadProgram({VOPMULA_C2(/*mask*/0xF, /*fs*/1, /*ft*/2)});
-	h.Run();
+	struct Row
+	{
+		const char* what;
+		bool sub;      // VOPMSUB rather than VOPMULA
+		u32 mask;
+		u32 acc[4];    // the console's ACC afterwards
+		u32 fd[4];     // and its VF[fd]
+	};
+	static const Row kRows[] = {
+		{"vopmula.xyzw", false, 0xF, {k51, k55, k26, 0}, {kFd[0], kFd[1], kFd[2], kFd[3]}},
+		{"vopmula.xyz",  false, 0xE, {k51, k55, k26, kAcc[3]}, {kFd[0], kFd[1], kFd[2], kFd[3]}},
+		{"vopmula.w",    false, 0x1, {kAcc[0], kAcc[1], kAcc[2], 0}, {kFd[0], kFd[1], kFd[2], kFd[3]}},
+		{"vopmula.none", false, 0x0, {kAcc[0], kAcc[1], kAcc[2], kAcc[3]}, {kFd[0], kFd[1], kFd[2], kFd[3]}},
+		{"vopmsub.xyzw", true,  0xF, {kAcc[0], kAcc[1], kAcc[2], kAcc[3]}, {k49, k145, k274, kAcc[3]}},
+		{"vopmsub.xyz",  true,  0xE, {kAcc[0], kAcc[1], kAcc[2], kAcc[3]}, {k49, k145, k274, kFd[3]}},
+		{"vopmsub.w",    true,  0x1, {kAcc[0], kAcc[1], kAcc[2], kAcc[3]}, {kFd[0], kFd[1], kFd[2], kAcc[3]}},
+		{"vopmsub.none", true,  0x0, {kAcc[0], kAcc[1], kAcc[2], kAcc[3]}, {kFd[0], kFd[1], kFd[2], kFd[3]}},
+	};
+	static const char kLane[4] = {'x', 'y', 'z', 'w'};
 
-	EXPECT_EQ(h.GetVu0AccBitsJit('w'), 0xCAFEBABEu);
-	for (char l : {'x','y','z','w'})
-		EXPECT_EQ(h.GetVu0AccBitsJit(l), h.GetVu0AccBitsInterp(l));
+	for (const Row& r : kRows)
+	{
+		SCOPED_TRACE(r.what);
+		// Run() rather than RunInterpOnly(), which captures the EE snapshot only
+		// and would read every VF back as zero. Each engine is scored against
+		// the console separately, so the auto-diff is opted out of.
+		EeRecTestHarness h;
+		h.EnableVu0Capture();
+		h.ExpectVu0Divergence();
+		h.SeedVu0VfBits(5, kFs[0], kFs[1], kFs[2], kFs[3]);
+		h.SeedVu0VfBits(6, kFt[0], kFt[1], kFt[2], kFt[3]);
+		h.SeedVu0AccBits(kAcc[0], kAcc[1], kAcc[2], kAcc[3]);
+		h.SeedVu0VfBits(4, kFd[0], kFd[1], kFd[2], kFd[3]);
+		h.LoadProgram({r.sub ? VOPMSUB_C2(r.mask, 4, 5, 6) : VOPMULA_C2(r.mask, 5, 6)});
+		h.Run();
+		for (int l = 0; l < 4; ++l)
+		{
+			EXPECT_EQ(h.GetVu0AccBitsInterp(kLane[l]), r.acc[l]) << "[interp] ACC." << kLane[l];
+			EXPECT_EQ(h.GetVu0AccBitsJit(kLane[l]), r.acc[l]) << "[jit] ACC." << kLane[l];
+			EXPECT_EQ(h.GetVu0VfBitsInterp(4, kLane[l]), r.fd[l]) << "[interp] VF4." << kLane[l];
+			EXPECT_EQ(h.GetVu0VfBitsJit(4, kLane[l]), r.fd[l]) << "[jit] VF4." << kLane[l];
+		}
+	}
+}
+
+// The half of the same measurement that is about the flag register: a masked OP
+// op clears the MAC lanes outside its field, exactly like any other FMAC. The
+// seed puts S in all four lanes so a cleared lane is visible.
+TEST(EeVu0Cop2Macro, OpOpsClearTheMacLanesOutsideTheDestField)
+{
+	constexpr u32 kOne = 0x3F800000u, kMinusOne = 0xBF800000u;
+	struct Row { const char* what; bool sub; u32 mask; u32 mac; };
+	static const Row kRows[] = {
+		{"vopmula.xyzw", false, 0xF, 0x0001u}, // w takes the zero product
+		{"vopmula.xyz",  false, 0xE, 0x0000u},
+		{"vopmula.xy",   false, 0xC, 0x0000u},
+		{"vopmula.w",    false, 0x1, 0x0001u},
+		{"vopmsub.xyzw", true,  0xF, 0x000Eu}, // xyz cancel, w is ACC.w - 0
+		{"vopmsub.xyz",  true,  0xE, 0x000Eu},
+		{"vopmsub.xy",   true,  0xC, 0x000Cu},
+		{"vopmsub.w",    true,  0x1, 0x0000u},
+	};
+	for (const Row& r : kRows)
+	{
+		SCOPED_TRACE(r.what);
+		const auto build = [&](EeRecTestHarness& h) {
+			h.EnableVu0Capture();
+			h.SeedVu0VfBits(1, kMinusOne, kMinusOne, kMinusOne, kMinusOne);
+			h.SeedVu0VfBits(2, kOne, kOne, kOne, kOne);
+			h.SeedVu0VfBits(5, kOne, kOne, kOne, kOne);
+			h.SeedVu0VfBits(6, kOne, kOne, kOne, kOne);
+			h.SeedVu0AccBits(kOne, kOne, kOne, kOne);
+			h.LoadProgram({
+				CTC2(0, REG_STATUS_FLAG),
+				VMUL_C2(0xF, 4, 1, 2), // seed: MAC S on all four lanes
+				r.sub ? VOPMSUB_C2(r.mask, 4, 5, 6) : VOPMULA_C2(r.mask, 5, 6),
+				CFC2(8, REG_MAC_FLAG),
+			});
+		};
+		EeRecTestHarness hi;
+		build(hi);
+		hi.RunInterpOnly();
+		EeRecTestHarness hj;
+		build(hj);
+		hj.RunJitNoDiff();
+		EXPECT_EQ(hi.GetGprInterp(8), r.mac) << "[interp] MAC";
+		EXPECT_EQ(hj.GetGprJit(8), r.mac) << "[jit] MAC";
+	}
 }
 
 // =========================================================================
@@ -1099,6 +1173,144 @@ TEST(EeVu0Cop2Macro, VclipSignedIntegerCompareWithNaNLane)
 	EXPECT_EQ(h.Vu0JitSnapshot().regs.VI[REG_CLIP_FLAG].UL, 0x19u);
 	EXPECT_EQ(h.Vu0JitSnapshot().regs.VI[REG_CLIP_FLAG].UL,
 	          h.Vu0InterpSnapshot().regs.VI[REG_CLIP_FLAG].UL);
+}
+
+// The bit layout and the denormal rule over the operand classes, rather than
+// the three discriminators above. The model is the same statement of the rule
+// vu_clip_flag_tests.cpp scores the micro path against: both operands flushed
+// when their exponent field is zero, then six strict signed comparisons. The
+// emitter reaches it the other way round -- fs untouched, the threshold raised
+// to the largest denormal pattern -- and below the smallest normal the two
+// reduce to the same answers, which is what this sweep has to hold.
+
+namespace {
+
+// Operand classes: both signs of each, because the threshold is |ft.w| and the
+// two per-lane tests are the two signs of fs. 2.0 and both its neighbours are
+// present against a 2.0 threshold, so the strict comparison is decided in both
+// directions.
+constexpr u32 kClipValues[] = {
+	0x00000000u, 0x80000000u, // zero
+	0x00000001u, 0x80000001u, // smallest denormal
+	0x007fffffu, 0x807fffffu, // largest denormal
+	0x00800000u, 0x80800000u, // smallest normal
+	0x3f800000u, 0xbf800000u, // 1.0
+	0x40000000u, 0xc0000000u, // 2.0
+	0x3fffffffu, 0xbfffffffu, // one ULP below it
+	0x40000001u, 0xc0000001u, // one ULP above it
+	0x40600000u, 0xc0600000u, // 3.5
+	0x7f7fffffu, 0xff7fffffu, // FLT_MAX
+	0x7f800000u, 0xff800000u, // the infinity encoding
+	0x7fc00000u, 0xffc00000u, // a quiet NaN encoding
+	0x7fffffffu, 0xffffffffu, // the VU FMAC ceiling
+};
+constexpr int kClipValueCount = static_cast<int>(std::size(kClipValues));
+
+constexpr u32 ClipFlush(u32 bits) { return (bits & 0x7f800000u) ? bits : 0u; }
+
+// bit0 = x > +|w|, bit1 = x < -|w|, bits 2/3 the same for y, 4/5 for z.
+u32 ClipBitsRef(u32 x, u32 y, u32 z, u32 w)
+{
+	const s32 threshold = static_cast<s32>(ClipFlush(w) & 0x7fffffffu);
+	const u32 lane[3] = {ClipFlush(x), ClipFlush(y), ClipFlush(z)};
+	u32 bits = 0;
+	for (int i = 0; i < 3; i++)
+	{
+		if (static_cast<s32>(lane[i]) > threshold)
+			bits |= 1u << (2 * i);
+		if (static_cast<s32>(lane[i] ^ 0x80000000u) > threshold)
+			bits |= 2u << (2 * i);
+	}
+	return bits;
+}
+
+// A 32-bit xorshift, so the case stream is the same on every standard library.
+struct ClipRng
+{
+	u32 s;
+	u32 Next() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; }
+};
+
+// Four VCLIPs, which is what the 24-bit flag retains, so one compile scores
+// four cases and the history shift on each. vuRegs[0].clipflag is the running
+// value the emitter folds into -- writing it here IS the incoming history.
+void RunClipQuad(const u32 (&x)[4], const u32 (&y)[4], const u32 (&z)[4],
+	const u32 (&w)[4], u32 seed)
+{
+	EeRecTestHarness h;
+	h.EnableVu0Capture();
+	h.EnableCop1();
+	for (int i = 0; i < 4; i++)
+	{
+		h.SeedVu0VfBits(1u + static_cast<u32>(i) * 2u, x[i], y[i], z[i], 0u);
+		h.SeedVu0VfBits(2u + static_cast<u32>(i) * 2u, 0u, 0u, 0u, w[i]);
+	}
+	vuRegs[0].clipflag = seed;
+	h.LoadProgram({
+		VCLIP_C2(/*ft*/2, /*fs*/1),
+		VCLIP_C2(/*ft*/4, /*fs*/3),
+		VCLIP_C2(/*ft*/6, /*fs*/5),
+		VCLIP_C2(/*ft*/8, /*fs*/7),
+	});
+	h.Run();
+
+	u32 want = seed & 0xFFFFFFu;
+	for (int i = 0; i < 4; i++)
+		want = ((want << 6) | ClipBitsRef(x[i], y[i], z[i], w[i])) & 0xFFFFFFu;
+
+	EXPECT_EQ(h.GetVu0ViJit(REG_CLIP_FLAG), want) << "jit, seed " << seed;
+	EXPECT_EQ(h.GetVu0ViInterp(REG_CLIP_FLAG), want) << "interp, seed " << seed;
+}
+
+} // namespace
+
+// Every operand class against every threshold class, once per lane, so a
+// permuted or dropped clip bit has nowhere to hide.
+TEST(EeVu0Cop2Macro, VclipLaneAndThresholdClassesAgreeWithTheRule)
+{
+	u32 x[4], y[4], z[4], w[4];
+	int filled = 0;
+	u32 seed = 0x123456u;
+	for (int lead = 0; lead < 3; lead++)
+	{
+		for (int wi = 0; wi < kClipValueCount; wi++)
+		{
+			for (int vi = 0; vi < kClipValueCount; vi++)
+			{
+				u32 lane[3];
+				lane[lead] = kClipValues[vi];
+				lane[(lead + 1) % 3] = kClipValues[(vi + 7) % kClipValueCount];
+				lane[(lead + 2) % 3] = kClipValues[(vi + 13) % kClipValueCount];
+				x[filled] = lane[0]; y[filled] = lane[1]; z[filled] = lane[2];
+				w[filled] = kClipValues[wi];
+				if (++filled == 4)
+				{
+					RunClipQuad(x, y, z, w, seed);
+					seed = (seed * 1103515245u + 12345u) & 0xFFFFFFu;
+					filled = 0;
+				}
+			}
+		}
+	}
+	ASSERT_EQ(filled, 0) << "the class sweep must divide into whole quads";
+}
+
+// The same rule with the four lanes drawn independently.
+TEST(EeVu0Cop2Macro, VclipRandomOperandCombinationsAgreeWithTheRule)
+{
+	ClipRng rng{0xC0DEu};
+	for (int program = 0; program < 200; program++)
+	{
+		u32 x[4], y[4], z[4], w[4];
+		for (int i = 0; i < 4; i++)
+		{
+			x[i] = kClipValues[rng.Next() % kClipValueCount];
+			y[i] = kClipValues[rng.Next() % kClipValueCount];
+			z[i] = kClipValues[rng.Next() % kClipValueCount];
+			w[i] = kClipValues[rng.Next() % kClipValueCount];
+		}
+		RunClipQuad(x, y, z, w, rng.Next() & 0xFFFFFFu);
+	}
 }
 
 // Denormal ft.w forces value = 0x007FFFFF, and the previous clip flag shifts
@@ -1968,7 +2180,7 @@ TEST(EeVu0Cop2PendingMicroSync, VwaitqConsumesFinishMarkAndDrainsPendingMicro)
 // Needs the IEEE environment: under the production rounding mode (ChopZero) an
 // overflowing sum saturates to +FLT_MAX, exp 254, and the O bit this test is
 // about is unreachable on BOTH engines. See
-// VuStickyConsoleConformance.ProductionFpEnvironmentErasesUnderflowAndOverflow,
+// VuStickyConsoleConformance.ProductionFpEnvironmentGatesTheJitsUnderflowOnModeThree,
 // which pins that.
 // TRIPWIRE -- the arm64 COP2 macro flag update does not raise STATUS U/O.
 TEST(EeVu0Cop2Macro, DISABLED_VaddOverflowSetsStatusUO)
@@ -2431,9 +2643,14 @@ TEST(EeVu0Cop2VfCache, VcallmsInvalidatesCachedVfAndDrainSeesFreshValue)
 // FPU DIV.S JIT-vs-interp rounding (FPUDiv Nearest vs ambient chop) is a
 // known benign divergence that would false-positive the harness auto-diff.
 //
-// For finite inputs the VU0 interpreter computes the same single-precision
-// float ops as the NEON macro emitters must, so bitwise JIT==interp is the
-// correct expectation on every lane.
+// Bitwise JIT==interp used to be the expectation on every lane, on the grounds
+// that both engines run the same single-precision op. They no longer do: the
+// interpreter's FMAC models the adder's missing guard bits and the multiplier's
+// truncated array, and this kernel's operands -- a real camera matrix, a real
+// unit quaternion -- carry full mantissas, so most lanes land one ULP apart.
+// The divergence is recorded rather than dropped, and it is the one worth
+// getting back: a game kernel agreeing lane for lane is what says the emitters
+// have the whole model, not just the rows a capture happened to cover.
 
 namespace
 {
@@ -2552,14 +2769,13 @@ TEST(EeVu0Cop2Macro, Jak3CameraBasisKernelChainMatchesInterp)
 		SQC2(13, reg::a2, 0x20),
 		SQC2(14, reg::a2, 0x30),
 	});
+	static constexpr const char* kWhy =
+		"the emitters lack the interpreter's FMAC model -- the adder's missing "
+		"guard bits and the multiplier's one-ULP deficit -- and this kernel's "
+		"operands reach both";
+	h.RequireEeDivergence(kWhy);   // the SQC2'd transform outputs
+	h.RequireVu0Divergence(kWhy);
 	h.Run();
-
-	// The harness auto-diff compares full state; pin the transform outputs
-	// explicitly so a divergence names the lane.
-	for (u32 vf : {2u, 3u, 4u, 6u, 11u, 12u, 13u, 14u})
-		for (char l : {'x', 'y', 'z', 'w'})
-			EXPECT_EQ(h.GetVu0VfBitsJit(vf, l), h.GetVu0VfBitsInterp(vf, l))
-				<< "vf" << vf << "." << l;
 }
 
 } // namespace recompiler_tests

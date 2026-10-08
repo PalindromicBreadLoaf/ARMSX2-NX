@@ -406,6 +406,13 @@ struct ThemePaletteControls: View {
           }
         }
         .buttonStyle(.plain)
+        .controllerAccessibilityActionTarget(
+          id: "palette." + target.id + "." + palette.id, label: palette.title
+        ) {
+          if usesMultiColor { toggleMultiColorPalette(palette) }
+          else { apply(palette) }
+        }
+        .controllerAccessibilityTargetID("palette." + target.id + "." + palette.id)
       }
     }
   }
@@ -473,6 +480,9 @@ struct ThemePaletteControls: View {
             )
         }
         .buttonStyle(.plain)
+        .controllerAccessibilityActionTarget(
+          id: "palette.save-colour", label: "Save Custom Colour", action: saveDraftColor
+        )
       }
 
       if !savedSolidColors.isEmpty {
@@ -506,6 +516,10 @@ struct ThemePaletteControls: View {
               }
             }
             .accessibilityLabel("Saved colour \(savedColor.hex)")
+            .controllerAccessibilityActionTarget(
+              id: "palette.saved." + savedColor.id, label: "Saved colour \(savedColor.hex)"
+            ) { apply(savedColor) }
+            .controllerAccessibilityTargetID("palette.saved." + savedColor.id)
             .accessibilityAction(named: "Delete") {
               delete(savedColor)
             }
@@ -547,6 +561,9 @@ struct ThemePaletteControls: View {
             )
         }
         .buttonStyle(.plain)
+        .controllerAccessibilityActionTarget(
+          id: "palette.save-gradient", label: "Save Palette", action: saveDraftPalette
+        )
       }
 
       if !savedCustomPalettes.isEmpty {
@@ -581,6 +598,10 @@ struct ThemePaletteControls: View {
               }
             }
             .accessibilityLabel("Saved custom palette")
+            .controllerAccessibilityActionTarget(
+              id: "palette.saved." + palette.id, label: "Saved Custom Palette"
+            ) { apply(palette) }
+            .controllerAccessibilityTargetID("palette.saved." + palette.id)
             .accessibilityAction(named: "Delete") {
               delete(palette)
             }
@@ -1088,16 +1109,16 @@ struct ThemePaletteEditorHeader: View {
             .frame(width: 28, height: 32)
         }
         .disabled(!canUndo)
-        .accessibilityLabel("Undo")
-        .help("Undo")
+        .accessibilityLabel(Text("Undo"))
+        .help(Text("Undo"))
 
         Button(action: redo) {
           Image(systemName: "arrow.uturn.forward")
             .frame(width: 28, height: 32)
         }
         .disabled(!canRedo)
-        .accessibilityLabel("Redo")
-        .help("Redo")
+        .accessibilityLabel(Text("Redo"))
+        .help(Text("Redo"))
 
         Button("Apply", action: apply)
           .fontWeight(.semibold)
@@ -1145,6 +1166,7 @@ struct ThemePaletteEditorSliderReadout: View {
 
 struct ThemePaletteEditor: View {
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.layoutDirection) private var layoutDirection
 
   @Binding var target: ThemePaletteTarget
   @Binding var sharedPalette: ThemePalette
@@ -1376,7 +1398,9 @@ struct ThemePaletteEditor: View {
       return
     }
 
-    moveToAdjacentTab(forward: horizontalDistance < 0)
+    let isRTL = layoutDirection == .rightToLeft
+    let forward = isRTL ? horizontalDistance > 0 : horizontalDistance < 0
+    moveToAdjacentTab(forward: forward)
   }
 
   private func moveToAdjacentTab(forward: Bool) {
@@ -1403,7 +1427,7 @@ struct ThemePaletteEditor: View {
 
   private var previewBackgroundLayer: AnyView {
     AnyView(
-      DynamicBackgroundContentView(
+      ResolutionAwareDynamicBackgroundContentView(
         style: dynamicBackground,
         theme: previewTheme
       )
@@ -1422,7 +1446,7 @@ struct ThemePaletteEditor: View {
         .ignoresSafeArea()
         .allowsHitTesting(activeSliderTitle == nil)
         .onTapGesture(perform: endBackgroundPreview)
-        .accessibilityLabel("Show controls")
+        .accessibilityLabel(Text("Show controls"))
     )
   }
 
