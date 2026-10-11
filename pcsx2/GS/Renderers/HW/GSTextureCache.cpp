@@ -15,7 +15,13 @@
 #include "common/HashCombine.h"
 #include "common/SmallString.h"
 
+#ifdef __SWITCH__
+#include "Horizon/HorizonProfiler.h"
+#endif
+
 #include <atomic>
+#include <bit>
+#include <mutex>
 
 #include "fmt/format.h"
 
@@ -6449,6 +6455,14 @@ void GSTextureCache::IncAge()
 			++it;
 		}
 	}
+
+#ifdef __SWITCH__
+	u32 source_pages = 0;
+	for (const u64 bits : m_src.m_occupied_pages)
+		source_pages += static_cast<u32>(std::popcount(bits));
+	HorizonProfiler::PublishTextureCacheCounts(static_cast<u32>(m_src.m_surfaces.size()),
+		m_dst[RenderTarget].size(), m_dst[DepthStencil].size(), source_pages);
+#endif
 }
 
 //Fixme: Several issues in here. Not handling depth stencil, pitch conversion doesnt work.

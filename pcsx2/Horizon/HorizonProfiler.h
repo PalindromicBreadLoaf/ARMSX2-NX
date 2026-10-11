@@ -6,6 +6,8 @@
 
 #ifdef __SWITCH__
 
+#include "common/Pcsx2Types.h"
+
 // Statistical sampling profiler for Switch.
 namespace HorizonProfiler
 {
@@ -18,6 +20,8 @@ namespace HorizonProfiler
 	void RequestStop();
 
 	void Shutdown();
+
+	void PublishTextureCacheCounts(u32 sources, u32 render_targets, u32 depth_targets, u32 source_pages);
 } // namespace HorizonProfiler
 
 #endif

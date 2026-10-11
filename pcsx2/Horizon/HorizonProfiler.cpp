@@ -83,6 +83,8 @@ namespace
 	constexpr std::size_t MAX_LISTED_GUEST_PCS = 60;
 	constexpr std::size_t MAX_DUMPED_BLOCKS = 16;
 	constexpr std::size_t MAX_BLOCK_INSTRUCTIONS = 1024;
+	constexpr std::size_t MAX_FULL_BLOCKS = 4;
+	constexpr std::size_t MAX_FULL_BLOCK_INSTRUCTIONS = 8192;
 	constexpr std::size_t MAX_LISTED_UNKNOWN = 12;
 	constexpr std::size_t MAX_LOGGED_LINES = 40;
 
@@ -138,6 +140,10 @@ namespace
 		u32 vsyncs = 0;
 		float fps = 0.0f;
 		float gpu_usage = 0.0f;
+		u32 tc_sources = 0;
+		u32 tc_render_targets = 0;
+		u32 tc_depth_targets = 0;
+		u32 tc_source_pages = 0;
 		std::array<u64, MAX_THREADS> thread_ticks{};
 	};
 
@@ -184,6 +190,10 @@ namespace
 	};
 
 	std::atomic<bool> s_running{false};
+	std::atomic<u32> s_tc_sources{0};
+	std::atomic<u32> s_tc_render_targets{0};
+	std::atomic<u32> s_tc_depth_targets{0};
+	std::atomic<u32> s_tc_source_pages{0};
 	std::mutex s_lifecycle_mutex;
 	std::thread s_sampler_thread;
 	Capture s_capture;
@@ -243,7 +253,7 @@ namespace
 
 		const uptr stack_start = thread.info.stack_start;
 		const uptr stack_end = thread.info.stack_end;
-		if (stack_end <= stack_start)
+		if (stack_end <= stack_start || stack_end - stack_start < 16)
 			return 0;
 
 		uptr fp = ctx.fp;
@@ -251,7 +261,7 @@ namespace
 		u8 depth = 0;
 		while (depth < MAX_FRAMES)
 		{
-			if (fp % 16 != 0 || fp < stack_start || fp + 16 > stack_end || fp <= previous_fp)
+			if (fp % 16 != 0 || fp < stack_start || fp > stack_end - 16 || fp <= previous_fp)
 				break;
 
 			u64 record[2];
@@ -399,6 +409,10 @@ namespace
 		bucket.vsyncs = LoadRelaxed(g_FrameCount);
 		bucket.fps = PerformanceMetrics::GetFPS();
 		bucket.gpu_usage = PerformanceMetrics::GetGPUUsage();
+		bucket.tc_sources = s_tc_sources.load(std::memory_order_relaxed);
+		bucket.tc_render_targets = s_tc_render_targets.load(std::memory_order_relaxed);
+		bucket.tc_depth_targets = s_tc_depth_targets.load(std::memory_order_relaxed);
+		bucket.tc_source_pages = s_tc_source_pages.load(std::memory_order_relaxed);
 
 		for (std::size_t i = 0; i < MAX_THREADS; ++i)
 		{
@@ -636,13 +650,14 @@ namespace
 			return;
 
 		out += fmt::format("\nTimeline, {} ms per row. speed is emulated EE time over wall time, vps is emulated "
-						   "vsyncs per second, fps and gpu are the OSD's own running values, the rest are each "
-						   "thread's share of a core:\n",
+						   "vsyncs per second, fps and gpu are the OSD's own running values, src/rt/ds are the "
+						   "texture cache's source, render-target and depth-target counts and pg the GS pages "
+						   "holding at least one source (of 512), the rest are each thread's share of a core:\n",
 			BUCKET_NS / 1'000'000);
 		for (std::size_t column = 0; column < order.size(); ++column)
 			out += fmt::format("  T{} = {}\n", column, s_capture.threads[order[column]].info.name.data());
 
-		out += "       t  speed    vps    fps    gpu";
+		out += "       t  speed    vps    fps    gpu   src   rt   ds   pg";
 		for (std::size_t column = 0; column < order.size(); ++column)
 			out += fmt::format("  {:>5}", fmt::format("T{}", column));
 		out += "\n";
@@ -661,6 +676,8 @@ namespace
 			out += fmt::format("  {:6.2f}  {:4.0f}%  {:5.1f}  {:5.1f}  {:4.0f}%",
 				TicksToSeconds(bucket.wall_ticks - origin.wall_ticks), 100.0 * speed,
 				static_cast<u32>(bucket.vsyncs - previous.vsyncs) / wall, bucket.fps, bucket.gpu_usage);
+			out += fmt::format("  {:4}  {:3}  {:3}  {:3}", bucket.tc_sources, bucket.tc_render_targets,
+				bucket.tc_depth_targets, bucket.tc_source_pages);
 			for (const std::size_t i : order)
 			{
 				const u64 before = previous.thread_ticks[i];
@@ -836,14 +853,15 @@ namespace
 
 		out += "\nHottest recompiled blocks as AArch64 encodings, read back after the capture. "
 		       "Columns are offset, self samples and encoding.\n";
-		for (const HotBlock* block : ranked)
+		for (std::size_t rank = 0; rank < ranked.size(); ++rank)
 		{
+			const HotBlock* block = ranked[rank];
 			const JitSymbol& symbol = block->symbol;
+			const std::size_t limit = (rank < MAX_FULL_BLOCKS ? MAX_FULL_BLOCK_INSTRUCTIONS : MAX_BLOCK_INSTRUCTIONS) * 4;
 			const uptr start = symbol.start & ~uptr{3};
-			const uptr end = std::min<uptr>({symbol.start + symbol.size, start + MAX_BLOCK_INSTRUCTIONS * 4,
-				s_capture.code_end});
+			const uptr end = std::min<uptr>({symbol.start + symbol.size, start + limit, s_capture.code_end});
 			out += fmt::format("\nBlock {}, {} self samples, {} host bytes{}.\n", SymbolName(symbol), block->self,
-				symbol.size, symbol.size > MAX_BLOCK_INSTRUCTIONS * 4 ? " (truncated)" : "");
+				symbol.size, symbol.size > limit ? " (truncated)" : "");
 			for (uptr pc = start; pc + 4 <= end; pc += 4)
 			{
 				u32 encoding;
@@ -1031,6 +1049,10 @@ namespace
 			OnOff(EmuConfig.Speedhacks.vuThread), EmuConfig.Speedhacks.EECycleRate, EmuConfig.Speedhacks.EECycleSkip,
 			OnOff(EmuConfig.EnableThreadPinning), OnOff(EmuConfig.Cpu.Recompiler.EnableFastmem),
 			vtlb_FastmemAreaUnavailable() ? "unavailable" : "mapped", HorizonFastmem::GetSupportReason());
+		const Pcsx2Config::RecompilerOptions& rec = EmuConfig.Cpu.Recompiler;
+		const int vu1_clamp = !rec.vu1Overflow ? 0 : !rec.vu1ExtraOverflow ? 1 : !rec.vu1SignOverflow ? 2 : !rec.vu1ExactMode ? 3 : 4;
+		out += fmt::format("fixes: draw buffering {}, manual hw fixes {}, game fixes {}, vu1 clamp mode {}\n",
+			OnOff(gs.UserHacks_DrawBuffering), OnOff(gs.ManualUserHacks), OnOff(EmuConfig.EnableGameFixes), vu1_clamp);
 		out += fmt::format("process core mask {:#x}\n", Horizon::GetProcessCoreMask());
 		return out;
 	}
@@ -1083,6 +1105,14 @@ namespace
 			name, tag, reinterpret_cast<uptr>(start), reinterpret_cast<uptr>(start) + size};
 	}
 } // namespace
+
+void HorizonProfiler::PublishTextureCacheCounts(u32 sources, u32 render_targets, u32 depth_targets, u32 source_pages)
+{
+	s_tc_sources.store(sources, std::memory_order_relaxed);
+	s_tc_render_targets.store(render_targets, std::memory_order_relaxed);
+	s_tc_depth_targets.store(depth_targets, std::memory_order_relaxed);
+	s_tc_source_pages.store(source_pages, std::memory_order_relaxed);
+}
 
 bool HorizonProfiler::IsRunning()
 {
