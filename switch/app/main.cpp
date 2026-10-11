@@ -500,6 +500,7 @@ int main(int argc, char* argv[])
 
 	HorizonException::Initialize(LOGS_DIR);
 	Horizon::ExitTrace("=== main entered");
+	Horizon::AuditHeapToExitTrace("startup");
 
 	Log::SetTimestampsEnabled(true);
 	VMManager::Internal::SetFileLogPath(Path::Combine(LOGS_DIR, "emulog.txt"));
@@ -599,6 +600,7 @@ int main(int argc, char* argv[])
 	Horizon::ExitTrace("MTGS closed");
 	VMManager::Internal::CPUThreadShutdown();
 	Horizon::ExitTrace("CPUThreadShutdown done (SysMemory released, JIT freed)");
+	Horizon::AuditHeapToExitTrace("after shutdown");
 
 	if (romfs_available)
 		romfsExit();

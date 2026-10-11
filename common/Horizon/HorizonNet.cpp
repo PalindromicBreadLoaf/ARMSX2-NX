@@ -4,12 +4,16 @@
 
 #include "Horizon.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <mutex>
 #include <unistd.h>
+
+extern "C" char* fake_heap_start;
+extern "C" char* fake_heap_end;
 
 namespace Horizon
 {
@@ -93,6 +97,51 @@ namespace Horizon
 			fsync(fd);
 		}
 		close(fd);
+	}
+
+	void AuditHeapToExitTrace(const char* when)
+	{
+		const u64 begin = reinterpret_cast<u64>(fake_heap_start);
+		const u64 end = reinterpret_cast<u64>(fake_heap_end);
+		char line[256];
+		if (begin >= end)
+		{
+			std::snprintf(line, sizeof(line), "heap audit (%s): no heap bounds", when);
+			ExitTrace(line);
+			return;
+		}
+
+		constexpr u32 MAX_LISTED = 24;
+		u32 listed = 0;
+		u64 bad_bytes = 0;
+		u64 addr = begin;
+		while (addr < end)
+		{
+			MemoryInfo info{};
+			u32 page_info;
+			if (R_FAILED(svcQueryMemory(&info, &page_info, addr)) || info.size == 0)
+				break;
+
+			const u64 range_begin = std::max<u64>(info.addr, begin);
+			const u64 range_end = std::min<u64>(info.addr + info.size, end);
+			const bool plain = (info.type & MemState_Type) == MemType_Heap && info.perm == Perm_Rw && info.attr == 0;
+			if (!plain && range_end > range_begin)
+			{
+				bad_bytes += range_end - range_begin;
+				if (listed++ < MAX_LISTED)
+				{
+					std::snprintf(line, sizeof(line),
+						"heap audit (%s): %#lx-%#lx (+%#lx into heap) type %#x perm %#x attr %#x", when,
+						range_begin, range_end, range_begin - begin, info.type & MemState_Type, info.perm, info.attr);
+					ExitTrace(line);
+				}
+			}
+			addr = info.addr + info.size;
+		}
+
+		std::snprintf(line, sizeof(line), "heap audit (%s): heap %#lx-%#lx, %u odd ranges, %#lx bytes", when, begin, end,
+			listed, bad_bytes);
+		ExitTrace(line);
 	}
 } // namespace Horizon
 

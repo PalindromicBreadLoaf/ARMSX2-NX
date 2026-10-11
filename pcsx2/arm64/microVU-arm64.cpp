@@ -2041,7 +2041,10 @@ void recMicroVU0::Shutdown()
 void recMicroVU1::Shutdown()
 {
 	if (vu1Thread.IsOpen())
+	{
 		vu1Thread.WaitVU();
+		vu1Thread.Close();
+	}
 	mVUclose(microVU1);
 }
 

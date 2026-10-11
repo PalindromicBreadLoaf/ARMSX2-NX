@@ -24,4 +24,6 @@ namespace Horizon
 	void Breadcrumb(const char* message);
 	void BreadcrumbShutdown();
 	void ExitTrace(const char* message);
+
+	void AuditHeapToExitTrace(const char* when);
 } // namespace Horizon

@@ -439,7 +439,9 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size, bool is_fil
 			Jit jit = it->second.jit;
 			s_code_mappings.erase(it);
 			lock.unlock();
-			jitClose(&jit);
+			const Result result = jitClose(&jit);
+			if (R_FAILED(result))
+				Console.Error("SharedMemoryMappingArea::Unmap: jitClose(%p, 0x%zx) failed: 0x%08x", map_base, map_size, result);
 			m_num_mappings--;
 			return true;
 		}
@@ -467,9 +469,14 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size, bool is_fil
 
 			svcSetMemoryPermission(map_base, mapping.size, Perm_Rw);
 			virtmemLock();
-			svcUnmapProcessMemory(map_base, envGetOwnProcessHandle(),
+			const Result result = svcUnmapProcessMemory(map_base, envGetOwnProcessHandle(),
 				reinterpret_cast<u64>(mapping.src), mapping.size);
 			virtmemUnlock();
+			if (R_FAILED(result))
+			{
+				Console.Error("SharedMemoryMappingArea::Unmap: svcUnmapProcessMemory(%p, %p, 0x%zx) failed: 0x%08x",
+					map_base, mapping.src, mapping.size, result);
+			}
 			m_num_mappings--;
 			return true;
 		}
@@ -487,8 +494,13 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size, bool is_fil
 
 			svcSetMemoryPermission(map_base, mapping.size, Perm_Rw);
 			virtmemLock();
-			svcUnmapMemory(map_base, mapping.src, mapping.size);
+			const Result result = svcUnmapMemory(map_base, mapping.src, mapping.size);
 			virtmemUnlock();
+			if (R_FAILED(result))
+			{
+				Console.Error("SharedMemoryMappingArea::Unmap: svcUnmapMemory(%p, %p, 0x%zx) failed: 0x%08x",
+					map_base, mapping.src, mapping.size, result);
+			}
 			m_num_mappings--;
 			return true;
 		}
