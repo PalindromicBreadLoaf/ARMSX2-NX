@@ -83,6 +83,10 @@ namespace MTGS
 	static std::atomic<bool> s_VsyncSignalListener;
 
 	static std::mutex s_mtx_RingBufferBusy2; // Gets released on semaXGkick waiting...
+
+	alignas(__cachelinesize) static std::atomic<bool> s_mtvu_waiting_for_pop{false};
+	static Threading::UserspaceSemaphore s_sem_mtvu_pop;
+	static void NotifyMTVUPacketPopped();
 	static Threading::WorkSema s_sem_event;
 	static Threading::UserspaceSemaphore s_sem_OnRingReset;
 	static Threading::UserspaceSemaphore s_sem_Vsync;
@@ -492,6 +496,7 @@ void MTGS::MainLoop()
 						GSgifTransfer((u8*)&path.buffer[gsPack.offset], gsPack.size / 16);
 					path.readAmount.fetch_sub(gsPack.size + gsPack.readAmount, std::memory_order_acq_rel);
 					path.PopGSPacketMTVU(); // Should be done last, for proper Gif_MTGS_Wait()
+					NotifyMTVUPacketPopped();
 					break;
 				}
 
@@ -637,6 +642,14 @@ void MTGS::MainLoop()
 	// Unblock any threads in WaitGS in case MTGS gets cancelled while still processing work
 	s_ReadPos.store(s_WritePos.load(std::memory_order_acquire), std::memory_order_relaxed);
 	s_sem_event.Kill();
+	NotifyMTVUPacketPopped();
+}
+
+void MTGS::NotifyMTVUPacketPopped()
+{
+	std::atomic_thread_fence(std::memory_order_seq_cst);
+	if (s_mtvu_waiting_for_pop.load(std::memory_order_relaxed) && s_mtvu_waiting_for_pop.exchange(false))
+		s_sem_mtvu_pop.Post();
 }
 
 // Waits for the GS to empty out the entire ring buffer contents.
@@ -664,16 +677,17 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 		// code, so reading it from the MTVU thread might be dangerous;
 		// hence it has been avoided...
 		u32 startP1Packs = path.GetPendingGSPackets();
-		if (startP1Packs)
+		while (startP1Packs && path.GetPendingGSPackets() == startP1Packs && IsOpen())
 		{
-			while (true)
+			s_mtvu_waiting_for_pop.store(true, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_seq_cst);
+			if (path.GetPendingGSPackets() != startP1Packs || !IsOpen())
 			{
-				// m_mtx_RingBufferBusy2.Wait();
-				s_mtx_RingBufferBusy2.lock();
-				s_mtx_RingBufferBusy2.unlock();
-				if (path.GetPendingGSPackets() != startP1Packs)
-					break;
+				if (!s_mtvu_waiting_for_pop.exchange(false))
+					s_sem_mtvu_pop.Wait();
+				break;
 			}
+			s_sem_mtvu_pop.WaitWithSpin();
 		}
 	}
 	else
