@@ -380,6 +380,9 @@ public:
 		Source(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA);
 		virtual ~Source();
 
+		static void* operator new(size_t size);
+		static void operator delete(void* p);
+
 		__fi bool CanPreload() const { return CanPreloadTextureSize(m_TEX0.TW, m_TEX0.TH); }
 		__fi bool IsFromTarget() const { return m_target; }
 		bool IsPaletteFormat() const;
@@ -422,6 +425,10 @@ public:
 	public:
 		std::unordered_set<Source*> m_surfaces;
 		std::array<FastList<Source*>, GS_MAX_PAGES> m_map;
+
+		std::array<u64, GS_MAX_PAGES / 64> m_occupied_pages = {};
+
+		__fi bool HasSources(u32 page) const { return (m_occupied_pages[page >> 6] >> (page & 63)) & 1; }
 
 		void Add(Source* s, const GIFRegTEX0& TEX0);
 		void SwapTexture(GSTexture* old_tex, GSTexture* new_tex);
