@@ -1184,6 +1184,7 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
 
 	mVUemitClampConsts(mVU);
 	mvuPreloadRegisters(mVU, endCount);
+	mVU.regAlloc->accInRange = false;
 
 	for (; x < endCount; x++)
 	{

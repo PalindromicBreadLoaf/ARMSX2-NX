@@ -65,6 +65,8 @@ public:
 	// is one more than the widest operand list any FMAC body clamps.
 	static constexpr int kCloneRunMax = 4;
 
+	bool accInRange = false;
+
 protected:
 	std::array<microMapNEON, neonAllocTotal> neonMap;
 	std::array<microMapGPR, gprAllocCount>   gprMap;
@@ -328,6 +330,7 @@ public:
 		counter = 0;
 		neonWatermark = 0;
 		cloneCount = 0;
+		accInRange = false;
 	}
 
 	// Highest NEON slot index + 1 handed out since the last reset(). The COP2
@@ -413,6 +416,8 @@ public:
 	const a64::VRegister allocReg(int vfLoadReg = -1, int vfWriteReg = -1, int xyzw = 0, bool cloneWrite = true)
 	{
 		counter++;
+		if (vfWriteReg == 32)
+			accInRange = false;
 
 		// Search for cached copy.
 		if (vfLoadReg >= 0)

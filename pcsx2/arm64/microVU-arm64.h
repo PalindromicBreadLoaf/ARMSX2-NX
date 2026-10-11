@@ -174,7 +174,10 @@
 //  39 — the sign-preserving clamp's all-lane row reads qmmClampMax and
 //       qmmClampMin rather than loading the same two bounds from mVUglob, so
 //       each full-width operand clamp loses its Ldp.
-static constexpr u32 kMvuCompilerAbiVersion = 39;
+//  40 — an accumulate skips clamping ACC as an operand when the previous FMAC
+//       in the block left it clamped.
+//  41 — the AX-14 broadcast lane fold also runs in the extra clamp mode.
+static constexpr u32 kMvuCompilerAbiVersion = 41;
 
 // Hash/equality functors for XXH128_hash_t — let std::unordered_map<XXH128_hash_t, …>
 // work without a wrapping struct. low64 already carries the well-mixed half of
