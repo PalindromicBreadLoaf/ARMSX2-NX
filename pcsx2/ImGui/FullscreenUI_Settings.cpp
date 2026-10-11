@@ -3430,8 +3430,8 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 			FSUI_CSTR("Runs GS rendering on a second thread. Helps heavy rendering such as high upscaling; if a game shows graphics glitches, turn it back off."),
 			"EmuCore/GS", "GSBackThreadMode", 0, s_gs_multithreading, std::size(s_gs_multithreading), true);
 #ifdef __SWITCH__
-		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MICROCHIP, "GS Backend on Core 3"),
-			FSUI_CSTR("Runs the second GS thread on the fourth core. Requires a loader granting core 3. Experimental."),
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MICROCHIP, "Use Core 3 for GS Multi-threading"),
+			FSUI_CSTR("Moves the GS parsing thread to the fourth core. Requires a loader granting core 3. Experimental."),
 			"EmuCore/GS", "GSBackThreadUseCore3", false,
 			GetEffectiveIntSetting(bsi, "EmuCore/GS", "GSBackThreadMode", 0) != 0);
 #endif

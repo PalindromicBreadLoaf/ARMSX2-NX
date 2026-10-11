@@ -18,7 +18,7 @@
 #include "common/Path.h"
 #include "common/StringUtil.h"
 #ifdef __SWITCH__
-#include "common/Horizon/Horizon.h"
+#include "MTGS.h"
 #endif
 
 #include <algorithm>
@@ -902,22 +902,11 @@ void GSState::BackThreadLoop()
 #else
 	Console.WriteLn("GS: back thread starts on CPU mask 0x%llx (0 = any; re-placed when thread affinities are applied).", static_cast<unsigned long long>(placed));
 #endif
-	bool spin_for_work = true;
 #ifdef __SWITCH__
-	if (GSConfig.BackThreadUseCore3)
-	{
-		const bool pinned = Horizon::PinCallingThreadToCore3();
-		Console.WriteLn("GS: core 3 backend %s (process mask 0x%llx, thread mask 0x%llx).",
-			pinned ? "active" : "unavailable; using application cores",
-			static_cast<unsigned long long>(Horizon::GetProcessCoreMask()),
-			static_cast<unsigned long long>(handle.GetAffinity()));
-		spin_for_work = !pinned;
-	}
-	else
-	{
-		Console.WriteLn("GS: backend using application cores (thread mask 0x%llx).",
-			static_cast<unsigned long long>(handle.GetAffinity()));
-	}
+	Console.WriteLn("GS: back thread mask 0x%llx, front thread mask 0x%llx (core 3 front %s).",
+		static_cast<unsigned long long>(handle.GetAffinity()),
+		static_cast<unsigned long long>(MTGS::GetThreadHandle().GetAffinity()),
+		GSConfig.BackThreadUseCore3 ? "requested" : "off");
 #endif
 
 	// Half the GS work runs here under the split, and the OSD's "GS" figure is the MTGS
@@ -927,10 +916,7 @@ void GSState::BackThreadLoop()
 
 	for (;;)
 	{
-		if (spin_for_work)
-			m_chan->sema.WaitForWorkWithSpin();
-		else
-			m_chan->sema.WaitForWork();
+		m_chan->sema.WaitForWorkWithSpin();
 
 		if (m_back_thread_exit.load(std::memory_order_acquire))
 			break;

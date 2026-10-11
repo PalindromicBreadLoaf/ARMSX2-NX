@@ -1067,6 +1067,8 @@ struct Pcsx2Config
 		/// loaded or saved, and not compared -- set by OpenGSRenderer on GSConfig only, and read by
 		/// the renderer's constructor.
 		bool BackThreadResolved = false;
+		/// Switch: while the back thread runs, park the MTGS (front) thread on core 3 and give the
+		/// back thread the MTGS thread's core.
 		bool BackThreadUseCore3 = false;
 
 		// RetroArch (.slangp) shader chain, applied at present after ShadeBoost/FXAA via

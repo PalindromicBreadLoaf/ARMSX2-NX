@@ -4806,19 +4806,42 @@ void VMManager::EnsureCPUInfoInitialized()
 static std::mutex s_gs_back_thread_mutex;
 static Threading::ThreadHandle s_gs_back_thread_handle;
 static u64 s_gs_back_thread_affinity = 0; // 0 = any processor
+#ifdef __SWITCH__
+static u64 s_gs_front_home_affinity = 0;
+#endif
+
+// Returns the mask the back thread was given.
+static u64 ApplyGSBackThreadPlacementLocked()
+{
+	u64 back_mask = s_gs_back_thread_affinity;
+#ifdef __SWITCH__
+	const Threading::ThreadHandle& gs = MTGS::GetThreadHandle();
+	if (gs)
+	{
+		const u64 gs_mask = gs.GetAffinity();
+		if (gs_mask != 8)
+			s_gs_front_home_affinity = gs_mask;
+		if (s_gs_back_thread_handle && EmuConfig.GS.BackThreadUseCore3 && (Horizon::GetProcessCoreMask() & 8))
+		{
+			gs.SetAffinity(8);
+			back_mask = s_gs_front_home_affinity;
+		}
+		else if (gs_mask == 8)
+		{
+			gs.SetAffinity(s_gs_front_home_affinity);
+		}
+	}
+#endif
+	if (s_gs_back_thread_handle)
+		s_gs_back_thread_handle.SetAffinity(back_mask);
+	return back_mask;
+}
 
 static void SetGSBackThreadAffinityLocked(u64 mask)
 {
-#ifdef __SWITCH__
-	// Core 3 is withheld from every other emulator thread, so the opt-in placement overrides any
-	// mask chosen here; SetAffinity(0) would otherwise move the thread back onto cores 0-2.
-	if (EmuConfig.GS.BackThreadUseCore3 && (Horizon::GetProcessCoreMask() & 8))
-		mask = 8;
-#endif
 	std::unique_lock lock(s_gs_back_thread_mutex);
 	s_gs_back_thread_affinity = mask;
-	if (s_gs_back_thread_handle)
-		s_gs_back_thread_handle.SetAffinity(mask);
+	ApplyGSBackThreadPlacementLocked();
 }
 
 u64 VMManager::Internal::RegisterGSBackThread(const Threading::ThreadHandle* handle)
@@ -4827,9 +4850,7 @@ u64 VMManager::Internal::RegisterGSBackThread(const Threading::ThreadHandle* han
 	s_gs_back_thread_handle = handle ? *handle : Threading::ThreadHandle();
 	// Applied even when 0: the new thread inherited the MTGS thread's mask, which may be a
 	// single core, and sharing that core would serialize the split again.
-	if (s_gs_back_thread_handle)
-		s_gs_back_thread_handle.SetAffinity(s_gs_back_thread_affinity);
-	return s_gs_back_thread_affinity;
+	return ApplyGSBackThreadPlacementLocked();
 }
 
 void VMManager::Internal::SetGSBackThreadAffinity(u64 mask)
