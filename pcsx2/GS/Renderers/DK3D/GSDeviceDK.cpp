@@ -455,9 +455,6 @@ void GSDeviceDK::BeginFrameIfNeeded()
 		for (DkMemBlock block : ctx.extra_cmdbuf_memblocks)
 			dkMemBlockDestroy(block);
 		ctx.extra_cmdbuf_memblocks.clear();
-		for (DkMemBlock block : ctx.extra_stream_memblocks)
-			dkMemBlockDestroy(block);
-		ctx.extra_stream_memblocks.clear();
 		for (const PooledMemBlock& block : ctx.retired_memblocks)
 			PoolMemBlock(block);
 		ctx.retired_memblocks.clear();
@@ -524,13 +521,12 @@ void GSDeviceDK::AddCmdMemory(DkCmdBuf cmdbuf, size_t minReqSize)
 
 DkMemBlock GSDeviceDK::AllocateFrameMemory(u32 size)
 {
-	DkMemBlockMaker maker;
-	dkMemBlockMakerDefaults(&maker, m_device, AlignUp(size, DK_MEMBLOCK_ALIGNMENT));
-	maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-	DkMemBlock block = dkMemBlockCreate(&maker);
+	const u32 block_size = AlignUp(size, DK_MEMBLOCK_ALIGNMENT);
+	const u32 block_flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+	DkMemBlock block = AcquireMemBlock(block_size, block_flags);
 	if (!block)
 		pxFailRel("DK3D: failed to allocate frame stream memory.");
-	m_frames[m_frame_index].extra_stream_memblocks.push_back(block);
+	m_frames[m_frame_index].retired_memblocks.push_back({block, block_size, block_flags});
 	return block;
 }
 
@@ -886,9 +882,6 @@ void GSDeviceDK::DestroyDeviceObjects()
 		for (DkMemBlock block : ctx.extra_cmdbuf_memblocks)
 			dkMemBlockDestroy(block);
 		ctx.extra_cmdbuf_memblocks.clear();
-		for (DkMemBlock block : ctx.extra_stream_memblocks)
-			dkMemBlockDestroy(block);
-		ctx.extra_stream_memblocks.clear();
 		for (const PooledMemBlock& block : ctx.retired_memblocks)
 			dkMemBlockDestroy(block.block);
 		ctx.retired_memblocks.clear();

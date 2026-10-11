@@ -97,7 +97,7 @@ protected:
 private:
 	static constexpr unsigned NUM_FRAMEBUFFERS = 3;
 	static constexpr unsigned NUM_FRAMES_IN_FLIGHT = 3;
-	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 1024;
+	static constexpr unsigned NUM_IMAGE_DESCRIPTORS = 8192;
 	static constexpr unsigned SAMPLER_POINT = 0;
 	static constexpr unsigned SAMPLER_LINEAR = 4;
 	static constexpr unsigned NUM_SAMPLERS = 8;
@@ -172,7 +172,6 @@ private:
 		DkMemBlock cmdbuf_memblock = nullptr;
 		DkCmdBuf cmdbuf = nullptr;
 		std::vector<DkMemBlock> extra_cmdbuf_memblocks;
-		std::vector<DkMemBlock> extra_stream_memblocks;
 		std::vector<PooledMemBlock> retired_memblocks;
 		DkMemBlock descriptor_memblock = nullptr;
 		DkMemBlock vertex_memblock = nullptr;
