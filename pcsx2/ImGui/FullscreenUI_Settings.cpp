@@ -2785,6 +2785,9 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 #if defined(ENABLE_VULKAN) && !defined(__APPLE__)
 		FSUI_NSTR("Vulkan"),
 #endif
+#ifdef __SWITCH__
+		FSUI_NSTR("Deko3D"),
+#endif
 #ifdef __APPLE__
 		FSUI_NSTR("Metal"),
 #endif
@@ -2802,6 +2805,9 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 #endif
 #if defined(ENABLE_VULKAN) && !defined(__APPLE__)
 		"14", //GSRendererType::VK,
+#endif
+#ifdef __SWITCH__
+		"18", //GSRendererType::DK3D,
 #endif
 #ifdef __APPLE__
 		"17", //GSRendererType::Metal,
@@ -2953,7 +2959,8 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 	const GSRendererType effective_renderer =
 		(renderer == GSRendererType::Auto) ? GSUtil::GetPreferredRenderer() : renderer;
 	const bool is_hardware = (renderer == GSRendererType::Auto || renderer == GSRendererType::DX11 || renderer == GSRendererType::DX12 ||
-							  renderer == GSRendererType::OGL || renderer == GSRendererType::VK || renderer == GSRendererType::Metal);
+							  renderer == GSRendererType::OGL || renderer == GSRendererType::VK || renderer == GSRendererType::Metal ||
+							  renderer == GSRendererType::DK3D);
 	//const bool is_software = (renderer == GSRendererType::SW);
 
 	static std::optional<GSRendererType> s_last_adapter_list_renderer;
@@ -6517,6 +6524,7 @@ TRANSLATE_NOOP("FullscreenUI", "Direct3D 11 (Legacy)");
 TRANSLATE_NOOP("FullscreenUI", "Direct3D 12");
 TRANSLATE_NOOP("FullscreenUI", "OpenGL");
 TRANSLATE_NOOP("FullscreenUI", "Vulkan");
+TRANSLATE_NOOP("FullscreenUI", "Deko3D");
 TRANSLATE_NOOP("FullscreenUI", "Metal");
 TRANSLATE_NOOP("FullscreenUI", "Software Renderer");
 TRANSLATE_NOOP("FullscreenUI", "Null");
