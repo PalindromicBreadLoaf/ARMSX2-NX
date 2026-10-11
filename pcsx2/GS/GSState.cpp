@@ -802,30 +802,37 @@ GSBackQueue::PayloadNode* GSState::AcquirePayloadNode()
 		});
 	}
 
-	constexpr size_t alloc_size = 1024 * 1024 * 4; // = GSTransferBuffer's buffer
 	GSBackQueue::PayloadNode* node = new GSBackQueue::PayloadNode{
-		static_cast<u8*>(_aligned_malloc(alloc_size, 32))};
+		static_cast<u8*>(_aligned_malloc(GSBackQueue::Channel::kPayloadNodeSize, 32))};
 	if (!node->buff)
 		pxFailRel("GS: payload pool allocation failed");
 	m_chan->payload_arena.push_back(node);
 	return node;
 }
 
-void GSState::RotateTransferPayload()
+void GSState::RotateTransferPayload(u32 next_size)
 {
-	// Front side, at transfer Init. No-op until a record referenced the current
-	// buffer; then hand it to the record stream and stage into a fresh one —
-	// the pending TRANSFER records keep reading the old node.
-	if (!m_back_records || !m_tr_payload_referenced)
+	if (!m_back_records)
 		return;
 
-	GSBackQueue::ReleasePayloadRecord rec;
-	rec.node = m_tr_payload_node;
-	PushRecord(GSBackQueue::RecordType::ReleasePayload, rec);
+	if (m_tr_payload_referenced)
+	{
+		m_tr_payload_used += Common::AlignUpPow2(static_cast<u32>(m_tr.total), 64);
+		m_tr_payload_referenced = false;
+	}
 
-	m_tr_payload_node = AcquirePayloadNode();
-	m_tr.buff = m_tr_payload_node->buff;
-	m_tr_payload_referenced = false;
+	constexpr u32 node_size = GSBackQueue::Channel::kPayloadNodeSize;
+	if (m_tr_payload_used != 0 && (next_size == 0 || next_size > node_size - std::min(m_tr_payload_used, node_size)))
+	{
+		GSBackQueue::ReleasePayloadRecord rec;
+		rec.node = m_tr_payload_node;
+		PushRecord(GSBackQueue::RecordType::ReleasePayload, rec);
+
+		m_tr_payload_node = AcquirePayloadNode();
+		m_tr_payload_used = 0;
+	}
+
+	m_tr.buff = m_tr_payload_node->buff + m_tr_payload_used;
 }
 
 void GSState::ExecReleasePayloadRecord(const GSBackQueue::ReleasePayloadRecord& rec)
@@ -3678,13 +3685,17 @@ void GSState::GIFRegHandlerTRXDIR(const GIFReg* RESTRICT r)
 	switch (m_env.TRXDIR.XDIR)
 	{
 		case 0: // host -> local
-			RotateTransferPayload();
+		{
+			const u32 bits = static_cast<u32>(m_env.TRXREG.RRW) * m_env.TRXREG.RRH *
+				GSLocalMemory::m_psm[m_env.BITBLTBUF.DPSM].trbpp;
+			RotateTransferPayload(std::min<u32>((bits + 7) >> 3, GSBackQueue::Channel::kPayloadNodeSize));
 			m_tr.Init(m_env.TRXPOS, m_env.TRXREG, m_env.BITBLTBUF, true);
 			break;
+		}
 		case 1: // local -> host
 			// Readbacks also stage through m_tr.buff (ReadImageX writes it), so
 			// they must not land in a buffer pending records still reference.
-			RotateTransferPayload();
+			RotateTransferPayload(0);
 			m_tr.Init(m_env.TRXPOS, m_env.TRXREG, m_env.BITBLTBUF, false);
 			break;
 		case 2: // local -> local
@@ -5554,6 +5565,7 @@ int GSState::Defrost(const freezeData* fd)
 	ReadState(&m_v.FOG, data);
 	ReadState(&m_v.XYZ, data);
 	data += sizeof(GIFReg); // obsolite
+	RotateTransferPayload(0);
 	ReadState(&m_tr.x, data);
 	ReadState(&m_tr.y, data);
 

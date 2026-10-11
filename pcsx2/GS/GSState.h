@@ -924,9 +924,10 @@ public:
 	// before the arena walk so it isn't freed twice).
 	GSBackQueue::PayloadNode* m_tr_payload_node = nullptr;
 	bool m_tr_payload_referenced = false;
+	u32 m_tr_payload_used = 0;
 	void AdoptTransferBuffer();
 	GSBackQueue::PayloadNode* AcquirePayloadNode();
-	void RotateTransferPayload();
+	void RotateTransferPayload(u32 next_size);
 	void ExecReleasePayloadRecord(const GSBackQueue::ReleasePayloadRecord& rec);
 
 	// GV7-1d: the back thread, started by the back renderer object's constructor.
@@ -1007,7 +1008,7 @@ public:
 	void DumpVertices(const std::string& filename);
 	void DumpTransferList(const std::string& filename);
 	void DumpTransferImages();
-	
+
 	template<bool shuffle_check>
 	bool TrianglesAreQuadsImpl();
 	bool TrianglesAreQuads(bool shuffle_check = false);

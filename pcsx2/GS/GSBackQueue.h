@@ -568,12 +568,13 @@ namespace GSBackQueue
 		// Transfer payload pool: the producer stages into the current node, the
 		// consumer releases rotated-out nodes via RELEASE_PAYLOAD records.
 		static constexpr u32 kMaxPayloadNodes = 8;
+		static constexpr u32 kPayloadNodeSize = 4 * 1024 * 1024;
 		std::vector<PayloadNode*> payload_arena;
 		SpscRing<PayloadNode*, kMaxPayloadNodes> payload_free;
 
 		// How much the producer waits for once it has to wait at all: an eighth
 		// of the ring, a quarter of the draw pool, one payload node (they are
-		// 4 MB and rotate once per transfer). Waiting for a batch keeps the
+		// 4 MB and rotate once full). Waiting for a batch keeps the
 		// producer's spin from succeeding after every retired record.
 		static constexpr u32 kRingRefill = RecordRing::Capacity() / 8;
 		static constexpr u32 kDrawRefill = kMaxDrawNodes / 4;
