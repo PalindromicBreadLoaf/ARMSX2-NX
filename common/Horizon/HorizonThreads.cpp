@@ -13,7 +13,9 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include <pthread.h>
 #include <sched.h>
@@ -279,11 +281,72 @@ bool Threading::Thread::Start(EntryPoint func)
 	return true;
 }
 
+namespace
+{
+	struct DetachedThread
+	{
+		std::thread thread;
+		std::shared_ptr<std::atomic<bool>> finished;
+	};
+
+	std::mutex s_detached_mutex;
+	std::vector<DetachedThread> s_detached_threads;
+	std::vector<pthread_t> s_detached_handles;
+} // namespace
+
 void Threading::Thread::Detach()
 {
 	pxAssertRel(m_native_handle, "Can't detach without a thread");
-	pthread_detach(static_cast<pthread_t>(m_native_handle));
+	{
+		std::lock_guard lock(s_detached_mutex);
+		s_detached_handles.push_back(static_cast<pthread_t>(m_native_handle));
+	}
 	m_native_handle = nullptr;
+}
+
+void Threading::StartDetachedThread(std::function<void()> func)
+{
+	auto finished = std::make_shared<std::atomic<bool>>(false);
+	std::thread thread([func = std::move(func), finished]() {
+		func();
+		finished->store(true, std::memory_order_release);
+	});
+
+	std::lock_guard lock(s_detached_mutex);
+	for (auto it = s_detached_threads.begin(); it != s_detached_threads.end();)
+	{
+		if (it->finished->load(std::memory_order_acquire))
+		{
+			it->thread.join();
+			it = s_detached_threads.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+	s_detached_threads.push_back({std::move(thread), std::move(finished)});
+}
+
+void Threading::JoinDetachedThreads()
+{
+	for (;;)
+	{
+		std::vector<DetachedThread> threads;
+		std::vector<pthread_t> handles;
+		{
+			std::lock_guard lock(s_detached_mutex);
+			threads.swap(s_detached_threads);
+			handles.swap(s_detached_handles);
+		}
+		if (threads.empty() && handles.empty())
+			break;
+
+		for (DetachedThread& thread : threads)
+			thread.thread.join();
+		for (pthread_t handle : handles)
+			pthread_join(handle, nullptr);
+	}
 }
 
 void Threading::Thread::Join()

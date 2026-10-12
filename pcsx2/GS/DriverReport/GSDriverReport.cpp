@@ -15,6 +15,7 @@
 #include "common/FileSystem.h"
 #include "common/MemorySettingsInterface.h"
 #include "common/SettingsWrapper.h"
+#include "common/Threading.h"
 
 #ifdef ENABLE_VULKAN
 #include "GS/Renderers/Vulkan/VKLoader.h"
@@ -184,8 +185,11 @@ namespace GSDriverReport
 		/// the emulator builds without exceptions, so std::thread would abort instead.
 		bool StartDetached(const std::shared_ptr<SystemPart>& part)
 		{
-#ifdef _WIN32
+#if defined(_WIN32)
 			std::thread(RunSystemPart, part).detach();
+			return true;
+#elif defined(__SWITCH__)
+			Threading::StartDetachedThread([part]() { RunSystemPart(part); });
 			return true;
 #else
 			auto* arg = new std::shared_ptr<SystemPart>(part);

@@ -731,6 +731,9 @@ static void CompressAndWriteScreenshot(std::string filename, u32 width, u32 heig
 	}
 
 	// maybe std::async would be better here.. but it's definitely worth threading, large screenshots take a while to compress.
+#ifdef __SWITCH__
+	GSJoinSnapshotThreads();
+#endif
 	std::unique_lock lock(s_screenshot_threads_mutex);
 	s_screenshot_threads.emplace_back([key = std::move(key), filename = std::move(filename), image = std::move(image),
 										  quality = GSConfig.ScreenshotQuality]() {
@@ -750,6 +753,7 @@ static void CompressAndWriteScreenshot(std::string filename, u32 width, u32 heig
 					Host::OSD_ERROR_DURATION));
 		}
 
+#ifndef __SWITCH__
 		// remove ourselves from the list, if the GS thread is waiting for us, we won't be in there
 		const auto this_id = std::this_thread::get_id();
 		std::unique_lock lock(s_screenshot_threads_mutex);
@@ -762,6 +766,7 @@ static void CompressAndWriteScreenshot(std::string filename, u32 width, u32 heig
 				break;
 			}
 		}
+#endif
 	});
 }
 

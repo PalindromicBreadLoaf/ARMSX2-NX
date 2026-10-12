@@ -21,6 +21,7 @@
 #endif
 
 #include "DNS_Server.h"
+#include "common/Threading.h"
 #include "DEV9/PacketReader/IP/UDP/UDP_Packet.h"
 #include "DEV9/PacketReader/IP/UDP/DNS/DNS_Packet.h"
 
@@ -338,10 +339,9 @@ namespace InternalServers
 	{
 		//Need to spin up thread, pass the parms to it
 
-		std::thread GetHostThread(&DNS_Server::GetAddrInfoThread, this, url, state);
 		//detatch thread so that it can clean up itself
 		//we use another method of waiting for thread compleation
-		GetHostThread.detach();
+		Threading::StartDetachedThread([this, url, state]() { GetAddrInfoThread(url, state); });
 	}
 
 	void DNS_Server::GetAddrInfoThread(const std::string& url, DNS_State* state)

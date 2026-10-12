@@ -577,6 +577,7 @@ void VMManager::Internal::CPUThreadShutdown()
 
 	MTGS::ShutdownThread();
 	GSJoinSnapshotThreads();
+	Threading::JoinDetachedThreads();
 
 	ShutdownCPUProviders();
 
@@ -2629,6 +2630,9 @@ void VMManager::DoSaveState(const char* filename, s32 slot_for_message, bool zip
 
 	if (zip_on_thread)
 	{
+#ifdef __SWITCH__
+		WaitForSaveStateFlush();
+#endif
 		// lock order here is important; the thread could exit before we resume here.
 		std::unique_lock lock(s_save_state_threads_mutex);
 		s_save_state_threads.emplace_back(&VMManager::ZipSaveStateOnThread, std::move(elist), std::move(screenshot),
@@ -2687,6 +2691,7 @@ void VMManager::ZipSaveStateOnThread(std::unique_ptr<ArchiveEntryList> elist,
 	ZipSaveState(
 		std::move(elist), std::move(screenshot), filename.c_str(), slot_for_message, std::move(error_callback));
 
+#ifndef __SWITCH__
 	// remove ourselves from the thread list. if we're joining, we might not be in there.
 	const auto this_id = std::this_thread::get_id();
 	std::unique_lock lock(s_save_state_threads_mutex);
@@ -2699,6 +2704,7 @@ void VMManager::ZipSaveStateOnThread(std::unique_ptr<ArchiveEntryList> elist,
 			break;
 		}
 	}
+#endif
 }
 
 void VMManager::WaitForSaveStateFlush()

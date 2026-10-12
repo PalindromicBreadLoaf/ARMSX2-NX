@@ -102,7 +102,7 @@ namespace FullscreenUI
 			}
 
 			// Start the HDD creation
-			std::thread([instance = std::move(instance)]() {
+			Threading::StartDetachedThread([instance = std::move(instance)]() {
 				instance->Start();
 
 				if (!instance->errored)
@@ -129,7 +129,7 @@ namespace FullscreenUI
 						break;
 					}
 				}
-			}).detach();
+			});
 
 			return true;
 		}

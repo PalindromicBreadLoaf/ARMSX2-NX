@@ -13,6 +13,9 @@
 
 #include <atomic>
 #include <functional>
+#ifndef __SWITCH__
+#include <thread>
+#endif
 
 namespace Threading
 {
@@ -313,4 +316,16 @@ namespace Threading
 			return counter > 0;
 		}
 	};
+
+#ifdef __SWITCH__
+	void StartDetachedThread(std::function<void()> func);
+#else
+	inline void StartDetachedThread(std::function<void()> func) { std::thread(std::move(func)).detach(); }
+#endif
+
+#ifdef __SWITCH__
+	void JoinDetachedThreads();
+#else
+	inline void JoinDetachedThreads() {}
+#endif
 } // namespace Threading
