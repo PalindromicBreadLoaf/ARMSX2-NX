@@ -24,8 +24,8 @@ class VU_Thread final {
 	alignas(__cachelinesize) std::atomic<int> m_ato_read_pos; // Only modified by VU thread
 	alignas(__cachelinesize) std::atomic<int> m_ato_write_pos;    // Only modified by EE thread
 	alignas(__cachelinesize) int  m_read_pos; // temporary read pos (local to the VU thread)
-	int  m_write_pos; // temporary write pos (local to the EE thread)
-	Threading::WorkSema semaEvent;
+	alignas(__cachelinesize) int  m_write_pos; // temporary write pos (local to the EE thread)
+	alignas(__cachelinesize) Threading::WorkSema semaEvent;
 	std::atomic_bool m_shutdown_flag{false};
 
 	Threading::Thread m_thread;

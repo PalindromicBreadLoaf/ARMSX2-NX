@@ -137,7 +137,8 @@ void VU_Thread::ExecuteRingBuffer()
 		if (m_shutdown_flag.load(std::memory_order_acquire))
 			break;
 
-		while (m_ato_read_pos.load(std::memory_order_relaxed) != GetWritePos())
+		s32 write_pos = GetWritePos();
+		while (m_read_pos != write_pos)
 		{
 			u32 tag = Read();
 			switch (tag)
@@ -157,6 +158,7 @@ void VU_Thread::ExecuteRingBuffer()
 					semaXGkick.Post(); // Tell MTGS a path1 packet is complete
 					vuCycles[vuCycleIdx].store(VU1.cycle, std::memory_order_release);
 					vuCycleIdx = (vuCycleIdx + 1) & 3;
+					CommitReadPos();
 					break;
 				}
 				case MTVU_VU_WRITE_MICRO:
@@ -202,7 +204,11 @@ void VU_Thread::ExecuteRingBuffer()
 					jNO_DEFAULT;
 			}
 
-			CommitReadPos();
+			if (m_read_pos == write_pos)
+			{
+				CommitReadPos();
+				write_pos = GetWritePos();
+			}
 		}
 	}
 
