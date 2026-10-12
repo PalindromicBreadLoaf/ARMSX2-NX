@@ -10,10 +10,7 @@
 
 #define XXH_STATIC_LINKING_ONLY 1
 #define XXH_INLINE_ALL 1
-namespace CURRENT_ISA // XXH doesn't seem to use symbols that allow the compiler to deduplicate, but just in case...
-{
 #include <xxhash.h>
-}
 
 MULTI_ISA_UNSHARED_IMPL;
 
