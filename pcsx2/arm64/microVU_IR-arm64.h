@@ -1086,6 +1086,16 @@ public:
 			armAsm->Ldrh(dstReg.W(), src);
 	}
 
+	int findCachedVI(int vi) const
+	{
+		for (int i = 0; i < gprAllocCount; i++)
+		{
+			if (gprMap[i].usable && gprMap[i].VIreg == vi)
+				return i;
+		}
+		return -1;
+	}
+
 	// Defined out-of-line after microVU struct is complete
 	void writeVIBackup(const a64::Register& reg);
 

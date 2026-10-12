@@ -415,15 +415,14 @@ void normJumpCompile(mV, microFlagCycles& mFC, bool isEvilJump)
 		// stride is startPC*3; the 16-byte quick stride is startPC*2.
 		armAsm->Add(a64::x9, a64::x0, a64::Operand(a64::x0, a64::LSL, 1));
 		armAsm->Add(a64::x8, a64::x8, a64::x9);
-		armAsm->Ldr(a64::x10, a64::MemOperand(a64::x8, offsetof(microJumpCache, prog)));
 		armMoveAddressToReg(a64::x11, &mVU.prog.quick[0].prog);
 		armAsm->Lsl(a64::x12, a64::x0, 1);
 		armAsm->Ldr(a64::x11, a64::MemOperand(a64::x11, a64::x12));
+		armAsm->Ldp(a64::x10, a64::x12, a64::MemOperand(a64::x8, offsetof(microJumpCache, prog)));
 		armAsm->Cmp(a64::x10, a64::x11);
 		armAsm->B(&slowPath, a64::ne);
-		armAsm->Ldr(a64::x10, a64::MemOperand(a64::x8, offsetof(microJumpCache, hostEntry)));
-		armAsm->Cbz(a64::x10, &slowPath);
-		armAsm->Br(a64::x10);
+		armAsm->Cbz(a64::x12, &slowPath);
+		armAsm->Br(a64::x12);
 		armAsm->Bind(&slowPath);
 	}
 

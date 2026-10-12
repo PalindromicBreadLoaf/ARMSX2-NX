@@ -44,10 +44,10 @@ static __fi bool mVUclamp1Emits(microVU& mVU, bool bClampE)
 static constexpr int mVUcloneTakeHere = -2;
 
 // Result clamping: clamp to [minFloat, maxFloat].
-// Uses FMINNM/FMAXNM (number-preserving) so NaN inputs clamp to ±maxfloat,
-// matching x86 SSE MINPS/MAXPS NaN-eating semantics. Plain FMIN/FMAX are
-// IEEE-strict and propagate NaN — using them here lets NaN flow through
-// matrix-multiply chains and corrupts vertex output.
+// Uses FMINNM (number-preserving) so NaN inputs clamp to +maxfloat, matching
+// x86 SSE MINPS/MAXPS NaN-eating semantics. Plain FMIN/FMAX are IEEE-strict
+// and propagate NaN — using them here lets NaN flow through matrix-multiply
+// chains and corrupts vertex output.
 void mVUclamp1(microVU& mVU, const a64::VRegister& reg, const a64::VRegister& regT1, int xyzw,
 	bool bClampE = false, int cloned = mVUcloneTakeHere)
 {
@@ -81,7 +81,7 @@ void mVUclamp1(microVU& mVU, const a64::VRegister& reg, const a64::VRegister& re
 				pxAssert(cloned < 0);
 				const a64::VRegister t(RQSCRATCH3.GetCode(), 32);
 				armAsm->Fminnm(t, a64::VRegister(reg.GetCode(), 32), a64::VRegister(qmmClampMax.GetCode(), 32));
-				armAsm->Fmaxnm(t, t, a64::VRegister(qmmClampMin.GetCode(), 32));
+				armAsm->Umin(RQSCRATCH3.V4S(), RQSCRATCH3.V4S(), qmmClampMin.V4S());
 				armAsm->Ins(reg.V4S(), 0, RQSCRATCH3.V4S(), 0);
 				break;
 			}
@@ -93,7 +93,7 @@ void mVUclamp1(microVU& mVU, const a64::VRegister& reg, const a64::VRegister& re
 					cloned = mVU.regAlloc->takeCloneSource(reg.GetCode());
 				const a64::VRegister src = (cloned >= 0) ? a64::VRegister(cloned, 128) : reg;
 				armAsm->Fminnm(reg.V4S(), src.V4S(), qmmClampMax.V4S());
-				armAsm->Fmaxnm(reg.V4S(), reg.V4S(), qmmClampMin.V4S());
+				armAsm->Umin(reg.V4S(), reg.V4S(), qmmClampMin.V4S());
 				break;
 			}
 		}

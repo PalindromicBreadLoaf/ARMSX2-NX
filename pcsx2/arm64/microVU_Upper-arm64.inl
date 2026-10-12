@@ -525,7 +525,7 @@ static void setupFtReg(microVU& mVU, a64::VRegister& Ft, a64::VRegister& tempFt,
 			tempFt = mVU.regAlloc->allocReg(_Ft_);
 			Ft     = mVU.regAlloc->allocReg();
 			armAsm->Fminnm(Ft.V4S(), tempFt.V4S(), qmmClampMax.V4S());
-			armAsm->Fmaxnm(Ft.V4S(), Ft.V4S(), qmmClampMin.V4S());
+			armAsm->Umin(Ft.V4S(), Ft.V4S(), qmmClampMin.V4S());
 			mVU.regAlloc->clearNeeded(tempFt);
 			tempFt = Ft;
 			bcLane = _bc_;

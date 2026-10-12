@@ -177,7 +177,10 @@
 //  40 — an accumulate skips clamping ACC as an operand when the previous FMAC
 //       in the block left it clamped.
 //  41 — the AX-14 broadcast lane fold also runs in the extra clamp mode.
-static constexpr u32 kMvuCompilerAbiVersion = 41;
+//  42 — the overflow clamp's lower bound is an integer UMIN and not FMAXNM.
+//  43 — VU1 addresses Ubfiz straight from a cached VI register, and the
+//       JR/JALR jump-cache probe loads prog and hostEntry with one Ldp.
+static constexpr u32 kMvuCompilerAbiVersion = 43;
 
 // Hash/equality functors for XXH128_hash_t — let std::unordered_map<XXH128_hash_t, …>
 // work without a wrapping struct. low64 already carries the well-mixed half of
@@ -258,9 +261,8 @@ struct microProgram;
 struct MvuPersistLog;
 struct microJumpCache
 {
-	microJumpCache() : prog(NULL), x86ptrStart(NULL), hostEntry(NULL) {}
+	microJumpCache() : prog(NULL), hostEntry(NULL), x86ptrStart(NULL) {}
 	microProgram* prog;
-	void* x86ptrStart; // Code entry point (name kept for struct compatibility)
 	// Generalised "host entry" pointer. For JIT-emitted blocks this
 	// mirrors x86ptrStart (the rec-cache slot the block was compiled
 	// into). The indirection is retained for the persisted-JIT program
@@ -269,7 +271,10 @@ struct microJumpCache
 	// block-linking paths BR through hostEntry; x86ptrStart stays a
 	// debugging/perf-attribution hint.
 	void* hostEntry;
+	void* x86ptrStart; // Code entry point (name kept for struct compatibility)
 };
+static_assert(offsetof(microJumpCache, hostEntry) == offsetof(microJumpCache, prog) + 8,
+	"normJumpCompile loads prog and hostEntry with one Ldp");
 
 // mVUdetectSpinLoop's answer for a block, memoized in microBlock::spinState.
 // Asked for the first time by mVUspinBounce, on the block a cycle-budget

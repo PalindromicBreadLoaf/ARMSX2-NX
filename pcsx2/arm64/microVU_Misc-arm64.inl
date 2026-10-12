@@ -373,6 +373,44 @@ __fi void mVUaddrFix(mV, const a64::Register& gprReg)
 	}
 }
 
+__fi void mVUaddrFixFrom(mV, const a64::Register& dst, const a64::Register& src)
+{
+	if (isVU1)
+	{
+		armAsm->Ubfiz(dst.W(), src.W(), 4, 10);
+		return;
+	}
+	if (!dst.Is(src))
+		armAsm->Mov(dst.W(), src.W());
+	mVUaddrFix(mVU, dst);
+}
+
+__fi void mVUaddrFixVI(mV, const a64::Register& dst, int vi, s32 imm)
+{
+	const int cached = mVU.regAlloc->findCachedVI(vi);
+	if (cached >= 0 && imm == 0)
+	{
+		mVUaddrFixFrom(mVU, dst, armWRegister(cached));
+		return;
+	}
+	if (cached >= 0)
+	{
+		if (imm > 0)
+			armAsm->Add(dst.W(), armWRegister(cached), static_cast<u32>(imm));
+		else
+			armAsm->Sub(dst.W(), armWRegister(cached), static_cast<u32>(-imm));
+	}
+	else
+	{
+		mVU.regAlloc->moveVIToGPR(dst, vi);
+		if (imm > 0)
+			armAsm->Add(dst.W(), dst.W(), static_cast<u32>(imm));
+		else if (imm < 0)
+			armAsm->Sub(dst.W(), dst.W(), static_cast<u32>(-imm));
+	}
+	mVUaddrFix(mVU, dst);
+}
+
 // Turn a byte index into VU data memory, already in gprIdxq, into something a
 // load or store can address: on VU1 one Add off the pin, the distance riding
 // in the access's own offset field; on VU0 the pointer is still loaded.
