@@ -35,6 +35,7 @@ public:
 	__fi const DkImageDescriptor& GetDescriptor() const { return m_descriptor; }
 	__fi DkImageFormat GetDkFormat() const { return m_dk_format; }
 	__fi bool IsDepth() const { return m_is_depth; }
+	__fi u64 GetUID() const { return m_uid; }
 	void GetImageView(DkImageView* view) const;
 
 	// Barrier generation at which this texture was last written as a render/compute target
@@ -56,6 +57,7 @@ private:
 	DkImageDescriptor m_descriptor{};
 	DkImageFormat m_dk_format = DkImageFormat_None;
 	bool m_is_depth = false;
+	u64 m_uid = 0;
 	u64 m_write_gen = 0;
 
 	std::unique_ptr<u8[]> m_map_buffer;

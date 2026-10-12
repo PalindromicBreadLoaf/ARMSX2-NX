@@ -94,6 +94,8 @@ layout(std140, binding = 0) uniform cbSel
 	uint ub_sel_substitute_alpha;
 	uint ub_sel_replacement_alpha_snap;
 	uint ub_sel_native_texel_grid;
+	uint ub_sel_aa1;
+	uint ub_sel_abe;
 };
 
 // Variants are generated from this source by prepending one TFX_VARIANT_* define (see switch/app/CMakeLists.txt)
@@ -238,6 +240,7 @@ layout(location = 0) in vec4 v_t;
 layout(location = 1) in vec4 v_ti;
 layout(location = 2) in vec4 v_c;
 layout(location = 3) flat in vec4 v_cf;
+layout(location = 4) in float v_inv_cov;
 
 layout(location = 0, index = 0) out vec4 o_col0;
 layout(location = 0, index = 1) out vec4 o_col1;
@@ -886,13 +889,21 @@ void main()
 	}
 
 	vec4 C = ps_color();
+
+	if (ub_sel_aa1 != 0u)
+	{
+		float cov = clamp(LineCovScale * (1.0f - abs(v_inv_cov)), 0.0f, 1.0f);
+		if (ub_sel_abe == 0u || floor(C.a) == 128.0f)
+			C.a = 128.0f * cov;
+	}
+
 	bool atst_pass = atst(C);
 
 	if (sel_afail == 0u && !atst_pass)
 		discard;
 
 	// AA outputs a coverage of 1.0 as alpha
-	if (sel_fixed_one_a != 0u)
+	if (sel_fixed_one_a != 0u && ub_sel_aa1 == 0u)
 		C.a = 128.0f;
 
 	vec4 alpha_blend;

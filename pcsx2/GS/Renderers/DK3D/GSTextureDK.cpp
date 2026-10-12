@@ -11,6 +11,7 @@
 #include "common/Console.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 namespace
@@ -18,6 +19,16 @@ namespace
 	constexpr u32 AlignUp(u32 value, u32 align)
 	{
 		return (value + align - 1) & ~(align - 1);
+	}
+
+	DkTileSize PickTileSize(int height, bool compressed)
+	{
+		const u32 rows = AlignUp(static_cast<u32>(std::max(1, height)), compressed ? 4u : 1u) / (compressed ? 4u : 1u);
+		const u32 gobs = (rows + rows / 2 + 7) / 8;
+		u32 tile = gobs >= 16 ? 4 : gobs >= 8 ? 3 : gobs >= 4 ? 2 : gobs >= 2 ? 1 : 0;
+		while (tile != 0 && rows <= (8u << (tile - 1)))
+			--tile;
+		return static_cast<DkTileSize>(tile);
 	}
 } // namespace
 
@@ -73,6 +84,9 @@ std::unique_ptr<GSTextureDK> GSTextureDK::Create(DkDevice device, GSDeviceDK* de
 								 : 0;
 	}
 
+	layout_maker.flags |= DkImageFlags_CustomTileSize;
+	layout_maker.tileSize = PickTileSize(height, IsCompressedFormat(format));
+
 	DkImageLayout layout;
 	dkImageLayoutInitialize(&layout, &layout_maker);
 
@@ -110,6 +124,9 @@ GSTextureDK::GSTextureDK(DkDevice device, GSDeviceDK* device_dk, DkMemBlock memb
 	, m_dk_format(dk_format)
 	, m_is_depth(is_depth)
 {
+	static std::atomic<u64> s_next_uid{1};
+	m_uid = s_next_uid.fetch_add(1, std::memory_order_relaxed);
+
 	m_usage = usage;
 	m_format = format;
 	m_size.x = std::max(1, width);

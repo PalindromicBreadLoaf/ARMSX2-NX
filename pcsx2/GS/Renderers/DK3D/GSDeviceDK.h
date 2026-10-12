@@ -124,6 +124,8 @@ private:
 	DkGpuAddr StreamVertices(const void* data, u32 size);
 	DkGpuAddr StreamIndices(const void* data, u32 size);
 	DkGpuAddr StreamUniform(const void* data, u32 size);
+	// Stream a tfx draw's vertices and indices and bind them.
+	void BindHWGeometry(const GSHWDrawConfig& config);
 	void* ReserveStreamMemory(DkMemBlock& block, u32& offset, u32 size, u32 alignment, u32 capacity,
 		DkGpuAddr* gpu_addr);
 	DkMemBlock AllocateFrameMemory(u32 size);
@@ -144,6 +146,7 @@ private:
 		m_hw_invariants_bound = false;
 		m_hw_uniforms_valid = false;
 		m_hw_tex_valid = false;
+		m_hw_targets_valid = false;
 	}
 	// Issue a deko3d barrier and stop image generation if the image cache was marked
 	void IssueBarrier(DkBarrier mode, u32 invalidate_flags);
@@ -222,13 +225,17 @@ private:
 	};
 	static u32 SelectTfxVariant(const GSHWDrawConfig& config);
 
-	DkShader m_tfx_vsh{};
+	static constexpr u32 NUM_TFX_VS = static_cast<u32>(GSHWDrawConfig::VSExpand::LineAA1) + 1;
+	DkShader m_tfx_vsh[NUM_TFX_VS]{};
 	DkShader m_tfx_fsh[NumTfxVariants]{};
 	bool m_tfx_shaders_ok = false;
+	bool m_tfx_expand_shaders_ok = false;
+	DkMemBlock m_expand_index_memblock = nullptr;
 
 	// Skip re-emitting binds that match the previous HW draw
 	bool m_hw_invariants_bound = false;
 	u32 m_hw_tfx_variant = TfxVariantUber;
+	GSHWDrawConfig::VSExpand m_hw_vs_expand = GSHWDrawConfig::VSExpand::None;
 	u32 m_hw_blend_key = 0;
 	u32 m_hw_colormask = 0;
 	u32 m_hw_depth_key = 0;
@@ -239,6 +246,11 @@ private:
 	GSHWDrawConfig::VSConstantBuffer m_hw_last_vs{};
 	GSHWDrawConfig::PSConstantBuffer m_hw_last_ps{};
 	GSHWDrawConfig::PSSelector m_hw_last_pssel{};
+
+	// Skip re-binding the targets and viewport when a run of draws reuses them
+	bool m_hw_targets_valid = false;
+	u64 m_hw_last_rt_uid = 0;
+	u64 m_hw_last_ds_uid = 0;
 
 	// Skip re-pushing/binding the tfx source when a run of draws reuses them
 	bool m_hw_tex_valid = false;

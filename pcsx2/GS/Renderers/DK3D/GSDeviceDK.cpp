@@ -32,6 +32,9 @@ namespace
 	// Source base alignment for buffer to image copies
 	constexpr u32 STAGING_ALIGNMENT = 256;
 
+	constexpr u32 EXPAND_MAX_QUADS = 65536;
+	constexpr u32 EXPAND_INDEX_BUFFER_SIZE = EXPAND_MAX_QUADS * 6 * sizeof(u32);
+
 	// Each frame owns a start and end counter report
 	constexpr u32 TIMESTAMP_REPORT_SIZE = 16;
 	constexpr u32 TIMESTAMP_FRAME_STRIDE = 2 * TIMESTAMP_REPORT_SIZE;
@@ -55,8 +58,9 @@ namespace
 		u32 depth_fmt, urban_chaos, tales;
 		u32 automatic_lod, manual_lod;
 		u32 quantize_color, substitute_alpha, replacement_alpha_snap, native_texel_grid;
+		u32 aa1, abe;
 	};
-	static_assert(sizeof(DKTfxSelector) == 224);
+	static_assert(sizeof(DKTfxSelector) == 232);
 	static_assert(sizeof(GSHWDrawConfig::VSConstantBuffer) == 48);
 	static_assert(sizeof(GSHWDrawConfig::PSConstantBuffer) == 288);
 	static_assert(offsetof(GSHWDrawConfig::PSConstantBuffer, ChannelShuffleOffset) == 144);
@@ -130,7 +134,37 @@ namespace
 		sel.substitute_alpha = ps.substitute_alpha;
 		sel.replacement_alpha_snap = ps.replacement_alpha_snap;
 		sel.native_texel_grid = ps.native_texel_grid;
+		sel.aa1 = (ps.aa1 == GSHWDrawConfig::PS_AA1::LINE) ? 1u : 0u;
+		sel.abe = ps.abe;
 		return sel;
+	}
+
+	constexpr DkVtxAttribState kTfxAttribs[7] = {
+		{0, 0, 0, DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
+		{0, 0, 8, DkVtxAttribSize_4x8, DkVtxAttribType_Uint, 0},
+		{0, 0, 12, DkVtxAttribSize_1x32, DkVtxAttribType_Float, 0},
+		{0, 0, 16, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
+		{0, 0, 20, DkVtxAttribSize_1x32, DkVtxAttribType_Uint, 0},
+		{0, 0, 24, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
+		{0, 0, 28, DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
+	};
+	constexpr DkVtxBufferState kTfxBufferState = {sizeof(GSVertex), 0};
+
+	void BindTfxVertexInput(DkCmdBuf cmdbuf, GSHWDrawConfig::VSExpand expand)
+	{
+		const bool fetch = (expand == GSHWDrawConfig::VSExpand::None);
+		dkCmdBufBindVtxAttribState(cmdbuf, kTfxAttribs, fetch ? 7 : 0);
+		dkCmdBufBindVtxBufferState(cmdbuf, &kTfxBufferState, 1);
+	}
+
+	constexpr DkPrimitive GetTfxPrimitive(GSHWDrawConfig::Topology topology)
+	{
+		switch (topology)
+		{
+			case GSHWDrawConfig::Topology::Point: return DkPrimitive_Points;
+			case GSHWDrawConfig::Topology::Line: return DkPrimitive_Lines;
+			default: return DkPrimitive_Triangles;
+		}
 	}
 
 	constexpr DkBlendFactor kBlendFactors[16] = {
@@ -373,12 +407,35 @@ bool GSDeviceDK::CreateDeviceObjects()
 
 	m_features.cas_sharpening = m_cas_shader_ok;
 
+	if (m_tfx_expand_shaders_ok && !GSConfig.DisableVertexShaderExpand)
+	{
+		dkMemBlockMakerDefaults(&memblock_maker, m_device, AlignUp(EXPAND_INDEX_BUFFER_SIZE, DK_MEMBLOCK_ALIGNMENT));
+		memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+		m_expand_index_memblock = dkMemBlockCreate(&memblock_maker);
+		if (m_expand_index_memblock)
+		{
+			u32* idx = static_cast<u32*>(dkMemBlockGetCpuAddr(m_expand_index_memblock));
+			for (u32 i = 0; i < EXPAND_MAX_QUADS; i++)
+			{
+				const u32 base = i * 4;
+				*(idx++) = base + 0;
+				*(idx++) = base + 1;
+				*(idx++) = base + 2;
+				*(idx++) = base + 1;
+				*(idx++) = base + 2;
+				*(idx++) = base + 3;
+			}
+		}
+	}
+	m_features.vs_expand = (m_expand_index_memblock != nullptr);
+
 	// DATE shaders
 	m_features.stencil_buffer = m_date_shaders_ok;
 	m_features.primitive_id = m_date_shaders_ok && m_tfx_shaders_ok;
 
-	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers, convert=%d, tfx=%d).", m_present_width,
-		m_present_height, NUM_FRAMEBUFFERS, m_convert_shaders_ok ? 1 : 0, m_tfx_shaders_ok ? 1 : 0);
+	Console.WriteLn("DK3D: deko3d device up (%dx%d, %u framebuffers, convert=%d, tfx=%d, vs_expand=%d).",
+		m_present_width, m_present_height, NUM_FRAMEBUFFERS, m_convert_shaders_ok ? 1 : 0, m_tfx_shaders_ok ? 1 : 0,
+		m_features.vs_expand ? 1 : 0);
 	return true;
 }
 
@@ -572,6 +629,27 @@ DkGpuAddr GSDeviceDK::StreamUniform(const void* data, u32 size)
 	return addr;
 }
 
+void GSDeviceDK::BindHWGeometry(const GSHWDrawConfig& config)
+{
+	const u32 vtx_size = config.nverts * sizeof(GSVertex);
+	const DkGpuAddr vtx_addr = StreamVertices(config.verts, vtx_size);
+	if (config.vs.expand == GSHWDrawConfig::VSExpand::None)
+		dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
+	else
+		dkCmdBufBindStorageBuffer(m_cmdbuf, DkStage_Vertex, 0, vtx_addr, vtx_size);
+
+	if (config.vs.UseFixedExpandIndexBuffer())
+	{
+		pxAssert(config.nindices <= EXPAND_MAX_QUADS * 6);
+		dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint32, dkMemBlockGetGpuAddr(m_expand_index_memblock));
+	}
+	else
+	{
+		dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16,
+			StreamIndices(config.indices, config.nindices * sizeof(u16)));
+	}
+}
+
 void GSDeviceDK::ReserveImageDescriptors(u32 count)
 {
 	pxAssert(count <= NUM_IMAGE_DESCRIPTORS);
@@ -610,6 +688,7 @@ void GSDeviceDK::CommitClear(GSTextureDK* tex)
 		dkCmdBufBindRenderTargets(m_cmdbuf, nullptr, 0, &view);
 	else
 		dkCmdBufBindRenderTarget(m_cmdbuf, &view, nullptr);
+	m_hw_targets_valid = false;
 	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(tex->GetWidth()), static_cast<float>(tex->GetHeight()),
 		0.0f, 1.0f};
 	const DkScissor scissor = {0, 0, static_cast<u32>(tex->GetWidth()), static_cast<u32>(tex->GetHeight())};
@@ -822,7 +901,7 @@ bool GSDeviceDK::LoadShaders()
 	else
 		Console.Warning("DK3D: DATE setup shaders missing. Using slower COPY shader instead.");
 
-	m_tfx_shaders_ok = load_one(m_tfx_vsh, "romfs:/shaders/tfx_vsh.dksh") &&
+	m_tfx_shaders_ok = load_one(m_tfx_vsh[0], "romfs:/shaders/tfx_vsh.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantUber], "romfs:/shaders/tfx_fsh.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantOpaque], "romfs:/shaders/tfx_fsh_opaque.dksh") &&
 					   load_one(m_tfx_fsh[TfxVariantPalette], "romfs:/shaders/tfx_fsh_palette.dksh") &&
@@ -835,6 +914,16 @@ bool GSDeviceDK::LoadShaders()
 		Console.WriteLn("DK3D: tfx shaders loaded.");
 	else
 		Console.Warning("DK3D: tfx shaders missing. Things will be broken.");
+
+	using VSExpand = GSHWDrawConfig::VSExpand;
+	m_tfx_expand_shaders_ok = m_tfx_shaders_ok &&
+		load_one(m_tfx_vsh[static_cast<u32>(VSExpand::Point)], "romfs:/shaders/tfx_vsh_expand_point.dksh") &&
+		load_one(m_tfx_vsh[static_cast<u32>(VSExpand::Line)], "romfs:/shaders/tfx_vsh_expand_line.dksh") &&
+		load_one(m_tfx_vsh[static_cast<u32>(VSExpand::Sprite)], "romfs:/shaders/tfx_vsh_expand_sprite.dksh") &&
+		load_one(m_tfx_vsh[static_cast<u32>(VSExpand::LineAA1)], "romfs:/shaders/tfx_vsh_expand_line_aa1.dksh");
+
+	if (!m_tfx_expand_shaders_ok)
+		Console.Warning("DK3D: tfx expand shaders missing. Points, lines and sprites expand on the CPU.");
 
 	m_postprocess_shaders_ok = load_one(m_interlace_fsh, "romfs:/shaders/interlace_fsh.dksh") &&
 							   load_one(m_shadeboost_fsh, "romfs:/shaders/shadeboost_fsh.dksh") &&
@@ -925,6 +1014,11 @@ void GSDeviceDK::DestroyDeviceObjects()
 	m_staging_memblock = nullptr;
 
 	m_descriptor_memblock = nullptr;
+	if (m_expand_index_memblock)
+	{
+		dkMemBlockDestroy(m_expand_index_memblock);
+		m_expand_index_memblock = nullptr;
+	}
 	if (m_sampler_memblock)
 	{
 		dkMemBlockDestroy(m_sampler_memblock);
@@ -1068,6 +1162,7 @@ GSDevice::PresentResult GSDeviceDK::DoBeginPresent(bool frame_skip)
 
 	// Clear letterbox/unwritten areas before PresentRect draws.
 	dkCmdBufBindRenderTarget(m_cmdbuf, &m_swapchain_view, nullptr);
+	m_hw_targets_valid = false;
 	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(m_present_width), static_cast<float>(m_present_height),
 		0.0f, 1.0f};
 	const DkScissor scissor = {0, 0, static_cast<u32>(m_present_width), static_cast<u32>(m_present_height)};
@@ -1605,6 +1700,12 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 	const bool has_ds = (ds && ds->IsDepth());
 	if ((!rt && !has_ds) || (rt && rt->IsDepth()) || config.nindices == 0 || !config.verts || !config.indices)
 		return;
+	if (static_cast<u32>(config.vs.expand) >= NUM_TFX_VS ||
+		(config.vs.expand != GSHWDrawConfig::VSExpand::None && !m_features.vs_expand))
+	{
+		pxFail("DK3D: unsupported vertex shader expansion");
+		return;
+	}
 
 	GSTextureDK* const tex = static_cast<GSTextureDK*>(config.tex);
 	GSTextureDK* const pal = static_cast<GSTextureDK*>(config.pal);
@@ -1637,17 +1738,26 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 			return; // allocation faild
 	}
 
-	DkImageView rt_view;
-	DkImageView ds_view;
-	if (rt)
-		rt->GetImageView(&rt_view);
-	if (has_ds)
-		ds->GetImageView(&ds_view);
-	dkCmdBufBindRenderTarget(m_cmdbuf, rt ? &rt_view : nullptr, has_ds ? &ds_view : nullptr);
-
 	const GSVector2i rtsize = rt ? rt->GetSize() : ds->GetSize();
-	const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(rtsize.x), static_cast<float>(rtsize.y), 0.0f, 1.0f};
-	dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+	const u64 rt_uid = rt ? rt->GetUID() : 0;
+	const u64 ds_uid = has_ds ? ds->GetUID() : 0;
+	if (!m_hw_targets_valid || m_hw_last_rt_uid != rt_uid || m_hw_last_ds_uid != ds_uid)
+	{
+		DkImageView rt_view;
+		DkImageView ds_view;
+		if (rt)
+			rt->GetImageView(&rt_view);
+		if (has_ds)
+			ds->GetImageView(&ds_view);
+		dkCmdBufBindRenderTarget(m_cmdbuf, rt ? &rt_view : nullptr, has_ds ? &ds_view : nullptr);
+
+		const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(rtsize.x), static_cast<float>(rtsize.y), 0.0f, 1.0f};
+		dkCmdBufSetViewports(m_cmdbuf, 0, &viewport, 1);
+
+		m_hw_last_rt_uid = rt_uid;
+		m_hw_last_ds_uid = ds_uid;
+		m_hw_targets_valid = true;
+	}
 
 	const GSVector4i scissor = config.scissor.rintersect(GSVector4i::loadh(rtsize));
 	const DkScissor dk_scissor = {static_cast<u32>(std::max(0, scissor.x)), static_cast<u32>(std::max(0, scissor.y)),
@@ -1664,23 +1774,13 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 			dkCmdBufClearDepthStencil(m_cmdbuf, false, 0.0f, 0xFF, 1);
 	}
 
-	static const DkVtxAttribState tfx_attribs[7] = {
-		{0, 0, 0, DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
-		{0, 0, 8, DkVtxAttribSize_4x8, DkVtxAttribType_Uint, 0},
-		{0, 0, 12, DkVtxAttribSize_1x32, DkVtxAttribType_Float, 0},
-		{0, 0, 16, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
-		{0, 0, 20, DkVtxAttribSize_1x32, DkVtxAttribType_Uint, 0},
-		{0, 0, 24, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
-		{0, 0, 28, DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
-	};
-	static const DkVtxBufferState tfx_buffer_state = {sizeof(GSVertex), 0};
-
 	// Route to the cheapest specialised fragment shader this draw can use.
 	const u32 tfx_variant = SelectTfxVariant(config);
+	const GSHWDrawConfig::VSExpand vs_expand = config.vs.expand;
 	ReserveImageDescriptors(4);
 
-	// A variant switch needs the shaders re-bound
-	const bool force_state = !m_hw_invariants_bound || m_hw_tfx_variant != tfx_variant;
+	const bool force_state =
+		!m_hw_invariants_bound || m_hw_tfx_variant != tfx_variant || m_hw_vs_expand != vs_expand;
 	if (force_state)
 	{
 		DkRasterizerState rasterizer_state;
@@ -1688,17 +1788,17 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 		rasterizer_state.cullMode = DkFace_None;
 		dkCmdBufBindRasterizerState(m_cmdbuf, &rasterizer_state);
 
-		const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh[tfx_variant]};
+		const DkShader* shaders[] = {&m_tfx_vsh[static_cast<u32>(vs_expand)], &m_tfx_fsh[tfx_variant]};
 		dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
 		dkCmdBufBindImageDescriptorSet(m_cmdbuf, m_image_descriptor_set, NUM_IMAGE_DESCRIPTORS);
 		dkCmdBufBindSamplerDescriptorSet(m_cmdbuf, m_sampler_descriptor_set, NUM_SAMPLERS);
 
-		dkCmdBufBindVtxAttribState(m_cmdbuf, tfx_attribs, 7);
-		dkCmdBufBindVtxBufferState(m_cmdbuf, &tfx_buffer_state, 1);
+		BindTfxVertexInput(m_cmdbuf, vs_expand);
 
 		m_hw_invariants_bound = true;
 		m_hw_tfx_variant = tfx_variant;
+		m_hw_vs_expand = vs_expand;
 	}
 
 	// Per-draw state is only re-bound when it differs from the previous draw.
@@ -1848,21 +1948,8 @@ void GSDeviceDK::DoRenderHW(GSHWDrawConfig& config)
 		m_hw_uniforms_valid = true;
 	}
 
-	const u32 vtx_size = config.nverts * sizeof(GSVertex);
-	const u32 idx_size = config.nindices * sizeof(u16);
-	const DkGpuAddr vtx_addr = StreamVertices(config.verts, vtx_size);
-	const DkGpuAddr idx_addr = StreamIndices(config.indices, idx_size);
-
-	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
-	dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
-
-	DkPrimitive primitive = DkPrimitive_Triangles;
-	switch (config.topology)
-	{
-		case GSHWDrawConfig::Topology::Point: primitive = DkPrimitive_Points; break;
-		case GSHWDrawConfig::Topology::Line: primitive = DkPrimitive_Lines; break;
-		case GSHWDrawConfig::Topology::Triangle: primitive = DkPrimitive_Triangles; break;
-	}
+	BindHWGeometry(config);
+	const DkPrimitive primitive = GetTfxPrimitive(config.topology);
 
 	SendHWDraw(config, primitive, config.require_one_barrier, config.require_full_barrier);
 
@@ -2112,7 +2199,7 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	dkCmdBufBindDepthStencilState(m_cmdbuf, &depth_state);
 
 	// The PrimID prepass needs the ubershader sadly
-	const DkShader* shaders[] = {&m_tfx_vsh, &m_tfx_fsh[TfxVariantUber]};
+	const DkShader* shaders[] = {&m_tfx_vsh[static_cast<u32>(config.vs.expand)], &m_tfx_fsh[TfxVariantUber]};
 	dkCmdBufBindShaders(m_cmdbuf, DkStageFlag_GraphicsMask, shaders, 2);
 
 	ReserveImageDescriptors(2);
@@ -2143,34 +2230,9 @@ GSTextureDK* GSDeviceDK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Vertex, 0, sel_addr, AlignUp(sizeof(pre_sel), DK_UNIFORM_BUF_ALIGNMENT));
 	dkCmdBufBindUniformBuffer(m_cmdbuf, DkStage_Fragment, 0, sel_addr, AlignUp(sizeof(pre_sel), DK_UNIFORM_BUF_ALIGNMENT));
 
-	const u32 vtx_size = config.nverts * sizeof(GSVertex);
-	const u32 idx_size = config.nindices * sizeof(u16);
-	const DkGpuAddr vtx_addr = StreamVertices(config.verts, vtx_size);
-	const DkGpuAddr idx_addr = StreamIndices(config.indices, idx_size);
-	dkCmdBufBindVtxBuffer(m_cmdbuf, 0, vtx_addr, vtx_size);
-	dkCmdBufBindIdxBuffer(m_cmdbuf, DkIdxFormat_Uint16, idx_addr);
-
-	static const DkVtxAttribState tfx_attribs[7] = {
-		{0, 0, 0, DkVtxAttribSize_2x32, DkVtxAttribType_Float, 0},
-		{0, 0, 8, DkVtxAttribSize_4x8, DkVtxAttribType_Uint, 0},
-		{0, 0, 12, DkVtxAttribSize_1x32, DkVtxAttribType_Float, 0},
-		{0, 0, 16, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
-		{0, 0, 20, DkVtxAttribSize_1x32, DkVtxAttribType_Uint, 0},
-		{0, 0, 24, DkVtxAttribSize_2x16, DkVtxAttribType_Uint, 0},
-		{0, 0, 28, DkVtxAttribSize_4x8, DkVtxAttribType_Unorm, 0},
-	};
-	static const DkVtxBufferState tfx_buffer_state = {sizeof(GSVertex), 0};
-	dkCmdBufBindVtxAttribState(m_cmdbuf, tfx_attribs, 7);
-	dkCmdBufBindVtxBufferState(m_cmdbuf, &tfx_buffer_state, 1);
-
-	DkPrimitive primitive = DkPrimitive_Triangles;
-	switch (config.topology)
-	{
-		case GSHWDrawConfig::Topology::Point: primitive = DkPrimitive_Points; break;
-		case GSHWDrawConfig::Topology::Line: primitive = DkPrimitive_Lines; break;
-		case GSHWDrawConfig::Topology::Triangle: primitive = DkPrimitive_Triangles; break;
-	}
-	dkCmdBufDrawIndexed(m_cmdbuf, primitive, config.nindices, 1, 0, 0, 0);
+	BindHWGeometry(config);
+	BindTfxVertexInput(m_cmdbuf, config.vs.expand);
+	dkCmdBufDrawIndexed(m_cmdbuf, GetTfxPrimitive(config.topology), config.nindices, 1, 0, 0, 0);
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
 
 	// Order the prepass writes before the main draw samples the image.
@@ -2286,6 +2348,7 @@ void GSDeviceDK::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		DkImageView dst_view;
 		dst->GetImageView(&dst_view);
 		dkCmdBufBindRenderTarget(m_cmdbuf, &dst_view, nullptr);
+		m_hw_targets_valid = false;
 		const DkViewport viewport = {0.0f, 0.0f, static_cast<float>(dst->GetWidth()),
 			static_cast<float>(dst->GetHeight()), 0.0f, 1.0f};
 		const DkScissor scissor = {0, 0, static_cast<u32>(dst->GetWidth()), static_cast<u32>(dst->GetHeight())};
