@@ -59,11 +59,7 @@ if(USE_VULKAN OR USE_OPENGL)
 	target_link_libraries(armsx2 PRIVATE ${NXVK_LDFLAGS})
 endif()
 
-# uam live shader compilation
-find_program(UAM_EXE NAMES uam PATHS "$ENV{DEVKITPRO}/tools/bin" "${DEVKITPRO}/tools/bin" "/opt/devkitpro/tools/bin")
-if(NOT UAM_EXE)
-	message(FATAL_ERROR "uam not found.")
-endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/Uam.cmake")
 
 set(DK3D_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/pcsx2/GS/Renderers/DK3D/shaders")
 set(DK3D_ROMFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/romfs")
@@ -77,36 +73,40 @@ function(dk3d_add_shader NAME STAGE)
 	add_custom_command(
 		OUTPUT "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh"
 		COMMAND "${UAM_EXE}" -s ${STAGE} -o "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh" "${DK3D_SHADER_SRC_DIR}/${NAME}.glsl"
-		DEPENDS "${DK3D_SHADER_SRC_DIR}/${NAME}.glsl"
+		DEPENDS "${DK3D_SHADER_SRC_DIR}/${NAME}.glsl" ${UAM_DEPENDS}
 		COMMENT "uam ${STAGE}: ${NAME}.glsl -> ${NAME}.dksh"
 		VERBATIM
 	)
 	set(DK3D_DKSH_FILES ${DK3D_DKSH_FILES} "${DK3D_ROMFS_SHADER_DIR}/${NAME}.dksh" PARENT_SCOPE)
 endfunction()
 
-# Generate specialised tfx fragment shaders for cheaper draws over the ubershader.
-function(dk3d_add_tfx_variant OUT_NAME DEFINE)
+function(dk3d_add_shader_variant SRC_NAME STAGE OUT_NAME DEFINE)
 	set(GEN "${CMAKE_CURRENT_BINARY_DIR}/${OUT_NAME}.gen.glsl")
 	add_custom_command(
 		OUTPUT "${GEN}"
 		COMMAND "${CMAKE_COMMAND}"
-			-DIN=${DK3D_SHADER_SRC_DIR}/tfx_fsh.glsl
+			-DIN=${DK3D_SHADER_SRC_DIR}/${SRC_NAME}.glsl
 			-DDEF=${DEFINE}
 			-DOUT=${GEN}
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepend_define.cmake"
-		DEPENDS "${DK3D_SHADER_SRC_DIR}/tfx_fsh.glsl"
+		DEPENDS "${DK3D_SHADER_SRC_DIR}/${SRC_NAME}.glsl"
 			"${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepend_define.cmake"
-		COMMENT "gen tfx variant ${OUT_NAME} (${DEFINE})"
+		COMMENT "gen ${SRC_NAME} variant ${OUT_NAME} (${DEFINE})"
 		VERBATIM
 	)
 	add_custom_command(
 		OUTPUT "${DK3D_ROMFS_SHADER_DIR}/${OUT_NAME}.dksh"
-		COMMAND "${UAM_EXE}" -s frag -o "${DK3D_ROMFS_SHADER_DIR}/${OUT_NAME}.dksh" "${GEN}"
-		DEPENDS "${GEN}"
-		COMMENT "uam frag: ${OUT_NAME}.dksh"
+		COMMAND "${UAM_EXE}" -s ${STAGE} -o "${DK3D_ROMFS_SHADER_DIR}/${OUT_NAME}.dksh" "${GEN}"
+		DEPENDS "${GEN}" ${UAM_DEPENDS}
+		COMMENT "uam ${STAGE}: ${OUT_NAME}.dksh"
 		VERBATIM
 	)
 	set(DK3D_DKSH_FILES ${DK3D_DKSH_FILES} "${DK3D_ROMFS_SHADER_DIR}/${OUT_NAME}.dksh" PARENT_SCOPE)
+endfunction()
+
+function(dk3d_add_tfx_variant OUT_NAME DEFINE)
+	dk3d_add_shader_variant(tfx_fsh frag ${OUT_NAME} ${DEFINE})
+	set(DK3D_DKSH_FILES ${DK3D_DKSH_FILES} PARENT_SCOPE)
 endfunction()
 
 dk3d_add_shader(convert_vsh vert)
@@ -126,6 +126,10 @@ dk3d_add_tfx_variant(tfx_fsh_fast TFX_VARIANT_FAST)
 dk3d_add_tfx_variant(tfx_fsh_feedback TFX_VARIANT_FEEDBACK)
 dk3d_add_tfx_variant(tfx_fsh_feedback_palette TFX_VARIANT_FEEDBACK_PALETTE)
 dk3d_add_tfx_variant(tfx_fsh_feedback_fast TFX_VARIANT_FEEDBACK_FAST)
+dk3d_add_shader_variant(tfx_vsh vert tfx_vsh_expand_point TFX_VS_EXPAND_POINT)
+dk3d_add_shader_variant(tfx_vsh vert tfx_vsh_expand_line TFX_VS_EXPAND_LINE)
+dk3d_add_shader_variant(tfx_vsh vert tfx_vsh_expand_line_aa1 TFX_VS_EXPAND_LINE_AA1)
+dk3d_add_shader_variant(tfx_vsh vert tfx_vsh_expand_sprite TFX_VS_EXPAND_SPRITE)
 dk3d_add_shader(interlace_fsh frag)
 dk3d_add_shader(shadeboost_fsh frag)
 dk3d_add_shader(fxaa_fsh frag)
@@ -153,7 +157,7 @@ add_custom_command(
 add_custom_command(
 	OUTPUT "${DK3D_ROMFS_SHADER_DIR}/cas_csh.dksh"
 	COMMAND "${UAM_EXE}" -s comp -o "${DK3D_ROMFS_SHADER_DIR}/cas_csh.dksh" "${DK3D_CAS_GEN}"
-	DEPENDS "${DK3D_CAS_GEN}"
+	DEPENDS "${DK3D_CAS_GEN}" ${UAM_DEPENDS}
 	COMMENT "uam comp cas_csh.dksh"
 	VERBATIM
 )
