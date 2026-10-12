@@ -103,6 +103,7 @@ static void maskedVecWrite(const a64::VRegister& reg, const a64::MemOperand& add
 void dVifReset(int idx)
 {
 	nVif[idx].vifBlocks.reset();
+	std::memset(nVif[idx].recentBlocks, 0, sizeof(nVif[idx].recentBlocks));
 
 	const size_t offset = idx ? HostMemoryMap::VIF1recOffset : HostMemoryMap::VIF0recOffset;
 	const size_t size = idx ? HostMemoryMap::VIF1recSize : HostMemoryMap::VIF0recSize;
@@ -113,6 +114,7 @@ void dVifReset(int idx)
 void dVifRelease(int idx)
 {
 	nVif[idx].vifBlocks.clear();
+	std::memset(nVif[idx].recentBlocks, 0, sizeof(nVif[idx].recentBlocks));
 }
 
 VifUnpackNEON_Dynarec::VifUnpackNEON_Dynarec(const nVifStruct& vif_, const nVifBlock& vifBlock_)
@@ -539,10 +541,16 @@ _vifT __fi void dVifUnpack(const u8* data, bool isFill)
 	//);
 
 	// Seach in cache before trying to compile the block
-	nVifBlock* b = v.vifBlocks.find(block);
-	if (!b) [[unlikely]]
+	nVifStruct::RecentBlock& recent =
+		v.recentBlocks[(hash_key ^ (hash_key >> 8)) & (nVifStruct::NUM_RECENT_BLOCKS - 1)];
+	if (!recent.startPtr || recent.hash_key != hash_key || recent.key0 != key0 || recent.key1 != key1)
 	{
-		b = dVifCompile<idx>(block, isFill);
+		nVifBlock* b = v.vifBlocks.find(block);
+		if (!b) [[unlikely]]
+		{
+			b = dVifCompile<idx>(block, isFill);
+		}
+		recent = {hash_key, key0, key1, b->length, b->startPtr};
 	}
 
 	{ // Execute the block
@@ -552,26 +560,26 @@ _vifT __fi void dVifUnpack(const u8* data, bool isFill)
 		u8* startmem = VU.Mem + (vif.tag.addr & (vuMemLimit - 0x10));
 		u8* endmem = VU.Mem + vuMemLimit;
 
-		if ((startmem + b->length) <= endmem) [[likely]]
+		if ((startmem + recent.length) <= endmem) [[likely]]
 		{
 #if 1
 			// No wrapping, you can run the fast dynarec
-			((nVifrecCall)b->startPtr)((uptr)startmem, (uptr)data);
+			((nVifrecCall)recent.startPtr)((uptr)startmem, (uptr)data);
 #else
 			// comparison mode
 			static u8 tmpbuf[512 * 1024];
-			((nVifrecCall)b->startPtr)((uptr)tmpbuf, (uptr)data);
+			((nVifrecCall)recent.startPtr)((uptr)tmpbuf, (uptr)data);
 
 			_nVifUnpack(idx, data, vifRegs.mode, isFill);
 
-			const u32 words = b->length / 4;
+			const u32 words = recent.length / 4;
 			for (u32 i = 0; i < words; i++)
 			{
 				if (*((u32*)tmpbuf + i) != *((u32*)startmem + i))
 				{
 					// fprintf(stderr, "%08X %08X @ %u\n", *((u32*)tmpbuf + i), *((u32*)startmem + i), i);
 					pauseCCC(*((u32*)tmpbuf + i), *((u32*)startmem + i), i);
-					((nVifrecCall)b->startPtr)((uptr)tmpbuf, (uptr)data);
+					((nVifrecCall)recent.startPtr)((uptr)tmpbuf, (uptr)data);
 					break;
 				}
 			}

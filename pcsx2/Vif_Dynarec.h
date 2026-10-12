@@ -34,6 +34,16 @@ struct nVifStruct
 
 	HashBucket              vifBlocks;   // Vif Blocks
 
+	struct RecentBlock
+	{
+		u32 hash_key;
+		u32 key0;
+		u32 key1;
+		u32 length;
+		uptr startPtr; // 0 when empty
+	};
+	static constexpr u32 NUM_RECENT_BLOCKS = 8;
+	RecentBlock             recentBlocks[NUM_RECENT_BLOCKS];
 
 	nVifStruct() = default;
 };
