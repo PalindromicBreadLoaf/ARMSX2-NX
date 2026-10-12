@@ -8,6 +8,8 @@
 
 #include "common/Pcsx2Types.h"
 
+#include <atomic>
+
 // Statistical sampling profiler for Switch.
 namespace HorizonProfiler
 {
@@ -22,6 +24,13 @@ namespace HorizonProfiler
 	void Shutdown();
 
 	void PublishTextureCacheCounts(u32 sources, u32 render_targets, u32 depth_targets, u32 source_pages);
+
+	inline std::atomic<u64> s_gs_draws{0};
+
+	inline void CountGSDraw()
+	{
+		s_gs_draws.store(s_gs_draws.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+	}
 } // namespace HorizonProfiler
 
 #endif

@@ -19,6 +19,10 @@
 #include "common/StringUtil.h"
 #ifdef __SWITCH__
 #include "MTGS.h"
+
+#ifdef __SWITCH__
+#include "Horizon/HorizonProfiler.h"
+#endif
 #endif
 
 #include <algorithm>
@@ -4341,6 +4345,9 @@ void GSState::DrawRecordTail(u64 draw_serial)
 		Draw();
 
 	g_perfmon.Put(GSPerfMon::Draw, 1);
+#ifdef __SWITCH__
+	HorizonProfiler::CountGSDraw();
+#endif
 	g_perfmon.Put(GSPerfMon::Prim, m_index->tail / GSUtil::GetVertexCount(PRIM->PRIM));
 
 	if (GSConfig.ShouldDump(draw_serial, g_perfmon.GetFrame()))

@@ -144,6 +144,7 @@ namespace
 		u32 tc_render_targets = 0;
 		u32 tc_depth_targets = 0;
 		u32 tc_source_pages = 0;
+		u64 gs_draws = 0;
 		std::array<u64, MAX_THREADS> thread_ticks{};
 	};
 
@@ -413,6 +414,7 @@ namespace
 		bucket.tc_render_targets = s_tc_render_targets.load(std::memory_order_relaxed);
 		bucket.tc_depth_targets = s_tc_depth_targets.load(std::memory_order_relaxed);
 		bucket.tc_source_pages = s_tc_source_pages.load(std::memory_order_relaxed);
+		bucket.gs_draws = HorizonProfiler::s_gs_draws.load(std::memory_order_relaxed);
 
 		for (std::size_t i = 0; i < MAX_THREADS; ++i)
 		{
@@ -652,12 +654,13 @@ namespace
 		out += fmt::format("\nTimeline, {} ms per row. speed is emulated EE time over wall time, vps is emulated "
 						   "vsyncs per second, fps and gpu are the OSD's own running values, src/rt/ds are the "
 						   "texture cache's source, render-target and depth-target counts and pg the GS pages "
-						   "holding at least one source (of 512), the rest are each thread's share of a core:\n",
+						   "holding at least one source (of 512), dps the GS draws executed per second, the rest "
+						   "are each thread's share of a core:\n",
 			BUCKET_NS / 1'000'000);
 		for (std::size_t column = 0; column < order.size(); ++column)
 			out += fmt::format("  T{} = {}\n", column, s_capture.threads[order[column]].info.name.data());
 
-		out += "       t  speed    vps    fps    gpu   src   rt   ds   pg";
+		out += "       t  speed    vps    fps    gpu   src   rt   ds   pg    dps";
 		for (std::size_t column = 0; column < order.size(); ++column)
 			out += fmt::format("  {:>5}", fmt::format("T{}", column));
 		out += "\n";
@@ -678,6 +681,7 @@ namespace
 				static_cast<u32>(bucket.vsyncs - previous.vsyncs) / wall, bucket.fps, bucket.gpu_usage);
 			out += fmt::format("  {:4}  {:3}  {:3}  {:3}", bucket.tc_sources, bucket.tc_render_targets,
 				bucket.tc_depth_targets, bucket.tc_source_pages);
+			out += fmt::format("  {:5.0f}", (bucket.gs_draws - previous.gs_draws) / wall);
 			for (const std::size_t i : order)
 			{
 				const u64 before = previous.thread_ticks[i];
