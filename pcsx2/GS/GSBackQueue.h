@@ -561,7 +561,11 @@ namespace GSBackQueue
 		// growth up to the cap, then backpressure), the consumer releases after
 		// the draw executes. Free-ring capacity == arena cap, so Release can
 		// never fail.
+#ifdef __SWITCH__
+		static constexpr u32 kMaxDrawNodes = 128;
+#else
 		static constexpr u32 kMaxDrawNodes = 64;
+#endif
 		std::vector<DrawNode*> draw_arena;
 		SpscRing<DrawNode*, kMaxDrawNodes> draw_free;
 
